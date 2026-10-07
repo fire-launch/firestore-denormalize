@@ -1,4 +1,5 @@
-import { type ResolvedConfig } from '../config.js'
+import { needsCollectionGroupQuery, type ResolvedConfig } from '../config.js'
+import { eventarcPathPattern } from '../paths.js'
 import { CommandError, type Runner } from './exec.js'
 import {
   desiredTriggers,
@@ -30,14 +31,34 @@ export function printSummary(ctx: Context): void {
   log(`Service:         ${config.service} (${config.serviceRegion})`)
   log(`Service account: ${serviceAccountEmail(config, ctx.project)}`)
   log()
-  log(`Connections (${config.connections.length}):`)
-  for (const c of config.connections) {
-    log(`  ${c.name}: ${c.source}.{${c.fields.join(',')}} -> ${c.target}.${c.targetField} (by ${c.idField}, onDelete=${c.onSourceDelete})`)
+  if (config.connections.length) {
+    log(`Connections (${config.connections.length}):`)
+    for (const c of config.connections) {
+      log(`  ${c.name}: ${c.source}.{${c.fields.join(',')}} -> ${c.target}.${c.targetField} (by ${c.idField}, onDelete=${c.onSourceDelete})`)
+    }
+    log()
   }
-  log()
+  if (config.aggregates.length) {
+    log(`Aggregates (${config.aggregates.length}):`)
+    for (const a of config.aggregates) {
+      const agg = a.aggregate === 'count' ? 'count()' : `sum(${a.aggregate.sum})`
+      const by = a.idField ? `by ${a.idField}` : `by {${a.idParam}}`
+      log(`  ${a.name}: ${agg} of ${a.source} -> ${a.target}.${a.targetField} (${by})`)
+    }
+    log()
+  }
+  const groupRules = [...config.connections, ...config.aggregates].filter(needsCollectionGroupQuery)
+  if (groupRules.length) {
+    log('Collection-group queries (need a collection-group index on the field, Firestore prints the link on first use):')
+    for (const r of groupRules) {
+      const field = r.kind === 'connection' ? `${r.target}.${r.idField}` : `${r.source}.${r.idField}`
+      log(`  ${r.name}: ${field}`)
+    }
+    log()
+  }
   const triggers = desiredTriggers(config)
   log(`Triggers (${triggers.length}, one per collection):`)
-  for (const t of triggers) log(`  ${t.name}  <-  ${t.collection}/{docId}`)
+  for (const t of triggers) log(`  ${t.name}  <-  ${eventarcPathPattern(t.collection)}`)
 }
 
 export function validate(ctx: Context): void {

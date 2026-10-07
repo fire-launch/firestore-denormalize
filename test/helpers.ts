@@ -1,16 +1,6 @@
 import { initializeApp, getApps } from 'firebase-admin/app'
-import {
-  type DocumentReference,
-  type DocumentSnapshot,
-  DocumentReference as DocRef,
-  type Firestore,
-  GeoPoint,
-  getFirestore,
-  Timestamp,
-} from 'firebase-admin/firestore'
-import protobuf from 'protobufjs'
-import descriptor from '../src/proto/firestore-events.json' with { type: 'json' }
-import type { DocSyncHandler, DocSyncRequest, DocSyncResponse } from '../src/index.js'
+import { type DocumentReference, type DocumentSnapshot, type Firestore, getFirestore } from 'firebase-admin/firestore'
+import { encodeDocumentEventData, type DocSyncHandler, type DocSyncRequest, type DocSyncResponse } from '../src/index.js'
 
 export const PROJECT = 'demo-doc-sync'
 
@@ -31,48 +21,13 @@ export async function clearFirestore(): Promise<void> {
   if (!res.ok) throw new Error(`failed to clear emulator: ${res.status}`)
 }
 
-const root = protobuf.Root.fromJSON(descriptor as protobuf.INamespace)
-const DocumentEventData = root.lookupType('google.events.cloud.firestore.v1.DocumentEventData')
-
 export function resourceName(path: string): string {
   return `projects/${PROJECT}/databases/(default)/documents/${path}`
 }
 
-function toProtoValue(v: unknown): Record<string, unknown> {
-  if (v === null || v === undefined) return { nullValue: 0 }
-  if (typeof v === 'boolean') return { booleanValue: v }
-  if (typeof v === 'number') return Number.isInteger(v) ? { integerValue: v } : { doubleValue: v }
-  if (typeof v === 'string') return { stringValue: v }
-  if (v instanceof Timestamp) return { timestampValue: { seconds: v.seconds, nanos: v.nanoseconds } }
-  if (v instanceof GeoPoint) return { geoPointValue: { latitude: v.latitude, longitude: v.longitude } }
-  if (v instanceof DocRef) return { referenceValue: resourceName(v.path) }
-  if (v instanceof Uint8Array) return { bytesValue: v }
-  if (Array.isArray(v)) return { arrayValue: { values: v.map(toProtoValue) } }
-  if (typeof v === 'object') return { mapValue: { fields: toProtoFields(v as Record<string, unknown>) } }
-  throw new Error(`unsupported value: ${String(v)}`)
-}
-
-function toProtoFields(data: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(data).map(([k, v]) => [k, toProtoValue(v)]))
-}
-
-function toProtoDocument(snap: DocumentSnapshot | undefined): Record<string, unknown> | undefined {
-  if (!snap || !snap.exists) return undefined
-  const ts = (t: Timestamp | undefined) => (t ? { seconds: t.seconds, nanos: t.nanoseconds } : undefined)
-  return {
-    name: resourceName(snap.ref.path),
-    fields: toProtoFields(snap.data() ?? {}),
-    createTime: ts(snap.createTime),
-    updateTime: ts(snap.updateTime),
-  }
-}
-
 /** Encodes a DocumentEventData protobuf from two snapshots (either may be missing / non-existent). */
 export function encodeEvent(before: DocumentSnapshot | undefined, after: DocumentSnapshot | undefined): Buffer {
-  const payload = { oldValue: toProtoDocument(before), value: toProtoDocument(after) }
-  const err = DocumentEventData.verify(payload)
-  if (err) throw new Error(err)
-  return Buffer.from(DocumentEventData.encode(DocumentEventData.create(payload)).finish())
+  return encodeDocumentEventData(before, after, { project: PROJECT })
 }
 
 export interface InvokeOptions {

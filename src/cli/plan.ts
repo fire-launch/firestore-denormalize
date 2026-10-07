@@ -2,6 +2,7 @@
  * Pure functions that turn a config into gcloud invocations. Kept free of I/O so they can be unit tested.
  */
 import { collectionsOf, triggerName, type ResolvedConfig } from '../config.js'
+import { type CollectionPattern, eventarcPathPattern, normalizePathPattern } from '../paths.js'
 
 export const INSTANCE_LABEL = 'doc-sync-instance'
 export const EVENT_TYPE = 'google.cloud.firestore.document.v1.written'
@@ -14,7 +15,7 @@ export function serviceAccountEmail(config: Pick<ResolvedConfig, 'serviceAccount
 
 export interface TriggerSpec {
   name: string
-  collection: string
+  collection: CollectionPattern
 }
 
 export function desiredTriggers(config: ResolvedConfig): TriggerSpec[] {
@@ -76,14 +77,14 @@ export function triggerDifferences(
 ): string[] {
   const diffs: string[] = []
   const filter = (attr: string) => current.eventFilters?.find((f) => f.attribute === attr)
-  const check = (label: string, actual: string | undefined, wanted: string) => {
-    if (actual !== undefined && actual !== wanted) diffs.push(`${label}: ${actual} -> ${wanted}`)
+  const check = (label: string, actual: string | undefined, wanted: string, norm = (x: string) => x) => {
+    if (actual !== undefined && norm(actual) !== norm(wanted)) diffs.push(`${label}: ${actual} -> ${wanted}`)
   }
   check('service', current.destination?.cloudRun?.service, config.service)
   check('service region', current.destination?.cloudRun?.region, config.serviceRegion)
   check('event type', filter('type')?.value, EVENT_TYPE)
   check('database', filter('database')?.value, config.database)
-  check('document', filter('document')?.value, `${trigger.collection}/{docId}`)
+  check('document', filter('document')?.value, eventarcPathPattern(trigger.collection), normalizePathPattern)
   check('service account', current.serviceAccount, serviceAccountEmail(config, project))
   check('content type', current.eventDataContentType, 'application/protobuf')
   return diffs
@@ -106,7 +107,7 @@ function triggerSettingsArgs(config: ResolvedConfig, project: string, trigger: T
     `--destination-run-region=${config.serviceRegion}`,
     `--event-filters=type=${EVENT_TYPE}`,
     `--event-filters=database=${config.database}`,
-    `--event-filters-path-pattern=document=${trigger.collection}/{docId}`,
+    `--event-filters-path-pattern=document=${eventarcPathPattern(trigger.collection)}`,
     '--event-data-content-type=application/protobuf',
     `--service-account=${serviceAccountEmail(config, project)}`,
   ]

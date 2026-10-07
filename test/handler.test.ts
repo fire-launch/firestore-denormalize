@@ -48,7 +48,7 @@ function handlerFor(cfg: DocSyncConfig = config, opts: Parameters<typeof createD
 }
 
 const processed = (logs: ReturnType<typeof silentLogger>['entries'], connection: string) =>
-  logs.find((l) => l.message === 'doc-sync: processed' && l.fields?.connection === connection)?.fields
+  logs.findLast((l) => l.message === 'doc-sync: processed' && l.fields?.rule === connection)?.fields
 
 beforeAll(() => {
   db = firestore()
@@ -310,16 +310,13 @@ describe('precondition failures (5.4)', () => {
           return typeof v === 'function' ? v.bind(t) : v
         },
       })
+    const hookedRef = (ref: ReturnType<Firestore['doc']>) => bindAll(ref, { get: async () => (await maybeHook(), ref.get()) })
     return bindAll(db, {
+      doc: (path: string) => (path.startsWith('category/') ? hookedRef(db.doc(path)) : db.doc(path)),
       collection: (name: string) => {
         const coll = db.collection(name)
         if (name !== 'category') return coll
-        return bindAll(coll, {
-          doc: (id: string) => {
-            const ref = coll.doc(id)
-            return bindAll(ref, { get: async () => (await maybeHook(), ref.get()) })
-          },
-        })
+        return bindAll(coll, { doc: (id: string) => hookedRef(coll.doc(id)) })
       },
     }) as Firestore
   }
@@ -506,5 +503,174 @@ describe('request handling (5.1 / 6)', () => {
     let status = 0
     await handler({ headers: {} }, { status: (c: number) => ({ send: () => (status = c) }) })
     expect(status).toBe(204)
+  })
+})
+
+describe('subcollections and dotted fields', () => {
+  const nested = defineConfig({
+    ...config,
+    connections: [
+      {
+        name: 'user-post-category',
+        source: 'users/{uid}/categories',
+        target: 'users/{uid}/posts',
+        idField: 'categoryId',
+        fields: ['name'],
+        targetField: 'category',
+        onSourceDelete: 'setNull',
+      },
+      {
+        name: 'post-global-tag',
+        source: 'tag',
+        target: 'users/{uid}/posts',
+        idField: 'tagId',
+        fields: ['label'],
+        targetField: 'tag',
+        onSourceDelete: 'deleteField',
+      },
+      {
+        name: 'profile-city',
+        source: 'city',
+        target: 'profile',
+        idField: 'meta.cityId',
+        fields: ['address.city', 'name'],
+        targetField: 'meta.city',
+        onSourceDelete: 'setNull',
+      },
+    ],
+  })
+
+  it('syncs within the same parent only when the target shares the placeholder', async () => {
+    await db.doc('users/u1/categories/c1').set({ name: 'A' })
+    await db.doc('users/u2/categories/c1').set({ name: 'Other user, same id' })
+    await db.doc('users/u1/posts/p1').set({ categoryId: 'c1' })
+    await db.doc('users/u2/posts/p1').set({ categoryId: 'c1' })
+    const { handler, logs } = handlerFor(nested)
+
+    const cat = db.doc('users/u1/categories/c1')
+    const ev = await change(cat, () => cat.update({ name: 'B' }))
+    expect(await invoke(handler, ev)).toBe(204)
+    expect((await db.doc('users/u1/posts/p1').get()).get('category')).toEqual({ name: 'B' })
+    expect((await db.doc('users/u2/posts/p1').get()).get('category')).toBeUndefined()
+    expect(processed(logs, 'user-post-category')).toMatchObject({ writes: 1, targets: 1 })
+  })
+
+  it('uses a collection-group query when the target has extra placeholders', async () => {
+    await db.doc('tag/t1').set({ label: 'L' })
+    await db.doc('users/u1/posts/p1').set({ tagId: 't1' })
+    await db.doc('users/u2/posts/p2').set({ tagId: 't1' })
+    await db.doc('shops/s1/posts/p3').set({ tagId: 't1' }) // different parent collection, must be ignored
+    const { handler, logs } = handlerFor(nested)
+
+    const tag = db.doc('tag/t1')
+    const ev = await change(tag, () => tag.update({ label: 'M' }))
+    expect(await invoke(handler, ev)).toBe(204)
+    expect((await db.doc('users/u1/posts/p1').get()).get('tag')).toEqual({ label: 'M' })
+    expect((await db.doc('users/u2/posts/p2').get()).get('tag')).toEqual({ label: 'M' })
+    expect((await db.doc('shops/s1/posts/p3').get()).get('tag')).toBeUndefined()
+    expect(processed(logs, 'post-global-tag')).toMatchObject({ writes: 2, targets: 2 })
+  })
+
+  it('locates the source of a nested target from its own path', async () => {
+    await db.doc('users/u1/categories/c1').set({ name: 'A' })
+    const post = db.doc('users/u1/posts/p1')
+    const { handler } = handlerFor(nested)
+    const ev = await change(post, () => post.set({ categoryId: 'c1' }))
+    expect(await invoke(handler, ev)).toBe(204)
+    expect((await post.get()).get('category')).toEqual({ name: 'A' })
+  })
+
+  it('copies nested fields into nested target fields', async () => {
+    const city = db.doc('city/tokyo')
+    await city.set({ name: 'Tokyo', address: { city: '東京', country: 'JP' } })
+    const profile = db.doc('profile/x')
+    const { handler, logs } = handlerFor(nested)
+
+    const created = await change(profile, () => profile.set({ meta: { cityId: 'tokyo', other: 1 } }))
+    expect(await invoke(handler, created)).toBe(204)
+    expect((await profile.get()).data()).toEqual({
+      meta: { cityId: 'tokyo', other: 1, city: { name: 'Tokyo', address: { city: '東京' } } },
+    })
+
+    const unrelated = await change(city, () => city.update({ 'address.country': 'Japan' }))
+    expect(await invoke(handler, unrelated)).toBe(204)
+    expect(processed(logs, 'profile-city')).toMatchObject({ action: 'skip', reason: 'fields unchanged' })
+
+    const renamed = await change(city, () => city.update({ 'address.city': 'Tōkyō' }))
+    expect(await invoke(handler, renamed)).toBe(204)
+    expect((await profile.get()).get('meta.city.address.city')).toBe('Tōkyō')
+  })
+})
+
+describe('aggregates (count / sum)', () => {
+  const agg = defineConfig({
+    ...config,
+    connections: [],
+    aggregates: [
+      { name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' },
+      { name: 'customer-total', source: 'order', target: 'customer', idField: 'customerId', aggregate: { sum: 'amount' }, targetField: 'total' },
+    ],
+  })
+
+  it('counts a subcollection via a path placeholder', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'x' })
+    const { handler, logs } = handlerFor(agg)
+
+    const l1 = db.doc('post/p1/like/u1')
+    expect(await invoke(handler, await change(l1, () => l1.set({ at: 1 })))).toBe(204)
+    expect((await post.get()).get('likeCount')).toBe(1)
+
+    const l2 = db.doc('post/p1/like/u2')
+    expect(await invoke(handler, await change(l2, () => l2.set({ at: 2 })))).toBe(204)
+    expect((await post.get()).get('likeCount')).toBe(2)
+
+    // an update that changes nothing we watch is skipped without a query
+    expect(await invoke(handler, await change(l2, () => l2.update({ at: 3 })))).toBe(204)
+    expect(processed(logs, 'post-likes')).toMatchObject({ action: 'skip', reason: 'watched fields unchanged' })
+
+    expect(await invoke(handler, await change(l1, () => l1.delete()))).toBe(204)
+    expect((await post.get()).get('likeCount')).toBe(1)
+
+    // duplicate delivery of the delete: nothing to do
+    expect(await invoke(handler, await change(l1, async () => {}))).toBe(204)
+    expect(processed(logs, 'post-likes')).toMatchObject({ action: 'skip' })
+  })
+
+  it('initialises the field when the target is created', async () => {
+    const post = db.doc('post/p2')
+    const { handler } = handlerFor(agg)
+    await db.doc('post/p2/like/u1').set({})
+    expect(await invoke(handler, await change(post, () => post.set({ title: 'y' })))).toBe(204)
+    expect((await post.get()).get('likeCount')).toBe(1)
+    const empty = db.doc('post/p3')
+    expect(await invoke(handler, await change(empty, () => empty.set({ title: 'z' })))).toBe(204)
+    expect((await empty.get()).get('likeCount')).toBe(0)
+  })
+
+  it('sums by idField and recomputes both customers when an order moves', async () => {
+    await db.doc('customer/a').set({})
+    await db.doc('customer/b').set({})
+    const { handler, logs } = handlerFor(agg)
+    const o1 = db.doc('order/o1')
+    const o2 = db.doc('order/o2')
+    expect(await invoke(handler, await change(o1, () => o1.set({ customerId: 'a', amount: 10 })))).toBe(204)
+    expect(await invoke(handler, await change(o2, () => o2.set({ customerId: 'a', amount: 5.5 })))).toBe(204)
+    expect((await db.doc('customer/a').get()).get('total')).toBe(15.5)
+
+    expect(await invoke(handler, await change(o2, () => o2.update({ amount: 4.5 })))).toBe(204)
+    expect((await db.doc('customer/a').get()).get('total')).toBe(14.5)
+
+    expect(await invoke(handler, await change(o2, () => o2.update({ customerId: 'b' })))).toBe(204)
+    expect((await db.doc('customer/a').get()).get('total')).toBe(10)
+    expect((await db.doc('customer/b').get()).get('total')).toBe(4.5)
+    expect(processed(logs, 'customer-total')).toMatchObject({ targets: 2, writes: 2 })
+  })
+
+  it('ignores sources pointing at a missing target', async () => {
+    const { handler, logs } = handlerFor(agg)
+    const o = db.doc('order/o9')
+    expect(await invoke(handler, await change(o, () => o.set({ customerId: 'ghost', amount: 1 })))).toBe(204)
+    expect(processed(logs, 'customer-total')).toMatchObject({ action: 'skip', targets: 1, writes: 0 })
   })
 })

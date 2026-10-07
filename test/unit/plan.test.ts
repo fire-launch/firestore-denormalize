@@ -9,6 +9,9 @@ import {
   triggerDifferences,
 } from '../../src/cli/plan.js'
 import { formatCommand } from '../../src/cli/exec.js'
+import { parseCollectionPattern } from '../../src/paths.js'
+
+const spec = (raw: string, name: string) => ({ name, collection: parseCollectionPattern(raw) })
 
 const config = validateConfig({
   name: 'doc-sync',
@@ -51,7 +54,7 @@ describe('plan', () => {
   })
 
   it('lists every drifted setting and ignores fields gcloud did not return', () => {
-    const t = { name: 'doc-sync-post', collection: 'post' }
+    const t = spec('post', 'doc-sync-post')
     expect(triggerDifferences(config, 'my-proj', t, { name: t.name })).toEqual([])
     expect(
       triggerDifferences(config, 'my-proj', t, {
@@ -67,8 +70,16 @@ describe('plan', () => {
     ])
   })
 
+  it('uses the subcollection path pattern and treats placeholder renames as unchanged', () => {
+    const t = spec('users/{uid}/payments', 'doc-sync-users-payments')
+    expect(triggerCreateArgs(config, 'p', t)).toContain('--event-filters-path-pattern=document=users/{uid}/payments/{docId}')
+    expect(
+      triggerDifferences(config, 'p', t, { name: t.name, eventFilters: [{ attribute: 'document', value: 'users/{userId}/payments/{id}' }] }),
+    ).toEqual([])
+  })
+
   it('builds the create command from the spec', () => {
-    const args = triggerCreateArgs(config, 'my-proj', { name: 'doc-sync-post', collection: 'post' })
+    const args = triggerCreateArgs(config, 'my-proj', spec('post', 'doc-sync-post'))
     expect(formatCommand('gcloud', args)).toBe(
       [
         'gcloud eventarc triggers create doc-sync-post',
