@@ -24,6 +24,8 @@ export {
   type DocSyncResponse,
   type RuleResult,
   type ConnectionResult,
+  type SyncOptions,
+  type DeletedSource,
 } from './handler.js'
 export { decodeDocumentEventData, DecodeError, type DecodedEvent, type DecodedDocument } from './decode.js'
 export { encodeDocumentEventData, type EncodableDocument } from './encode.js'
@@ -37,3 +39,5 @@ export {
   type CollectionPattern,
   type DocumentMatch,
 } from './paths.js'
+export { rebuild, type RebuildOptions, type RebuildProgress, type RebuildResult } from './rebuild.js'
+export { startDevBridge, type DevBridge, type DevBridgeOptions } from './dev.js'

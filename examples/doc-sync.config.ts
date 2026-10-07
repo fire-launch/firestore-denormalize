@@ -26,5 +26,36 @@ export default defineConfig({
       targetField: 'author',
       onSourceDelete: 'deleteField',
     },
+    {
+      // Subcollections: every placeholder of `source` must also appear in `target`.
+      name: 'user-post-tag',
+      source: 'users/{uid}/tags',
+      target: 'users/{uid}/posts',
+      idField: 'tagId',
+      fields: ['label'],
+      targetField: 'tag',
+      onSourceDelete: 'setNull',
+    },
+  ],
+
+  aggregates: [
+    {
+      // post.likeCount = number of documents in post/{postId}/like
+      name: 'post-likes',
+      source: 'post/{postId}/like',
+      target: 'post',
+      idParam: 'postId',
+      aggregate: 'count',
+      targetField: 'likeCount',
+    },
+    {
+      // customer.total = sum of order.amount where order.customerId == customer id
+      name: 'customer-total',
+      source: 'order',
+      target: 'customer',
+      idField: 'customerId',
+      aggregate: { sum: 'amount' },
+      targetField: 'total',
+    },
   ],
 })

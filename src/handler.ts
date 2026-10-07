@@ -74,6 +74,24 @@ type Desired = DocumentData | number | null | typeof DELETE
 type Computed = Desired | typeof NOTHING
 type Outcome = 'skip' | 'write' | 'delete'
 
+/** Options shared by {@link Processor.syncCopy} and {@link Processor.syncAggregate}. */
+export interface SyncOptions {
+  /** 0 (default) for a first try; redos count from 1. */
+  attempt?: number
+  /** Already-read target snapshot to use for the first attempt instead of reading again. */
+  target?: DocumentSnapshot
+  /** Compute and compare only; report what would be written without writing. */
+  dryRun?: boolean
+  /** Shares source reads between targets (e.g. within one page of `rebuild`). */
+  sourceCache?: Map<string, Promise<DocumentSnapshot>>
+}
+
+export interface DeletedSource {
+  /** Path of the deleted source. Omit to apply `onSourceDelete` to every missing source (`rebuild`). */
+  sourcePath?: string
+  onSourceDelete: ResolvedConnection['onSourceDelete']
+}
+
 const GRPC_FAILED_PRECONDITION = 9
 const GRPC_NOT_FOUND = 5
 
@@ -260,7 +278,7 @@ export class Processor {
 
     for (const ref of retry) {
       result.retries++
-      count(result, await this.syncCopy(ref, conn, { sourcePath: source.path, onSourceDelete: conn.onSourceDelete }, 1))
+      count(result, await this.syncCopy(ref, conn, { deleted: { sourcePath: source.path, onSourceDelete: conn.onSourceDelete }, attempt: 1 }))
     }
     if (result.writes === 0 && !result.reason) result.reason = result.targets ? 'targets up to date' : 'no targets'
     return result
@@ -283,7 +301,7 @@ export class Processor {
       result.reason = 'idField unchanged'
       return result
     }
-    count(result, await this.syncCopy(this.db().doc(target.path), conn, undefined, 0))
+    count(result, await this.syncCopy(this.db().doc(target.path), conn, {}))
     if (result.writes === 0) result.reason = 'target up to date'
     return result
   }
@@ -298,14 +316,11 @@ export class Processor {
    * any other missing source is left alone (same as the target-side rule). `rebuild`
    * passes `{ onSourceDelete }` without a path to apply the policy to every missing source.
    */
-  async syncCopy(
-    ref: DocumentReference,
-    conn: ResolvedConnection,
-    deleted: { sourcePath?: string; onSourceDelete: ResolvedConnection['onSourceDelete'] } | undefined,
-    attempt: number,
-  ): Promise<Outcome> {
+  async syncCopy(ref: DocumentReference, conn: ResolvedConnection, opts: SyncOptions & { deleted?: DeletedSource }): Promise<Outcome> {
+    const attempt = opts.attempt ?? 0
+    const { deleted } = opts
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
-    const target = await ref.get()
+    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
     if (!target.exists) return 'skip'
 
     const currentId: unknown = target.get(conn.idField)
@@ -323,20 +338,33 @@ export class Processor {
     } else {
       const sourcePath = this.sourcePathFor(conn, ref.path, currentId)
       if (!sourcePath) return 'skip'
-      const sourceSnap = await this.db().doc(sourcePath).get()
+      const sourceSnap = await this.readSource(sourcePath, opts.sourceCache)
       const applies = deleted && (deleted.sourcePath === undefined || deleted.sourcePath === sourcePath)
       desired = copyValue(sourceSnap, conn, applies ? deleted.onSourceDelete : 'nothing')
     }
     if (desired === NOTHING || !needsWrite(target, conn.targetField, desired)) return 'skip'
+    const outcome: Outcome = desired === DELETE ? 'delete' : 'write'
+    if (opts.dryRun) return outcome
 
     try {
       await ref.update({ [conn.targetField]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
-      return desired === DELETE ? 'delete' : 'write'
+      return outcome
     } catch (err) {
       if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
       if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
-      return this.syncCopy(ref, conn, deleted, attempt + 1)
+      return this.syncCopy(ref, conn, { ...opts, attempt: attempt + 1 })
     }
+  }
+
+  /** Reads a source document, sharing reads across targets of the same page when a cache is given. */
+  private readSource(path: string, cache?: Map<string, Promise<DocumentSnapshot>>): Promise<DocumentSnapshot> {
+    if (!cache) return this.db().doc(path).get()
+    let p = cache.get(path)
+    if (!p) {
+      p = this.db().doc(path).get()
+      cache.set(path, p)
+    }
+    return p
   }
 
   /** Query for the targets of a source document: a concrete collection when the path allows it, else a collection group. */
@@ -391,7 +419,7 @@ export class Processor {
     }
     for (const id of ids) {
       result.targets++
-      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, 0))
+      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, {}))
     }
     if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no target id'
     return result
@@ -414,21 +442,23 @@ export class Processor {
       result.reason = 'not a create'
       return result
     }
-    count(result, await this.syncAggregate(this.db().doc(target.path), rule, 0))
+    count(result, await this.syncAggregate(this.db().doc(target.path), rule, {}))
     if (result.writes === 0) result.reason = 'target up to date'
     return result
   }
 
   /** Reads the target, runs the aggregation query, writes the number if it differs (conditional on the target's updateTime). */
-  async syncAggregate(ref: DocumentReference, rule: ResolvedAggregate, attempt: number): Promise<Outcome> {
+  async syncAggregate(ref: DocumentReference, rule: ResolvedAggregate, opts: SyncOptions): Promise<Outcome> {
+    const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
-    const target = await ref.get()
+    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
     if (!target.exists) return 'skip'
 
     const query = this.sourcesOf(rule, ref.path)
     if (!query) return 'skip'
     const value = await aggregateValue(query, rule)
     if (isEqual(target.get(rule.targetField), value)) return 'skip'
+    if (opts.dryRun) return 'write'
 
     try {
       await ref.update({ [rule.targetField]: value }, { lastUpdateTime: target.updateTime })
@@ -436,7 +466,7 @@ export class Processor {
     } catch (err) {
       if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
       if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
-      return this.syncAggregate(ref, rule, attempt + 1)
+      return this.syncAggregate(ref, rule, { ...opts, attempt: attempt + 1 })
     }
   }
 

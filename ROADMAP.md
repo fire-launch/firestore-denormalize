@@ -14,10 +14,10 @@ We stay with **Eventarc → one HTTP function**. We do not intend to add a secon
 |---|---|
 | Copy sync (`connections`) | Done (v0.1) |
 | `validate` / `setup` / `deploy` CLI | Done (v0.1) |
-| Counts and sums | Planned |
-| `rebuild` / backfill | Planned |
-| Subcollections | Planned |
-| Emulator support (`doc-sync dev`) | Planned |
+| Counts and sums | Done (v0.2) |
+| `rebuild` / backfill | Done (v0.2) |
+| Subcollections | Done (v0.2) |
+| Emulator support (`doc-sync dev`) | Done (v0.2) |
 | `doc-sync verify` | Planned |
 | Typed config | Planned |
 | Views (`build` + `patch`) | Planned |
@@ -32,7 +32,7 @@ Without these the package is not adoptable by a typical Firestore project.
 
 Copy fields from `source/{id}` into `target.targetField` wherever `target.idField == id`. Existing Firestore Extensions need two functions per rule; this package handles any number of rules with one function. Shipped in v0.1.
 
-### Counts and sums
+### Counts and sums — done
 
 Maintain `post.likeCount` or `order.total` from a child or related collection. Values are **recomputed with aggregation queries** (`count()`, `sum()`), never adjusted with `increment()`. This makes the result correct under duplicate delivery and out-of-order events, which is where hand-written counters usually drift.
 
@@ -40,21 +40,21 @@ Maintain `post.likeCount` or `order.total` from a child or related collection. V
 - Same conditional-write and retry loop as copy sync.
 - Cost is one aggregation read per event, which `validate` will report (see *Cost estimate*).
 
-### `rebuild` / backfill
+### `rebuild` / backfill — done
 
 `doc-sync rebuild [--connection <name>] [--dry-run]` walks the targets of a rule and brings every document in line with its current source. Required for introducing the package into a project that already has data, and for recovering after a rule change. Today existing targets are only fixed the next time their source changes; this moves backfill from "known limitation" into scope.
 
 - Runs from the CLI against production or the emulator, paged, resumable.
 - Reuses the handler's compute-and-conditionally-write code so the result is identical to what a live event would produce.
 
-### Subcollections
+### Subcollections — done
 
 Allow `users/{uid}/payments` style paths for `source` and `target`, and dotted paths for `fields` / `idField` / `targetField`. Most real projects use subcollections; limiting the package to top-level collections rules out too many of them.
 
 - Eventarc path patterns (`users/{uid}/payments/{docId}`) and the matching collection-group query for targets.
 - Validation of the path shape in `defineConfig`.
 
-### Emulator support (`doc-sync dev`)
+### Emulator support (`doc-sync dev`) — done
 
 The Firebase Emulator Suite has no Eventarc for Firestore events, so today the handler cannot be exercised locally. `doc-sync dev` is a small bridge that makes it possible without changing the runtime path:
 
@@ -110,6 +110,7 @@ These change the correctness model and belong in a separate package, if anywhere
 
 | Version | Contents |
 |---|---|
-| v0.x (validated in the first production project) | copy sync, `rebuild`, `doc-sync dev` |
-| v1.0 (public release) | counts and sums, subcollections, `verify`, typed config |
+| v0.1 | copy sync, `validate` / `setup` / `deploy` |
+| v0.2 | counts and sums, subcollections, `rebuild`, `doc-sync dev` |
+| v1.0 (public release) | `verify`, typed config, validated in the first production project |
 | v1.x | views, cost estimate, `_sync` metadata |

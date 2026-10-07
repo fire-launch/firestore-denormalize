@@ -1,10 +1,10 @@
 # firestore-denormalize
 
-Firestore の非正規化データを、**Cloud Run 関数 1 つ ＋ コレクションごとの Eventarc トリガー**で同期します。
+Firestore の派生データ（非正規化コピー・件数・合計）を、**Cloud Run 関数 1 つ ＋ コレクションごとの Eventarc トリガー**で正しく保ちます。
 
 [English README](./README.md)
 
-`category/{id}` の一部フィールドを `post.category` にコピーしている場合、カテゴリが変わるたびに全 `post` を更新する必要があります。このパッケージは、そうしたルールを TypeScript の 1 ファイルで何個でも定義し、まとめて処理します。
+`category/{id}` の一部フィールドを `post.category` にコピーしている、あるいは `post.likeCount` をいいねの件数に保っている場合、元が変わるたびに派生値を更新する必要があります。このパッケージは、そうしたルールを TypeScript の 1 ファイルで何個でも定義し、まとめて処理します。
 
 ```ts
 // doc-sync.config.ts
@@ -26,14 +26,24 @@ export default defineConfig({
       onSourceDelete: 'setNull',   // 'setNull' | 'deleteField' | 'nothing'
     },
   ],
+  aggregates: [
+    {
+      name: 'post-likes',
+      source: 'post/{postId}/like', // このサブコレクションの件数を
+      target: 'post',               // 親の post に
+      idParam: 'postId',            // post を指すプレースホルダ
+      aggregate: 'count',           // または { sum: 'amount' }
+      targetField: 'likeCount',
+    },
+  ],
 })
 ```
 
 ## 特徴
 
 - `firestore-connect-document` 系 Extension の「ルール 1 つにつき関数 2 つ」を、関数 1 つに集約します。
-- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。イベントの値は「処理が必要か」の判定にだけ使い、書き込む値は**常に Firestore から読み直し**、書き込みは**ターゲットの `updateTime` を前提条件にした条件付き書き込み**で行います。遅延・重複したイベントが新しい値を古い値で上書きすることはありません。
-- トリガーの作成・削除は、同じ設定ファイルからコマンド 1 つで行います。
+- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。イベントの値は「処理が必要か」の判定にだけ使い、書き込む値は**常に Firestore から読み直し**（コピー）または**集計クエリで再計算**（件数・合計）し、書き込みは**ターゲットの `updateTime` を前提条件にした条件付き書き込み**で行います。遅延・重複したイベントが新しい値を古い値で上書きすることはなく、`increment()` を使わないのでカウンタがずれることもありません。
+- トリガーの作成・削除は、同じ設定ファイルからコマンド 1 つで行います。`rebuild` で既存データをバックフィルでき、`dev` で同じハンドラを Emulator Suite で動かせます。
 
 ## 必要なもの
 
@@ -61,9 +71,16 @@ Firebase プロジェクトのルートに `doc-sync.config.ts` を置きます�
 | `service` | デプロイした関数の Cloud Run サービス名（`onRequest` なら関数名の小文字） |
 | `serviceRegion` | Cloud Run サービスのリージョン。既定は `region` |
 | `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完されます |
-| `connections[]` | 同期ルール。`source` / `target` はトップレベルのコレクション、`fields` はトップレベルのフィールド名 |
+| `connections[]` | コピーのルール（後述） |
+| `aggregates[]` | 件数・合計のルール（後述） |
 
-バリデーションでは、名前の重複、同じ `target.targetField` への二重書き込み、コレクション間の循環、サブコレクション、`.` などパス記法を含むフィールド名を拒否します。
+**コレクション**はパスで書きます。サブコレクションは親 ID をプレースホルダにします: `users/{uid}/posts`。**フィールド**はドット区切りのパスも使えます: `address.city`。
+
+**`connections[]`** は `source/{id}` の `fields` を、`target.idField == id` である全ターゲットの `target.targetField` にコピーします。ターゲットからソースをたどれるよう、`source` のプレースホルダはすべて `target` にも現れる必要があります。`target` 側に余分なプレースホルダがある場合（`category` → `users/{uid}/posts`）は、コレクショングループクエリでターゲットを探します。
+
+**`aggregates[]`** は、ターゲットに属するソースドキュメントの `count()` または `{ sum: 'field' }` を `target.targetField` に保ちます。ターゲットの指定は、ソース上のフィールド（`idField: 'postId'`）か、ソースパスのプレースホルダ（`post/{postId}/like` に対する `idParam: 'postId'`）のどちらかです。
+
+バリデーションでは、名前の重複、同じコレクションの重なるフィールドへの二重書き込み、解決できないプレースホルダ、不正なパス、「あるルールの書き込みが次のルールを起動し、一周して戻る」ループを拒否します。
 
 ### 2. ハンドラを HTTP 関数として公開する
 
@@ -116,7 +133,29 @@ npx doc-sync deploy --project <project>
 
 `deploy` は、ラベル `doc-sync-instance=<name>` 付きの既存トリガーを取得し、`source` または `target` に現れるコレクションごとに不足分を作成、設定とずれたもの（サービス・リージョン・データベース・サービスアカウント）を更新、設定から消えたコレクションの分を削除し、それ以外には触れません。`--deploy-function docSync` で先に `firebase deploy` を実行、`--dry-run` でコマンド表示のみにできます。
 
-トリガー名は `<name>-<collection>`（`_` は `-` に置換）です。各トリガーは `google.cloud.firestore.document.v1.written` を `document=<collection>/{docId}` でフィルタし、protobuf 形式で配信します。
+トリガー名は `<name>-<コレクション ID を - で連結>`（`users/{uid}/payments` → `<name>-users-payments`、`_` は `-` に置換）です。各トリガーは `google.cloud.firestore.document.v1.written` をそのコレクションのパスパターン（`document=users/{uid}/payments/{docId}`）でフィルタし、protobuf 形式で配信します。
+
+### 5. 既存データをバックフィルする
+
+```sh
+npx doc-sync rebuild --project <project> --dry-run      # 何が変わるかを表示するだけ
+npx doc-sync rebuild --project <project>                 # 適用
+npx doc-sync rebuild --project <project> --rule post-category --start-after post/abc   # ルール指定・途中から再開
+```
+
+`rebuild` は各ルールのターゲットをページ単位で全件たどり、ハンドラと同じ「計算して条件付き書き込み」のコードで現在のソースに揃えます。ソースが存在しないターゲットには `onSourceDelete` を適用します。進捗行に最後に処理したパスが出るので、中断しても `--start-after` で再開できます。認証は Application Default Credentials（`gcloud auth application-default login`）、`FIRESTORE_EMULATOR_HOST` があればエミュレータに接続します。
+
+## Emulator Suite でのローカル開発
+
+エミュレータには Firestore 用の Eventarc がないため、`doc-sync dev` がその穴を埋めます。実行経路は本番と同じです: Firestore エミュレータの対象コレクションを `onSnapshot` で監視し、変更を Eventarc と同じ形式（protobuf の `DocumentEventData`）に符号化して、Functions エミュレータで動いている関数に POST します。
+
+```sh
+firebase emulators:start --only firestore,functions
+FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
+  --url http://127.0.0.1:5001/demo-app/asia-northeast1/docSync
+```
+
+起動時に存在するドキュメントはキャッシュするだけでイベントにはせず、以降の変更を配信します。`FIRESTORE_EMULATOR_HOST`（または `--emulator-host`）がないと起動を拒否するので、誤って本番に向けることはできません。
 
 ## CLI
 
@@ -124,6 +163,8 @@ npx doc-sync deploy --project <project>
 doc-sync validate [--config <path>]
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
+doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
 `--config` の既定は `./doc-sync.config.ts`、`--project` の既定は `$GOOGLE_CLOUD_PROJECT`、次いで gcloud のアクティブなプロジェクトです。設定ファイルは TypeScript / JavaScript、ESM / CJS のいずれでも構いません。
@@ -146,19 +187,23 @@ doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-funct
 3. それ以外は参照先ソースを `get()` して値を作る。ソースが存在しなければ何もしない。
 4. 値に差がある場合のみ、手順 2 の `updateTime` を前提条件に書き込む。
 
+**件数・合計**（`post/p1/like/u1` の作成・削除、または監視フィールドの変更）
+
+1. 更新イベントで `idField` も合計対象フィールドも変わっていなければ終了。
+2. 変更前・変更後にそのドキュメントが属していたターゲット（最大 2 つ）ごとに、ターゲットを `get()` → 集計クエリ → 値が異なれば `updateTime` を前提条件に書き込み。新規作成されたターゲットにも同じ手順で初期値を入れます。
+
 **競合。** 間に別の書き込みがあって条件付き書き込みが失敗したら、そのターゲットだけ手順 2 からやり直します（最大 `maxRetries` 回。超えたら 500 を返し Eventarc が再送）。ソースが読んだ後に変わっていたら、その変更のイベントが面倒を見ます。値は深く比較する（`Timestamp` / `GeoPoint` / `DocumentReference` / バイト列を含む）ので、自身の書き込みによるイベントは no-op になり、`area -> shop.area -> post.shop.area` のような多段連鎖も必ず停止します。
 
 **レスポンス。** 完了・処理不要は `204`。回復不能な入力（壊れたペイロード、未知のコレクション、別データベース）も `error` / `warn` ログを出して `204`（再送させない）。一時的な失敗は `500` で、Eventarc が最大 24 時間バックオフ再送します。処理は冪等です。
 
-**ログ。** 1 イベント・1 connection につき 1 行の構造化ログ: `connection`、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`durationMs`。
+**ログ。** 1 イベント・1 ルールにつき 1 行の構造化ログ: `rule`、`kind`、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`durationMs`。
 
 ## 既知の制約
 
-- 対応するのはトップレベルのコレクションとトップレベルのフィールド名のみ。
 - ソース削除時にターゲットを削除することはできません。`setNull` か `deleteField` を使ってください。
-- バックフィルはありません。既存ターゲットは、ソースか自身の `idField` が次に変わったときに更新されます。
-- アプリが `targetField` を直接書いた場合、ソースが次に変わるまでその値のままです。
-- ターゲット検索のため `idField` に既定の単一フィールドインデックスが必要です。除外設定している場合は戻してください。
+- アプリが `targetField` を直接書いた場合、ソースが次に変わる（または `rebuild` する）までその値のままです。
+- ターゲット検索のため `idField` に既定の単一フィールドインデックスが必要です。コレクショングループクエリが必要なルール（`validate` が一覧します）には、そのフィールドのコレクショングループスコープのインデックスが必要です。初回実行時に Firestore が作成用リンクを出します。
+- 件数・合計は、影響を受けるターゲット 1 つにつきイベントごとに集計読み取り 1 回のコストがかかります。
 - 遅延は Eventarc の配信遅延（通常 1 秒未満〜数秒）に依存します。
 
 ## 推奨する関数の設定

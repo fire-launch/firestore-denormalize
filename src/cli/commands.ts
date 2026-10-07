@@ -1,4 +1,7 @@
 import { needsCollectionGroupQuery, type ResolvedConfig } from '../config.js'
+import { startDevBridge } from '../dev.js'
+import { rebuild as runRebuild } from '../rebuild.js'
+import type { Logger } from '../logger.js'
 import { eventarcPathPattern } from '../paths.js'
 import { CommandError, type Runner } from './exec.js'
 import {
@@ -179,4 +182,81 @@ function exists(read: () => string): boolean {
     if (err instanceof CommandError && NOT_FOUND.test(err.stderr)) return false
     throw err
   }
+}
+
+/** Creates a Firestore instance for the CLI (ADC in production, or the emulator when FIRESTORE_EMULATOR_HOST is set). */
+async function cliFirestore(ctx: Context) {
+  const { initializeApp, getApps } = await import('firebase-admin/app')
+  const { getFirestore } = await import('firebase-admin/firestore')
+  const app = getApps()[0] ?? initializeApp({ projectId: ctx.project })
+  return ctx.config.database === '(default)' ? getFirestore(app) : getFirestore(app, ctx.config.database)
+}
+
+/** Human-readable logger for CLI commands (the handler's JSON logger is for Cloud Logging). */
+export function cliLogger(log: (line?: string) => void): Logger {
+  const fmt = (message: string, fields?: Record<string, unknown>) => {
+    const rest = fields
+      ? ' ' +
+        Object.entries(fields)
+          .filter(([, v]) => v !== undefined)
+          .map(([k, v]) => `${k}=${v instanceof Error ? v.message : typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+          .join(' ')
+      : ''
+    return `${message.replace(/^doc-sync( \w+)?: /, '')}${rest}`
+  }
+  return {
+    info: (m, f) => log(fmt(m, f)),
+    warn: (m, f) => log(`warning: ${fmt(m, f)}`),
+    error: (m, f) => log(`error: ${fmt(m, f)}`),
+  }
+}
+
+export async function rebuild(
+  ctx: Context,
+  opts: { rules?: string[]; dryRun: boolean; startAfter?: string; pageSize?: number },
+): Promise<void> {
+  const { log } = ctx
+  const firestore = await cliFirestore(ctx)
+  const emulator = process.env.FIRESTORE_EMULATOR_HOST
+  log(`Rebuilding ${opts.rules?.length ? opts.rules.join(', ') : 'all rules'} in ${emulator ? `emulator ${emulator}` : `project ${ctx.project}`}${opts.dryRun ? ' (dry run)' : ''}`)
+  log()
+  const results = await runRebuild(ctx.config, {
+    firestore,
+    logger: cliLogger(log),
+    rules: opts.rules,
+    dryRun: opts.dryRun,
+    startAfter: opts.startAfter,
+    pageSize: opts.pageSize,
+    onProgress: (p) => log(`  ${p.rule}: scanned ${p.scanned}, ${opts.dryRun ? 'would write' : 'written'} ${p.written}, last ${p.lastPath}`),
+  })
+  log()
+  for (const r of results) {
+    log(`${r.rule}: ${r.scanned} targets, ${r.written} ${r.dryRun ? 'would be written' : 'written'}`)
+  }
+  log()
+  log(opts.dryRun ? 'Dry run complete. Re-run without --dry-run to apply.' : 'Rebuild complete.')
+}
+
+export async function dev(ctx: Context, opts: { url: string; emulatorHost?: string }): Promise<void> {
+  const { log } = ctx
+  if (opts.emulatorHost) process.env.FIRESTORE_EMULATOR_HOST = opts.emulatorHost
+  if (!process.env.FIRESTORE_EMULATOR_HOST) {
+    throw new Error('doc-sync dev only works against the Firestore emulator: set FIRESTORE_EMULATOR_HOST or pass --emulator-host host:port')
+  }
+  const firestore = await cliFirestore(ctx)
+  log(`Bridging Firestore emulator ${process.env.FIRESTORE_EMULATOR_HOST} (project ${ctx.project}) -> ${opts.url}`)
+  log('Existing documents are cached silently; changes from now on are delivered. Ctrl+C to stop.')
+  log()
+  const bridge = startDevBridge(ctx.config, { firestore, url: opts.url, project: ctx.project, logger: cliLogger(log) })
+  await bridge.ready
+  await new Promise<void>((resolve) => {
+    const stop = () => {
+      bridge.stop()
+      resolve()
+    }
+    process.once('SIGINT', stop)
+    process.once('SIGTERM', stop)
+  })
+  await bridge.idle()
+  log('stopped')
 }
