@@ -1,0 +1,260 @@
+{
+  "nested": {
+    "google": {
+      "nested": {
+        "protobuf": {
+          "nested": {
+            "Struct": {
+              "fields": {
+                "fields": {
+                  "keyType": "string",
+                  "type": "Value",
+                  "id": 1
+                }
+              }
+            },
+            "Value": {
+              "oneofs": {
+                "kind": {
+                  "oneof": [
+                    "nullValue",
+                    "numberValue",
+                    "stringValue",
+                    "boolValue",
+                    "structValue",
+                    "listValue"
+                  ]
+                }
+              },
+              "fields": {
+                "nullValue": {
+                  "type": "NullValue",
+                  "id": 1
+                },
+                "numberValue": {
+                  "type": "double",
+                  "id": 2
+                },
+                "stringValue": {
+                  "type": "string",
+                  "id": 3
+                },
+                "boolValue": {
+                  "type": "bool",
+                  "id": 4
+                },
+                "structValue": {
+                  "type": "Struct",
+                  "id": 5
+                },
+                "listValue": {
+                  "type": "ListValue",
+                  "id": 6
+                }
+              }
+            },
+            "NullValue": {
+              "values": {
+                "NULL_VALUE": 0
+              }
+            },
+            "ListValue": {
+              "fields": {
+                "values": {
+                  "rule": "repeated",
+                  "type": "Value",
+                  "id": 1
+                }
+              }
+            },
+            "Timestamp": {
+              "fields": {
+                "seconds": {
+                  "type": "int64",
+                  "id": 1
+                },
+                "nanos": {
+                  "type": "int32",
+                  "id": 2
+                }
+              }
+            }
+          }
+        },
+        "events": {
+          "nested": {
+            "cloud": {
+              "nested": {
+                "firestore": {
+                  "nested": {
+                    "v1": {
+                      "options": {
+                        "csharp_namespace": "Google.Events.Protobuf.Cloud.Firestore.V1",
+                        "php_namespace": "Google\\Events\\Cloud\\Firestore\\V1",
+                        "ruby_package": "Google::Events::Cloud::Firestore::V1"
+                      },
+                      "nested": {
+                        "DocumentEventData": {
+                          "fields": {
+                            "value": {
+                              "type": "Document",
+                              "id": 1
+                            },
+                            "oldValue": {
+                              "type": "Document",
+                              "id": 2
+                            },
+                            "updateMask": {
+                              "type": "DocumentMask",
+                              "id": 3
+                            }
+                          }
+                        },
+                        "DocumentMask": {
+                          "fields": {
+                            "fieldPaths": {
+                              "rule": "repeated",
+                              "type": "string",
+                              "id": 1
+                            }
+                          }
+                        },
+                        "Document": {
+                          "fields": {
+                            "name": {
+                              "type": "string",
+                              "id": 1
+                            },
+                            "fields": {
+                              "keyType": "string",
+                              "type": "Value",
+                              "id": 2
+                            },
+                            "createTime": {
+                              "type": "google.protobuf.Timestamp",
+                              "id": 3
+                            },
+                            "updateTime": {
+                              "type": "google.protobuf.Timestamp",
+                              "id": 4
+                            }
+                          }
+                        },
+                        "Value": {
+                          "oneofs": {
+                            "valueType": {
+                              "oneof": [
+                                "nullValue",
+                                "booleanValue",
+                                "integerValue",
+                                "doubleValue",
+                                "timestampValue",
+                                "stringValue",
+                                "bytesValue",
+                                "referenceValue",
+                                "geoPointValue",
+                                "arrayValue",
+                                "mapValue"
+                              ]
+                            }
+                          },
+                          "fields": {
+                            "nullValue": {
+                              "type": "google.protobuf.NullValue",
+                              "id": 11
+                            },
+                            "booleanValue": {
+                              "type": "bool",
+                              "id": 1
+                            },
+                            "integerValue": {
+                              "type": "int64",
+                              "id": 2
+                            },
+                            "doubleValue": {
+                              "type": "double",
+                              "id": 3
+                            },
+                            "timestampValue": {
+                              "type": "google.protobuf.Timestamp",
+                              "id": 10
+                            },
+                            "stringValue": {
+                              "type": "string",
+                              "id": 17
+                            },
+                            "bytesValue": {
+                              "type": "bytes",
+                              "id": 18
+                            },
+                            "referenceValue": {
+                              "type": "string",
+                              "id": 5
+                            },
+                            "geoPointValue": {
+                              "type": "google.type.LatLng",
+                              "id": 8
+                            },
+                            "arrayValue": {
+                              "type": "ArrayValue",
+                              "id": 9
+                            },
+                            "mapValue": {
+                              "type": "MapValue",
+                              "id": 6
+                            }
+                          }
+                        },
+                        "ArrayValue": {
+                          "fields": {
+                            "values": {
+                              "rule": "repeated",
+                              "type": "Value",
+                              "id": 1
+                            }
+                          }
+                        },
+                        "MapValue": {
+                          "fields": {
+                            "fields": {
+                              "keyType": "string",
+                              "type": "Value",
+                              "id": 1
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "type": {
+          "options": {
+            "go_package": "google.golang.org/genproto/googleapis/type/latlng;latlng",
+            "java_multiple_files": true,
+            "java_outer_classname": "LatLngProto",
+            "java_package": "com.google.type",
+            "objc_class_prefix": "GTP"
+          },
+          "nested": {
+            "LatLng": {
+              "fields": {
+                "latitude": {
+                  "type": "double",
+                  "id": 1
+                },
+                "longitude": {
+                  "type": "double",
+                  "id": 2
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

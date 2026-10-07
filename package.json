@@ -1,0 +1,72 @@
+{
+  "name": "firestore-denormalize",
+  "version": "0.1.0",
+  "description": "Keep denormalized Firestore documents in sync with one Cloud Run function and per-collection Eventarc triggers.",
+  "keywords": [
+    "firestore",
+    "firebase",
+    "denormalize",
+    "denormalization",
+    "eventarc",
+    "cloud-run",
+    "sync"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fire-launch/firestore-denormalize.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "doc-sync": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "README.ja.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "firebase emulators:exec --only firestore --project demo-doc-sync \"vitest run\"",
+    "test:unit": "vitest run test/unit",
+    "protos:build": "pbjs -t json -p protos -o src/proto/firestore-events.json google/events/cloud/firestore/v1/data.proto",
+    "prepublishOnly": "npm run typecheck && npm run build"
+  },
+  "peerDependencies": {
+    "firebase-admin": ">=12"
+  },
+  "dependencies": {
+    "jiti": "^2.4.2",
+    "protobufjs": "^7.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "firebase-admin": "^13.0.0",
+    "firebase-functions": "^7.4.0",
+    "protobufjs-cli": "^1.1.3",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

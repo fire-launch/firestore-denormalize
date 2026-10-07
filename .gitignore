@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.log
+firebase-debug.log
+firestore-debug.log
+.DS_Store
+pglite-debug.log
