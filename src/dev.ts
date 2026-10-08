@@ -20,8 +20,8 @@ export interface DevBridgeOptions {
   logger?: Logger
   /** Override for tests. */
   fetch?: typeof fetch
-  /** Called after each delivery. */
-  onDelivered?: (info: { document: string; change: 'create' | 'update' | 'delete'; status: number }) => void
+  /** Called after each delivery. `id` is the CloudEvent id (`ce-id`) the handler saw. */
+  onDelivered?: (info: { id: string; document: string; change: 'create' | 'update' | 'delete'; status: number }) => void
 }
 
 export interface DevBridge {
@@ -83,10 +83,11 @@ export function startDevBridge(config: DocSyncConfig, options: DevBridgeOptions)
     change: 'create' | 'update' | 'delete',
   ): Promise<void> {
     const body = encodeDocumentEventData(before, after, { project: options.project, database })
+    const id = randomUUID()
     const headers = {
       'content-type': 'application/protobuf',
       'ce-specversion': '1.0',
-      'ce-id': randomUUID(),
+      'ce-id': id,
       'ce-type': 'google.cloud.firestore.document.v1.written',
       'ce-source': `//firestore.googleapis.com/projects/${options.project}/databases/${database}`,
       'ce-time': new Date().toISOString(),
@@ -98,7 +99,7 @@ export function startDevBridge(config: DocSyncConfig, options: DevBridgeOptions)
     try {
       const res = await doFetch(options.url, { method: 'POST', headers, body })
       logger.info('doc-sync dev: delivered', { document, change, status: res.status })
-      options.onDelivered?.({ document, change, status: res.status })
+      options.onDelivered?.({ id, document, change, status: res.status })
     } catch (err) {
       logger.error('doc-sync dev: delivery failed', { document, change, error: err })
     }

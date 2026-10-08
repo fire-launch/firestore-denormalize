@@ -51,8 +51,7 @@
     "test": "firebase emulators:exec --only firestore --project demo-doc-sync \"vitest run\"",
     "test:unit": "vitest run test/unit",
     "protos:build": "pbjs -t json -p protos -o src/proto/firestore-events.json google/events/cloud/firestore/v1/data.proto",
-    "prepublishOnly": "npm run typecheck && npm run build",
-    "demo": "npm run build && node examples/demo/demo.mjs"
+    "prepublishOnly": "npm run typecheck && npm run build"
   },
   "peerDependencies": {
     "firebase-admin": ">=12"

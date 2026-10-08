@@ -145,16 +145,6 @@ npx doc-sync rebuild --project <project> --rule post-category --start-after post
 
 `rebuild` walks every target of each rule in pages and brings it in line with its current source, using the same compute-and-conditionally-write code as the handler. Missing sources get the rule's `onSourceDelete` treatment. Progress lines include the last processed path so an interrupted run can be resumed with `--start-after`. It uses Application Default Credentials (`gcloud auth application-default login`), or the emulator when `FIRESTORE_EMULATOR_HOST` is set.
 
-## Try it in one command
-
-```sh
-git clone https://github.com/fire-launch/firestore-denormalize && cd firestore-denormalize
-npm install
-npm run demo
-```
-
-This starts the Firestore emulator with its UI, runs the handler and the `dev` bridge in the same process, seeds a few documents for the rules in `examples/doc-sync.config.ts`, and prints the Emulator UI URL plus a list of edits to try. Every processed event is printed as it happens. Needs `firebase-tools` on your PATH and Java for the emulator.
-
 ## Local development with the Emulator Suite
 
 The emulators have no Eventarc for Firestore, so `doc-sync dev` bridges the gap without a second runtime path: it listens to the configured collections in the Firestore emulator with `onSnapshot`, encodes each change exactly like Eventarc does (protobuf `DocumentEventData`), and POSTs it to your function running in the Functions emulator.

@@ -145,16 +145,6 @@ npx doc-sync rebuild --project <project> --rule post-category --start-after post
 
 `rebuild` は各ルールのターゲットをページ単位で全件たどり、ハンドラと同じ「計算して条件付き書き込み」のコードで現在のソースに揃えます。ソースが存在しないターゲットには `onSourceDelete` を適用します。進捗行に最後に処理したパスが出るので、中断しても `--start-after` で再開できます。認証は Application Default Credentials（`gcloud auth application-default login`）、`FIRESTORE_EMULATOR_HOST` があればエミュレータに接続します。
 
-## コマンド 1 つで試す
-
-```sh
-git clone https://github.com/fire-launch/firestore-denormalize && cd firestore-denormalize
-npm install
-npm run demo
-```
-
-Firestore エミュレータ（UI 付き）を起動し、同じプロセスでハンドラと `dev` ブリッジを動かし、`examples/doc-sync.config.ts` のルールに合わせたサンプルデータを投入して、Emulator UI の URL と「試すこと」の一覧を表示します。処理したイベントはその場で表示されます。`firebase-tools` が PATH にあることと、エミュレータ用の Java が必要です。
-
 ## Emulator Suite でのローカル開発
 
 エミュレータには Firestore 用の Eventarc がないため、`doc-sync dev` がその穴を埋めます。実行経路は本番と同じです: Firestore エミュレータの対象コレクションを `onSnapshot` で監視し、変更を Eventarc と同じ形式（protobuf の `DocumentEventData`）に符号化して、Functions エミュレータで動いている関数に POST します。
