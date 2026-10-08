@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util'
 import { createRequire } from 'node:module'
 import { ConfigError } from '../src/config.js'
-import { deploy, dev, rebuild, setup, validate, type Context } from '../src/cli/commands.js'
+import { deploy, dev, rebuild, setup, validate, verify, type Context } from '../src/cli/commands.js'
 import { createRunner } from '../src/cli/exec.js'
 import { DEFAULT_CONFIG_PATH, loadConfig } from '../src/cli/load-config.js'
 import { spawnSync } from 'node:child_process'
@@ -13,6 +13,7 @@ Usage:
   doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
   doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
   doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>]
+  doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 
 Commands:
@@ -20,6 +21,7 @@ Commands:
   setup      Create the trigger service account, grant roles, enable APIs (idempotent)
   deploy     Create missing / update drifted / delete stale Eventarc triggers for this instance
   rebuild    Bring every existing target in line with its source (backfill); --dry-run only reports
+  verify     Recompute every derived value and report mismatches; --fix repairs them
   dev        Forward Firestore emulator changes to the handler as CloudEvents (local development)
 
 Options:
@@ -27,15 +29,16 @@ Options:
   --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then gcloud's active project)
   --dry-run                 setup/deploy: print gcloud commands; rebuild: report without writing
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
-  --rule <name>             rebuild: limit to this rule (repeatable)
-  --start-after <path>      rebuild: resume after this target document path
-  --page-size <n>           rebuild: documents per page (default 500)
+  --fix                     verify: repair mismatches with conditional writes
+  --rule <name>             rebuild/verify: limit to this rule (repeatable)
+  --start-after <path>      rebuild/verify: resume after this target document path
+  --page-size <n>           rebuild/verify: documents per page (default 500)
   --url <url>               dev: handler URL, e.g. http://127.0.0.1:5001/<project>/<region>/docSync
   --emulator-host <h:p>     dev: Firestore emulator (default: $FIRESTORE_EMULATOR_HOST)
   -h, --help                Show this help
   -v, --version             Show the version
 
-rebuild and dev talk to Firestore directly: through the emulator when FIRESTORE_EMULATOR_HOST is set,
+rebuild, verify and dev talk to Firestore directly: through the emulator when FIRESTORE_EMULATOR_HOST is set,
 otherwise with Application Default Credentials (\`gcloud auth application-default login\`).
 `
 
@@ -48,6 +51,7 @@ async function main(argv: string[]): Promise<number> {
       project: { type: 'string' },
       'dry-run': { type: 'boolean', default: false },
       'deploy-function': { type: 'string' },
+      fix: { type: 'boolean', default: false },
       rule: { type: 'string', multiple: true },
       'start-after': { type: 'string' },
       'page-size': { type: 'string' },
@@ -69,7 +73,7 @@ async function main(argv: string[]): Promise<number> {
     log(HELP)
     return values.help ? 0 : 1
   }
-  if (!['validate', 'setup', 'deploy', 'rebuild', 'dev'].includes(command)) {
+  if (!['validate', 'setup', 'deploy', 'rebuild', 'verify', 'dev'].includes(command)) {
     console.error(`unknown command: ${command}\n`)
     log(HELP)
     return 1
@@ -78,7 +82,7 @@ async function main(argv: string[]): Promise<number> {
   const { path, config } = await loadConfig(values.config)
   const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST || values['emulator-host'])
   const project =
-    command === 'validate' || ((command === 'rebuild' || command === 'dev') && emulator)
+    command === 'validate' || ((command === 'rebuild' || command === 'verify' || command === 'dev') && emulator)
       ? (values.project ?? resolveProject(false) ?? 'demo-doc-sync')
       : resolveProject(true, values.project)
   const ctx: Context = {
@@ -104,6 +108,12 @@ async function main(argv: string[]): Promise<number> {
       if (pageSize !== undefined && (!Number.isInteger(pageSize) || pageSize < 1)) throw new Error('--page-size must be a positive integer')
       await rebuild(ctx, { rules: values.rule, dryRun: values['dry-run'], startAfter: values['start-after'], pageSize })
       break
+    }
+    case 'verify': {
+      const pageSize = values['page-size'] === undefined ? undefined : Number(values['page-size'])
+      if (pageSize !== undefined && (!Number.isInteger(pageSize) || pageSize < 1)) throw new Error('--page-size must be a positive integer')
+      const ok = await verify(ctx, { rules: values.rule, fix: values.fix, startAfter: values['start-after'], pageSize })
+      return ok ? 0 : 1
     }
     case 'dev':
       if (!values.url) throw new Error('dev requires --url <handler url>')

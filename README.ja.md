@@ -8,7 +8,7 @@ Firestore の派生データ（非正規化コピー・件数・合計）を、*
 
 ```ts
 // doc-sync.config.ts
-import { defineConfig } from 'firestore-denormalize'
+import { defineConfig, defineView } from 'firestore-denormalize'
 
 export default defineConfig({
   name: 'doc-sync',
@@ -35,6 +35,16 @@ export default defineConfig({
       aggregate: 'count',           // または { sum: 'amount' }
       targetField: 'likeCount',
     },
+  ],
+  views: [
+    defineView({
+      // post.latestComments = post/{postId}/comment の最新 2 件を [{ id, body }] として
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments',
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+      build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+    }),
   ],
 })
 ```
@@ -73,12 +83,23 @@ Firebase プロジェクトのルートに `doc-sync.config.ts` を置きます�
 | `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完されます |
 | `connections[]` | コピーのルール（後述） |
 | `aggregates[]` | 件数・合計のルール（後述） |
+| `views[]` | 自前の `build` 関数で値を計算するルール（後述） |
 
 **コレクション**はパスで書きます。サブコレクションは親 ID をプレースホルダにします: `users/{uid}/posts`。**フィールド**はドット区切りのパスも使えます: `address.city`。
 
 **`connections[]`** は `source/{id}` の `fields` を、`target.idField == id` である全ターゲットの `target.targetField` にコピーします。ターゲットからソースをたどれるよう、`source` のプレースホルダはすべて `target` にも現れる必要があります。`target` 側に余分なプレースホルダがある場合（`category` → `users/{uid}/posts`）は、コレクショングループクエリでターゲットを探します。
 
 **`aggregates[]`** は、ターゲットに属するソースドキュメントの `count()` または `{ sum: 'field' }` を `target.targetField` に保ちます。ターゲットの指定は、ソース上のフィールド（`idField: 'postId'`）か、ソースパスのプレースホルダ（`post/{postId}/like` に対する `idParam: 'postId'`）のどちらかです。
+
+**`views[]`** は `build({ target, sources })` の戻り値を `target.targetField` に保ちます。「最新 N 件」「ID をキーにしたマップ」「独自のサマリー」など、他のルールでは表現できない形のためのものです。`sources` は `build` から見える名前をキーにしたオブジェクトで、各ソースにはコレクションと、そのドキュメントがターゲットとどう結びつくかを書きます:
+
+| ソースのキー | 関係 |
+|---|---|
+| `idField: 'postId'` | 多対一: このフィールドにターゲット ID を持つソースドキュメント |
+| `idParam: 'postId'` | 多対一: ターゲット配下のソースドキュメント（`post/{postId}/comment`） |
+| `refField: 'authorId'` | 一対一: ターゲット自身のこのフィールドが指すドキュメント |
+
+多対一のソースには `orderBy`（`['createdAt', ['score', 'desc']]`）と `limit` を指定できます。`watch` は再計算のきっかけになるソース側のフィールドで、省略するとどのフィールドの変更でも再計算します。`build` には各ソースが `QueryDocumentSnapshot` の配列として渡され（`refField` は 0 件か 1 件）、決定的でなければなりません。戻り値がそのまま保存され、`undefined` を返すとフィールドを削除します。任意の `patch(current, change, { target })` は高速パスで、現在値と変更されたドキュメントだけから新しい値を導きます。`undefined` を返すと `build` にフォールバックします。`change.after` はイベントのペイロードではなく、そのドキュメントを読み直した現在の状態です（もう存在しなければ `undefined`）。そのため遅延・重複したイベントでも現在の状態に収束しますが、`patch` は冪等で、位置ではなくドキュメント ID をキーにしなければなりません。ターゲット側で監視するのは `refField` だけです。`build` がターゲットの他のフィールドを読む場合、その変更は次のソース変更か `rebuild` まで反映されません。各ビューを `defineView(...)` で包むと、`build` の中で `sources` に型が付きます。
 
 バリデーションでは、名前の重複、同じコレクションの重なるフィールドへの二重書き込み、解決できないプレースホルダ、不正なパス、「あるルールの書き込みが次のルールを起動し、一周して戻る」ループを拒否します。
 
@@ -145,6 +166,16 @@ npx doc-sync rebuild --project <project> --rule post-category --start-after post
 
 `rebuild` は各ルールのターゲットをページ単位で全件たどり、ハンドラと同じ「計算して条件付き書き込み」のコードで現在のソースに揃えます。ソースが存在しないターゲットには `onSourceDelete` を適用します。進捗行に最後に処理したパスが出るので、中断しても `--start-after` で再開できます。認証は Application Default Credentials（`gcloud auth application-default login`）、`FIRESTORE_EMULATOR_HOST` があればエミュレータに接続します。
 
+### 6. 検証する
+
+```sh
+npx doc-sync verify --project <project>                 # 不整合を一覧表示するだけ
+npx doc-sync verify --project <project> --fix           # 見つけて直す
+npx doc-sync verify --project <project> --rule post-category --start-after post/abc
+```
+
+`verify` は `rebuild` と同じ要領で各ルールのターゲットを全件たどりますが、書き込む代わりに比較します。現在のソースから値を再計算し、`targetField` が異なるドキュメントをすべて報告するだけで、何も変更しません。`--fix` を付けると、ハンドラと同じ条件付き書き込みで不整合を直します。直っていない不整合が残っていると終了コードが非 0 になるので、CI やスケジュール実行で本番の整合性チェックとして使えます。
+
 ## Emulator Suite でのローカル開発
 
 エミュレータには Firestore 用の Eventarc がないため、`doc-sync dev` がその穴を埋めます。実行経路は本番と同じです: Firestore エミュレータの対象コレクションを `onSnapshot` で監視し、変更を Eventarc と同じ形式（protobuf の `DocumentEventData`）に符号化して、Functions エミュレータで動いている関数に POST します。
@@ -164,6 +195,7 @@ doc-sync validate [--config <path>]
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
@@ -192,6 +224,8 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 1. 更新イベントで `idField` も合計対象フィールドも変わっていなければ終了。
 2. 変更前・変更後にそのドキュメントが属していたターゲット（最大 2 つ）ごとに、ターゲットを `get()` → 集計クエリ → 値が異なれば `updateTime` を前提条件に書き込み。新規作成されたターゲットにも同じ手順で初期値を入れます。
 
+**ビュー。** ソース側の変更では（`watch` を指定していればそのフィールド、指定していなければドキュメント全体に変化がなければスキップ）、そのドキュメントが属する各ターゲットを読み、`patch`（定義されていれば、変更されたドキュメントを読み直して渡す。`undefined` を返せば `build` にフォールバック）または全ソースを読み直す `build` で値を計算し、差があれば条件付きで書き込みます。ターゲット側では、作成時と `refField` が変わったときに再計算します。`rebuild` / `verify` は常に `build` を使います。
+
 **競合。** 間に別の書き込みがあって条件付き書き込みが失敗したら、そのターゲットだけ手順 2 からやり直します（最大 `maxRetries` 回。超えたら 500 を返し Eventarc が再送）。ソースが読んだ後に変わっていたら、その変更のイベントが面倒を見ます。値は深く比較する（`Timestamp` / `GeoPoint` / `DocumentReference` / バイト列を含む）ので、自身の書き込みによるイベントは no-op になり、`area -> shop.area -> post.shop.area` のような多段連鎖も必ず停止します。
 
 **レスポンス。** 完了・処理不要は `204`。回復不能な入力（壊れたペイロード、未知のコレクション、別データベース）も `error` / `warn` ログを出して `204`（再送させない）。一時的な失敗は `500` で、Eventarc が最大 24 時間バックオフ再送します。処理は冪等です。
@@ -203,7 +237,7 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 - ソース削除時にターゲットを削除することはできません。`setNull` か `deleteField` を使ってください。
 - アプリが `targetField` を直接書いた場合、ソースが次に変わる（または `rebuild` する）までその値のままです。
 - ターゲット検索のため `idField` に既定の単一フィールドインデックスが必要です。コレクショングループクエリが必要なルール（`validate` が一覧します）には、そのフィールドのコレクショングループスコープのインデックスが必要です。初回実行時に Firestore が作成用リンクを出します。
-- 件数・合計は、影響を受けるターゲット 1 つにつきイベントごとに集計読み取り 1 回のコストがかかります。
+- 件数・合計は、影響を受けるターゲット 1 つにつきイベントごとに集計読み取り 1 回のコストがかかります。ビューは `patch` で処理できない限り、影響を受けるターゲット 1 つにつきソースごとに読み取り（またはクエリ）1 回です。
 - 遅延は Eventarc の配信遅延（通常 1 秒未満〜数秒）に依存します。
 
 ## 推奨する関数の設定

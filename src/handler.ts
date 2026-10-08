@@ -6,20 +6,27 @@
  * aggregation query), and every write is conditional on the target's `updateTime`
  * observed before the source was read.
  */
-import type { DocumentData, DocumentReference, DocumentSnapshot, Firestore, Query } from 'firebase-admin/firestore'
+import type { DocumentData, DocumentReference, DocumentSnapshot, Firestore, Query, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { AggregateField, FieldValue, getFirestore } from 'firebase-admin/firestore'
 import {
   type DocSyncConfig,
+  needsCollectionGroupQuery,
   type ResolvedAggregate,
   type ResolvedConfig,
   type ResolvedConnection,
-  validateConfig,
+  type ResolvedRule,
+  type ResolvedView,
+  type ResolvedViewSource,
+  resolveConfig,
+  rulesOf,
+  type ViewChange,
 } from './config.js'
 import { DecodeError, decodeDocumentEventData, type DecodedDocument } from './decode.js'
 import { isEqual } from './equal.js'
 import { getField, setField } from './fields.js'
 import { jsonLogger, type Logger } from './logger.js'
-import { type DocumentMatch, isResolvable, matchDocumentPath, resolveCollectionPath } from './paths.js'
+import { type DocumentMatch, matchDocumentPath, resolveCollectionPath } from './paths.js'
+import { forEachLimit } from './walk.js'
 
 export interface DocSyncHandlerOptions {
   /** Firestore instance to use. Defaults to `getFirestore()` (or `getFirestore(database)` for a named database). */
@@ -53,8 +60,10 @@ export type DocSyncHandler = (req: DocSyncRequest, res: DocSyncResponse) => Prom
 /** Result of processing one rule for one event. */
 export interface RuleResult {
   rule: string
-  kind: 'connection' | 'aggregate'
+  kind: 'connection' | 'aggregate' | 'view'
   role: 'source' | 'target'
+  /** Key of the matched view source (views, role `source`). */
+  source?: string
   action: 'skip' | 'write' | 'delete'
   /** Why nothing was written (only for `skip`). */
   reason?: string
@@ -70,9 +79,27 @@ export type ConnectionResult = RuleResult
 
 const DELETE = Symbol('FieldValue.delete')
 const NOTHING = Symbol('nothing')
-type Desired = DocumentData | number | null | typeof DELETE
+/** A value to store in the target field, or `DELETE` for "the field must be absent". */
+type Desired = unknown
 type Computed = Desired | typeof NOTHING
 type Outcome = 'skip' | 'write' | 'delete'
+
+/** Result of comparing one target with what its sources say it should hold. */
+export interface CheckResult {
+  /** `ok`: up to date. `mismatch`: differs. `skip`: nothing to check (target missing, idField not a string, ...). */
+  status: 'ok' | 'mismatch' | 'skip'
+  reason?: string
+  /** Current value of `targetField` (`undefined` when absent). */
+  actual?: unknown
+  /** Value `targetField` should hold (`undefined` when it should be absent). Only for `mismatch`. */
+  expected?: unknown
+}
+
+/** Options for {@link Processor.check}. */
+export interface CheckOptions {
+  /** Shares source reads between targets (e.g. within one page of `verify`). */
+  sourceCache?: Map<string, Promise<DocumentSnapshot>>
+}
 
 /** Options shared by {@link Processor.syncCopy} and {@link Processor.syncAggregate}. */
 export interface SyncOptions {
@@ -105,8 +132,8 @@ export class RetriesExhaustedError extends Error {
 /**
  * Creates the handler. Validates the config and throws {@link ConfigError} if it is invalid.
  */
-export function createDocSyncHandler(config: DocSyncConfig, options: DocSyncHandlerOptions = {}): DocSyncHandler {
-  const resolved = validateConfig(config)
+export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, options: DocSyncHandlerOptions = {}): DocSyncHandler {
+  const resolved = resolveConfig(config)
   const logger = options.logger ?? jsonLogger
   let firestore = options.firestore
   const db = (): Firestore => {
@@ -116,7 +143,7 @@ export function createDocSyncHandler(config: DocSyncConfig, options: DocSyncHand
     return firestore
   }
   const processor = new Processor(db, logger, options.maxRetries ?? 5, options.pageSize ?? 500)
-  const rules = [...resolved.connections, ...resolved.aggregates]
+  const rules = rulesOf(resolved)
 
   return async function docSyncHandler(req, res) {
     const startedAt = Date.now()
@@ -151,16 +178,24 @@ export function createDocSyncHandler(config: DocSyncConfig, options: DocSyncHand
     type Task = { rule: string; run: () => Promise<RuleResult> }
     const parallel: Task[] = []
     const onSameDoc: Task[] = []
+    const { before, after } = event
     for (const rule of rules) {
-      const asSource = matchDocumentPath(rule.sourcePattern, document)
-      if (asSource) {
-        parallel.push({
-          rule: rule.name,
-          run: () =>
-            rule.kind === 'connection'
-              ? processor.connectionSource(rule, asSource, event.before, event.after)
-              : processor.aggregateSource(rule, asSource, event.before, event.after),
-        })
+      if (rule.kind === 'view') {
+        for (const source of rule.sources) {
+          const asSource = matchDocumentPath(source.pattern, document)
+          if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after) })
+        }
+      } else {
+        const asSource = matchDocumentPath(rule.sourcePattern, document)
+        if (asSource) {
+          parallel.push({
+            rule: rule.name,
+            run: () =>
+              rule.kind === 'connection'
+                ? processor.connectionSource(rule, asSource, before, after)
+                : processor.aggregateSource(rule, asSource, before, after),
+          })
+        }
       }
       const asTarget = matchDocumentPath(rule.targetPattern, document)
       if (asTarget) {
@@ -168,8 +203,10 @@ export function createDocSyncHandler(config: DocSyncConfig, options: DocSyncHand
           rule: rule.name,
           run: () =>
             rule.kind === 'connection'
-              ? processor.connectionTarget(rule, asTarget, event.before, event.after)
-              : processor.aggregateTarget(rule, asTarget, event.before, event.after),
+              ? processor.connectionTarget(rule, asTarget, before, after)
+              : rule.kind === 'aggregate'
+                ? processor.aggregateTarget(rule, asTarget, before, after)
+                : processor.viewTarget(rule, asTarget, before, after),
         })
       }
     }
@@ -213,6 +250,55 @@ export class Processor {
     private readonly maxRetries: number,
     private readonly pageSize: number,
   ) {}
+
+  // ---------------------------------------------------------------- any rule
+
+  /** Brings one target of any rule in line with its sources (see {@link syncCopy}, {@link syncAggregate}, {@link syncView}). */
+  sync(ref: DocumentReference, rule: ResolvedRule, opts: SyncOptions = {}): Promise<Outcome> {
+    switch (rule.kind) {
+      case 'connection':
+        return this.syncCopy(ref, rule, { ...opts, deleted: { onSourceDelete: rule.onSourceDelete } })
+      case 'aggregate':
+        return this.syncAggregate(ref, rule, opts)
+      case 'view':
+        return this.syncView(ref, rule, opts)
+    }
+  }
+
+  /**
+   * Compares an already-read target with what its sources say it should hold, without
+   * writing. Missing sources of a connection follow `onSourceDelete`, as in `rebuild`.
+   */
+  async check(target: DocumentSnapshot, rule: ResolvedRule, opts: CheckOptions = {}): Promise<CheckResult> {
+    if (!target.exists) return { status: 'skip', reason: 'target missing' }
+    const computed =
+      rule.kind === 'connection'
+        ? await this.computeCopy(target, rule, { sourceCache: opts.sourceCache, deleted: { onSourceDelete: rule.onSourceDelete } })
+        : rule.kind === 'aggregate'
+          ? await this.computeAggregate(target, rule)
+          : await this.computeView(target, rule, {})
+    const actual: unknown = target.get(rule.targetField)
+    if (computed.value === NOTHING) return { status: 'skip', reason: computed.reason, actual }
+    if (!needsWrite(target, rule.targetField, computed.value)) return { status: 'ok', actual }
+    return { status: 'mismatch', actual, expected: computed.value === DELETE ? undefined : computed.value }
+  }
+
+  /**
+   * Writes `desired` to `ref.{field}` conditional on the `updateTime` of `target`, the snapshot
+   * the value was computed from. On a failed precondition `redo` runs the whole read-compute-write
+   * again (bounded by `maxRetries`, counted through `attempt`).
+   */
+  private async write(ref: DocumentReference, target: DocumentSnapshot, field: string, desired: Desired, redo: () => Promise<Outcome>): Promise<Outcome> {
+    const outcome: Outcome = desired === DELETE ? 'delete' : 'write'
+    try {
+      await ref.update({ [field]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
+      return outcome
+    } catch (err) {
+      if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
+      if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
+      return redo()
+    }
+  }
 
   // ---------------------------------------------------------------- copy sync
 
@@ -318,42 +404,39 @@ export class Processor {
    */
   async syncCopy(ref: DocumentReference, conn: ResolvedConnection, opts: SyncOptions & { deleted?: DeletedSource }): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
-    const { deleted } = opts
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
     const target = opts.target && attempt === 0 ? opts.target : await ref.get()
     if (!target.exists) return 'skip'
+    const { value } = await this.computeCopy(target, conn, opts)
+    if (value === NOTHING || !needsWrite(target, conn.targetField, value)) return 'skip'
+    if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
+    return this.write(ref, target, conn.targetField, value, () => this.syncCopy(ref, conn, { ...opts, attempt: attempt + 1, sourceCache: undefined }))
+  }
 
+  /** The value `conn.targetField` of `target` should hold, read from the source it points at. */
+  private async computeCopy(
+    target: DocumentSnapshot,
+    conn: ResolvedConnection,
+    opts: { sourceCache?: Map<string, Promise<DocumentSnapshot>>; deleted?: DeletedSource },
+  ): Promise<{ value: Computed; reason?: string }> {
     const currentId: unknown = target.get(conn.idField)
-    let desired: Computed
-    if (currentId === undefined || currentId === null || currentId === '') {
-      desired = DELETE
-    } else if (typeof currentId !== 'string') {
+    if (currentId === undefined || currentId === null || currentId === '') return { value: DELETE }
+    if (typeof currentId !== 'string') {
       this.logger.warn('doc-sync: idField is not a string, skipped', {
         rule: conn.name,
-        document: ref.path,
+        document: target.ref.path,
         idField: conn.idField,
         type: typeof currentId,
       })
-      return 'skip'
-    } else {
-      const sourcePath = this.sourcePathFor(conn, ref.path, currentId)
-      if (!sourcePath) return 'skip'
-      const sourceSnap = await this.readSource(sourcePath, opts.sourceCache)
-      const applies = deleted && (deleted.sourcePath === undefined || deleted.sourcePath === sourcePath)
-      desired = copyValue(sourceSnap, conn, applies ? deleted.onSourceDelete : 'nothing')
+      return { value: NOTHING, reason: 'idField is not a string' }
     }
-    if (desired === NOTHING || !needsWrite(target, conn.targetField, desired)) return 'skip'
-    const outcome: Outcome = desired === DELETE ? 'delete' : 'write'
-    if (opts.dryRun) return outcome
-
-    try {
-      await ref.update({ [conn.targetField]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
-      return outcome
-    } catch (err) {
-      if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
-      if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
-      return this.syncCopy(ref, conn, { ...opts, attempt: attempt + 1 })
-    }
+    const sourcePath = this.sourcePathFor(conn, target.ref.path, currentId)
+    if (!sourcePath) return { value: NOTHING, reason: 'cannot locate source' }
+    const sourceSnap = await this.readSource(sourcePath, opts.sourceCache)
+    const { deleted } = opts
+    const applies = deleted && (deleted.sourcePath === undefined || deleted.sourcePath === sourcePath)
+    const value = copyValue(sourceSnap, conn, applies ? deleted.onSourceDelete : 'nothing')
+    return value === NOTHING ? { value, reason: 'source missing' } : { value }
   }
 
   /** Reads a source document, sharing reads across targets of the same page when a cache is given. */
@@ -453,21 +536,17 @@ export class Processor {
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
     const target = opts.target && attempt === 0 ? opts.target : await ref.get()
     if (!target.exists) return 'skip'
-
-    const query = this.sourcesOf(rule, ref.path)
-    if (!query) return 'skip'
-    const value = await aggregateValue(query, rule)
-    if (isEqual(target.get(rule.targetField), value)) return 'skip'
+    const { value } = await this.computeAggregate(target, rule)
+    if (value === NOTHING || !needsWrite(target, rule.targetField, value)) return 'skip'
     if (opts.dryRun) return 'write'
+    return this.write(ref, target, rule.targetField, value, () => this.syncAggregate(ref, rule, { ...opts, attempt: attempt + 1 }))
+  }
 
-    try {
-      await ref.update({ [rule.targetField]: value }, { lastUpdateTime: target.updateTime })
-      return 'write'
-    } catch (err) {
-      if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
-      if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
-      return this.syncAggregate(ref, rule, { ...opts, attempt: attempt + 1 })
-    }
+  /** The number `rule.targetField` of `target` should hold, from an aggregation query over its sources. */
+  private async computeAggregate(target: DocumentSnapshot, rule: ResolvedAggregate): Promise<{ value: Computed; reason?: string }> {
+    const query = this.sourcesOf(rule, target.ref.path)
+    if (!query) return { value: NOTHING, reason: 'target path does not match the rule' }
+    return { value: await aggregateValue(query, rule) }
   }
 
   /** Query over the source documents that belong to a target document. */
@@ -485,12 +564,196 @@ export class Processor {
   }
 
   /** Whether running `rule` on a change of its source would use a collection-group query. */
-  static usesCollectionGroup(rule: ResolvedConnection | ResolvedAggregate): boolean {
-    return rule.kind === 'connection'
-      ? !isResolvable(rule.targetPattern, rule.sourcePattern.params)
-      : rule.idField !== undefined && !isResolvable(rule.sourcePattern, rule.targetPattern.params)
+  static usesCollectionGroup(rule: ResolvedRule): boolean {
+    return needsCollectionGroupQuery(rule)
+  }
+
+  // ---------------------------------------------------------------- views
+
+  /** A document of one of the view's sources changed: recompute every target it belongs to. */
+  async viewSource(
+    view: ResolvedView,
+    source: ResolvedViewSource,
+    match: DocumentMatch,
+    before: DecodedDocument | undefined,
+    after: DecodedDocument | undefined,
+  ): Promise<RuleResult> {
+    const result = newResult(view, 'source')
+    result.source = source.key
+    if (before && after) {
+      const unchanged = source.watch ? source.watch.every((f) => isEqual(getField(before.data, f), getField(after.data, f))) : isEqual(before.data, after.data)
+      if (unchanged) {
+        result.reason = source.watch ? 'watched fields unchanged' : 'unchanged'
+        return result
+      }
+    }
+    const change: ViewChange = { source: source.key, path: match.path, before: before?.data, after: after?.data }
+    const resolvable = await this.forEachViewTarget(view, source, match, before, after, async (ref, snapshot) => {
+      result.targets++
+      count(result, await this.syncView(ref, view, { change, target: snapshot }))
+    })
+    if (!resolvable) {
+      result.reason = 'target collection unresolvable'
+      return result
+    }
+    if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no targets'
+    return result
+  }
+
+  /** A target was created, or one of the fields pointing at a `refField` source changed: recompute it. */
+  async viewTarget(
+    view: ResolvedView,
+    target: DocumentMatch,
+    before: DecodedDocument | undefined,
+    after: DecodedDocument | undefined,
+  ): Promise<RuleResult> {
+    const result = newResult(view, 'target')
+    result.targets = 1
+    if (!after) {
+      result.reason = 'target deleted'
+      return result
+    }
+    if (before) {
+      const refFields = view.sources.map((s) => s.refField).filter((f): f is string => f !== undefined)
+      if (refFields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
+        result.reason = refFields.length ? 'refFields unchanged' : 'not a create'
+        return result
+      }
+    }
+    count(result, await this.syncView(this.db().doc(target.path), view, {}))
+    if (result.writes === 0) result.reason = 'target up to date'
+    return result
+  }
+
+  /**
+   * Reads the target, computes the value with `patch` (when a `change` is given and the view
+   * defines one) or `build`, and writes it if it differs, conditional on the target's `updateTime`.
+   */
+  async syncView(ref: DocumentReference, view: ResolvedView, opts: SyncOptions & { change?: ViewChange }): Promise<Outcome> {
+    const attempt = opts.attempt ?? 0
+    if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
+    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
+    if (!target.exists) return 'skip'
+    const { value } = await this.computeView(target, view, opts)
+    if (value === NOTHING || !needsWrite(target, view.targetField, value)) return 'skip'
+    if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
+    return this.write(ref, target, view.targetField, value, () => this.syncView(ref, view, { ...opts, attempt: attempt + 1 }))
+  }
+
+  /** The value `view.targetField` of `target` should hold: `patch` applied to the current value, or `build` over fresh reads. */
+  private async computeView(target: DocumentSnapshot, view: ResolvedView, opts: { change?: ViewChange }): Promise<{ value: Computed; reason?: string }> {
+    if (opts.change && view.patch) {
+      // The event payload may be stale or duplicated; give `patch` the document as it is now (read after the target).
+      const current = await this.db().doc(opts.change.path).get()
+      const change: ViewChange = { ...opts.change, after: current.exists ? current.data() : undefined }
+      const patched = await view.patch(target.get(view.targetField), change, { target })
+      if (patched !== undefined) return { value: patched }
+    }
+    const sources: Record<string, QueryDocumentSnapshot[]> = {}
+    for (const source of view.sources) {
+      const docs = await this.viewSourceDocs(view, source, target)
+      if (docs === undefined) return { value: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
+      sources[source.key] = docs
+    }
+    const built = await view.build({ target, sources })
+    return { value: built === undefined ? DELETE : built }
+  }
+
+  /** Current documents of one source for a target: a query (`idField` / `idParam`) or the one referenced document (`refField`). */
+  private async viewSourceDocs(view: ResolvedView, source: ResolvedViewSource, target: DocumentSnapshot): Promise<QueryDocumentSnapshot[] | undefined> {
+    const m = matchDocumentPath(view.targetPattern, target.ref.path)
+    if (!m) return undefined
+    if (source.refField !== undefined) {
+      const id: unknown = target.get(source.refField)
+      if (id === undefined || id === null || id === '') return []
+      if (typeof id !== 'string' || id.includes('/')) {
+        this.logger.warn('doc-sync: refField is not a document id, treated as unset', { rule: view.name, document: target.ref.path, refField: source.refField })
+        return []
+      }
+      const collection = resolveCollectionPath(source.pattern, m.params)
+      if (!collection) return undefined
+      const snap = await this.db().doc(`${collection}/${id}`).get()
+      return snap.exists ? [snap as QueryDocumentSnapshot] : []
+    }
+    let query: Query
+    if (source.idParam !== undefined) {
+      const concrete = resolveCollectionPath(source.pattern, { ...m.params, [source.idParam]: m.id })
+      if (!concrete) return undefined
+      query = this.db().collection(concrete)
+    } else {
+      const concrete = resolveCollectionPath(source.pattern, m.params)
+      const base = concrete ? this.db().collection(concrete) : this.db().collectionGroup(source.pattern.collectionId)
+      query = base.where(source.idField!, '==', m.id)
+    }
+    for (const o of source.orderBy) query = query.orderBy(o.field, o.direction)
+    if (source.limit !== undefined) query = query.limit(source.limit)
+    // A collection group may include same-named collections elsewhere; those are filtered out,
+    // and with `limit` we keep paging until enough matching documents are found.
+    const out: QueryDocumentSnapshot[] = []
+    let last: QueryDocumentSnapshot | undefined
+    for (;;) {
+      const snap = await (last ? query.startAfter(last) : query).get()
+      for (const d of snap.docs) if (matchDocumentPath(source.pattern, d.ref.path) && this.sourceBelongsTo(source, m, d.ref.path)) out.push(d)
+      if (source.limit === undefined || out.length >= source.limit || snap.size < source.limit) break
+      last = snap.docs[snap.docs.length - 1]
+    }
+    return source.limit === undefined ? out : out.slice(0, source.limit)
+  }
+
+  /** For collection-group results: keep only sources whose path params agree with the target's. */
+  private sourceBelongsTo(source: ResolvedViewSource, target: DocumentMatch, sourcePath: string): boolean {
+    const sm = matchDocumentPath(source.pattern, sourcePath)
+    if (!sm) return false
+    return Object.entries(target.params).every(([k, v]) => sm.params[k] === undefined || sm.params[k] === v)
+  }
+
+  /**
+   * Runs `fn` for every target to recompute after a source document changed. Returns false
+   * when the target collection cannot be resolved from the source path. `refField` sources
+   * fan out to a query, processed page by page with bounded parallelism; the page's snapshots
+   * are passed along so the first attempt needs no extra read.
+   */
+  private async forEachViewTarget(
+    view: ResolvedView,
+    source: ResolvedViewSource,
+    match: DocumentMatch,
+    before: DecodedDocument | undefined,
+    after: DecodedDocument | undefined,
+    fn: (ref: DocumentReference, snapshot?: DocumentSnapshot) => Promise<void>,
+  ): Promise<boolean> {
+    const firestore = this.db()
+    if (source.refField !== undefined) {
+      const concrete = resolveCollectionPath(view.targetPattern, match.params)
+      const base = concrete ? firestore.collection(concrete) : firestore.collectionGroup(view.targetPattern.collectionId)
+      const query = base.where(source.refField, '==', match.id).limit(this.pageSize)
+      let last: DocumentSnapshot | undefined
+      for (;;) {
+        const page = await (last ? query.startAfter(last) : query).get()
+        const docs = page.docs.filter((d) => {
+          const tm = matchDocumentPath(view.targetPattern, d.ref.path)
+          return tm !== undefined && Object.entries(match.params).every(([k, v]) => tm.params[k] === undefined || tm.params[k] === v)
+        })
+        await forEachLimit(docs, VIEW_FANOUT_CONCURRENCY, (d) => fn(d.ref, d))
+        if (page.size < this.pageSize) break
+        last = page.docs[page.docs.length - 1]
+      }
+      return true
+    }
+    const ids = new Set<string>()
+    for (const doc of [before, after]) {
+      if (!doc) continue
+      const id = source.idField !== undefined ? getField(doc.data, source.idField) : match.params[source.idParam!]
+      if (typeof id === 'string' && id !== '' && !id.includes('/')) ids.add(id)
+    }
+    const targetCollection = resolveCollectionPath(view.targetPattern, match.params)
+    if (!targetCollection) return false
+    for (const id of ids) await fn(firestore.doc(`${targetCollection}/${id}`))
+    return true
   }
 }
+
+/** Targets of one view source change recomputed in parallel (each one reads its own sources). */
+const VIEW_FANOUT_CONCURRENCY = 10
 
 async function aggregateValue(query: Query, rule: ResolvedAggregate): Promise<number> {
   if (rule.aggregate === 'count') {
@@ -502,7 +765,7 @@ async function aggregateValue(query: Query, rule: ResolvedAggregate): Promise<nu
   return typeof total === 'number' ? total : Number(total ?? 0)
 }
 
-function newResult(rule: ResolvedConnection | ResolvedAggregate, role: RuleResult['role']): RuleResult {
+function newResult(rule: ResolvedRule, role: RuleResult['role']): RuleResult {
   return { rule: rule.name, kind: rule.kind, role, action: 'skip', targets: 0, writes: 0, retries: 0 }
 }
 

@@ -8,7 +8,7 @@ When you copy a few fields of `category/{id}` into `post.category`, or keep `pos
 
 ```ts
 // doc-sync.config.ts
-import { defineConfig } from 'firestore-denormalize'
+import { defineConfig, defineView } from 'firestore-denormalize'
 
 export default defineConfig({
   name: 'doc-sync',
@@ -35,6 +35,16 @@ export default defineConfig({
       aggregate: 'count',           // or { sum: 'amount' }
       targetField: 'likeCount',
     },
+  ],
+  views: [
+    defineView({
+      // post.latestComments = the 2 newest comments of post/{postId}/comment, as [{ id, body }]
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments',
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+      build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+    }),
   ],
 })
 ```
@@ -73,12 +83,23 @@ Create `doc-sync.config.ts` at the root of your Firebase project (see above). Fi
 | `serviceAccount` | Service account for the triggers. A bare ID is expanded to `<id>@<project>.iam.gserviceaccount.com` |
 | `connections[]` | Copy rules (below) |
 | `aggregates[]` | Count / sum rules (below) |
+| `views[]` | Rules computed by your own `build` function (below) |
 
 **Collections** are paths. A subcollection uses placeholders for the parent IDs: `users/{uid}/posts`. **Fields** may be dotted paths: `address.city`.
 
 **`connections[]`** copy `fields` of `source/{id}` into `target.targetField` wherever `target.idField == id`. Every placeholder of `source` must also appear in `target` so the source of a target can be found; `target` may have extra placeholders (`category` → `users/{uid}/posts`), in which case targets are found with a collection-group query.
 
 **`aggregates[]`** keep `target.targetField` equal to `count()` or `{ sum: 'field' }` over the source documents belonging to the target. The target is named either by a field on the source (`idField: 'postId'`) or by a placeholder of the source path (`idParam: 'postId'` for `post/{postId}/like`).
+
+**`views[]`** keep `target.targetField` equal to whatever `build({ target, sources })` returns, for shapes the other rules cannot express: the latest N items, a map keyed by id, a custom summary. `sources` is an object keyed by the names `build` sees; each source names a collection and how its documents relate to the target:
+
+| Source key | Relation |
+|---|---|
+| `idField: 'postId'` | Many-to-one: the source documents whose field holds the target ID |
+| `idParam: 'postId'` | Many-to-one: the source documents under the target (`post/{postId}/comment`) |
+| `refField: 'authorId'` | One-to-one: the document the target's own field points at |
+
+Many-to-one sources accept `orderBy` (`['createdAt', ['score', 'desc']]`) and `limit`. `watch` lists the source fields whose change triggers a recompute; without it, any change does. `build` receives every source as an array of `QueryDocumentSnapshot` (zero or one for `refField`), must be deterministic, and returns the value to store, or `undefined` to delete the field. The optional `patch(current, change, { target })` is a fast path that derives the new value from the current one and the changed document alone; return `undefined` to fall back to `build`. `change.after` is a fresh read of that document (`undefined` if it no longer exists), not the event payload, so a late or duplicate event still converges on the current state; `patch` must be idempotent and key items by document ID. Only the target's `refField`s are watched on the target side: if `build` reads other target fields, they are picked up on the next source change or `rebuild`. Wrap each view in `defineView(...)` to get `sources` typed inside `build`.
 
 Validation rejects duplicate names, two rules writing overlapping fields of the same collection, unresolvable placeholders, malformed paths, and loops where one rule's write would trigger the next rule back around to the first.
 
@@ -145,6 +166,16 @@ npx doc-sync rebuild --project <project> --rule post-category --start-after post
 
 `rebuild` walks every target of each rule in pages and brings it in line with its current source, using the same compute-and-conditionally-write code as the handler. Missing sources get the rule's `onSourceDelete` treatment. Progress lines include the last processed path so an interrupted run can be resumed with `--start-after`. It uses Application Default Credentials (`gcloud auth application-default login`), or the emulator when `FIRESTORE_EMULATOR_HOST` is set.
 
+### 6. Verify
+
+```sh
+npx doc-sync verify --project <project>                 # report every mismatch
+npx doc-sync verify --project <project> --fix           # and repair them
+npx doc-sync verify --project <project> --rule post-category --start-after post/abc
+```
+
+`verify` walks every target the same way `rebuild` does, but compares instead of writing: it recomputes the value from the current sources and reports every document whose `targetField` differs, without touching it. Pass `--fix` to repair mismatches with the same conditional writes the handler uses. The command exits non-zero when a mismatch remains unfixed, so it can run as a CI or scheduled check against production.
+
 ## Local development with the Emulator Suite
 
 The emulators have no Eventarc for Firestore, so `doc-sync dev` bridges the gap without a second runtime path: it listens to the configured collections in the Firestore emulator with `onSnapshot`, encodes each change exactly like Eventarc does (protobuf `DocumentEventData`), and POSTs it to your function running in the Functions emulator.
@@ -164,6 +195,7 @@ doc-sync validate [--config <path>]
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
@@ -192,6 +224,8 @@ For an event on `collection/docId`, every connection whose `source` or `target` 
 1. Skip if it is an update and neither `idField` nor the summed field changed.
 2. For each target the document belonged to before and after (at most two), `get()` the target, run the aggregation query, and write the number if it differs, conditional on the target's `updateTime`. A newly created target gets its initial value the same way.
 
+**Views.** On a source change (skipped when `watch` fields, or the whole document when `watch` is unset, did not change), every target it belongs to is read, then `patch` (if defined, given a fresh read of the changed document; returning `undefined` falls back) or `build` over fresh reads of every source computes the value, written conditionally if it differs. Targets are recomputed on create and when a `refField` changes. `rebuild` / `verify` always use `build`.
+
 **Conflicts.** If a conditional write fails because someone else wrote the target in between, that target is redone from step 2 (up to `maxRetries` times, then the request fails with 500 and Eventarc redelivers it). If the source changed after it was read, the event for that change takes care of it. Values are compared deeply (`Timestamp`, `GeoPoint`, `DocumentReference` and bytes included), so the handler's own writes come back as no-ops and multi-step chains such as `area -> shop.area -> post.shop.area` terminate.
 
 **Responses.** `204` for done or nothing to do, and also for unrecoverable input (undecodable payload, unknown collection, other database) which is logged at `error`/`warn` level and not retried. `500` for transient failures, which Eventarc retries with backoff for up to 24 hours. Processing is idempotent.
@@ -203,10 +237,10 @@ For an event on `collection/docId`, every connection whose `source` or `target` 
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
 - If an application writes `targetField` directly, the value stays until the source changes again (or until `rebuild`).
 - The target query needs the default single-field index on `idField`. Rules that need a collection-group query (`validate` lists them) need a collection-group scope index on that field; Firestore prints the creation link on first use.
-- Counts and sums cost one aggregation read per affected target per event.
+- Counts and sums cost one aggregation read per affected target per event. A view costs one read (or query) per source per affected target, unless `patch` handles the event.
 - Latency is Eventarc's delivery latency (typically under a second to a few seconds).
 
-See [ROADMAP.md](./ROADMAP.md) for what is planned, including backfill, subcollections and emulator support.
+See [ROADMAP.md](./ROADMAP.md) for what is planned, including typed config and cost estimates.
 
 ## Recommended function settings
 

@@ -1,6 +1,7 @@
-import { needsCollectionGroupQuery, type ResolvedConfig } from '../config.js'
+import { collectionGroupQueries, type ResolvedConfig, type ResolvedRule } from '../config.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
+import { verify as runVerify } from '../verify.js'
 import type { Logger } from '../logger.js'
 import { eventarcPathPattern } from '../paths.js'
 import { CommandError, type Runner } from './exec.js'
@@ -50,13 +51,25 @@ export function printSummary(ctx: Context): void {
     }
     log()
   }
-  const groupRules = [...config.connections, ...config.aggregates].filter(needsCollectionGroupQuery)
-  if (groupRules.length) {
-    log('Collection-group queries (need a collection-group index on the field, Firestore prints the link on first use):')
-    for (const r of groupRules) {
-      const field = r.kind === 'connection' ? `${r.target}.${r.idField}` : `${r.source}.${r.idField}`
-      log(`  ${r.name}: ${field}`)
+  if (config.views.length) {
+    log(`Views (${config.views.length}):`)
+    for (const v of config.views) {
+      log(`  ${v.name}: build(${v.sources.map((s) => s.key).join(', ')}) -> ${v.target}.${v.targetField}`)
+      for (const s of v.sources) {
+        const by = s.idField ? `by ${s.idField}` : s.idParam !== undefined ? `by {${s.idParam}}` : `via target.${s.refField}`
+        const order = s.orderBy.length ? `, order by ${s.orderBy.map((o) => `${o.field} ${o.direction}`).join(', ')}` : ''
+        const limit = s.limit !== undefined ? `, limit ${s.limit}` : ''
+        const watch = s.watch !== undefined ? `, watch ${s.watch.join(',')}` : ''
+        log(`      ${s.key}: ${s.collection} (${by})${order}${limit}${watch}`)
+      }
     }
+    log()
+  }
+  const allRules: ResolvedRule[] = [...config.connections, ...config.aggregates, ...config.views]
+  const groupEntries = allRules.flatMap((r) => collectionGroupQueries(r).map((q) => ({ rule: r.name, ...q })))
+  if (groupEntries.length) {
+    log('Collection-group queries (need a collection-group index on the field, Firestore prints the link on first use):')
+    for (const e of groupEntries) log(`  ${e.rule}: ${e.collection}.${e.field}`)
     log()
   }
   const triggers = desiredTriggers(config)
@@ -235,6 +248,57 @@ export async function rebuild(
   }
   log()
   log(opts.dryRun ? 'Dry run complete. Re-run without --dry-run to apply.' : 'Rebuild complete.')
+}
+
+/** `cliLogger`, but drops the `doc-sync verify: mismatch` info line (the CLI prints its own line for each mismatch via `onMismatch`). */
+function verifyLogger(log: (line?: string) => void): Logger {
+  const base = cliLogger(log)
+  return {
+    ...base,
+    info: (m, f) => {
+      if (!m.startsWith('doc-sync verify: mismatch')) base.info(m, f)
+    },
+  }
+}
+
+export async function verify(
+  ctx: Context,
+  opts: { rules?: string[]; fix: boolean; startAfter?: string; pageSize?: number },
+): Promise<boolean> {
+  const { log } = ctx
+  const firestore = await cliFirestore(ctx)
+  const emulator = process.env.FIRESTORE_EMULATOR_HOST
+  log(`Verifying ${opts.rules?.length ? opts.rules.join(', ') : 'all rules'} in ${emulator ? `emulator ${emulator}` : `project ${ctx.project}`}${opts.fix ? ' (fix)' : ''}`)
+  log()
+  const results = await runVerify(ctx.config, {
+    firestore,
+    logger: verifyLogger(log),
+    rules: opts.rules,
+    fix: opts.fix,
+    startAfter: opts.startAfter,
+    pageSize: opts.pageSize,
+    onMismatch: (m) => {
+      const actual = m.actual === undefined ? '(absent)' : JSON.stringify(m.actual)
+      const expected = m.expected === undefined ? '(absent)' : JSON.stringify(m.expected)
+      log(`  ${m.rule}: ${m.document}.${m.field}  actual=${actual}  expected=${expected}${m.fixed ? '  fixed' : ''}`)
+    },
+    onProgress: (p) => log(`  ${p.rule}: scanned ${p.scanned}, mismatched ${p.mismatched}, fixed ${p.fixed}, last ${p.lastPath}`),
+  })
+  log()
+  for (const r of results) {
+    log(`${r.rule}: ${r.scanned} targets, ${r.mismatched} mismatched, ${r.fixed} fixed`)
+  }
+  log()
+  const totalMismatched = results.reduce((n, r) => n + r.mismatched, 0)
+  const totalFixed = results.reduce((n, r) => n + r.fixed, 0)
+  if (totalMismatched === 0) {
+    log('All derived data is up to date.')
+  } else if (opts.fix) {
+    log(`${totalMismatched} mismatch(es) found, ${totalFixed} fixed.`)
+  } else {
+    log(`${totalMismatched} mismatch(es) found. Re-run with --fix to repair.`)
+  }
+  return totalMismatched === totalFixed
 }
 
 export async function dev(ctx: Context, opts: { url: string; emulatorHost?: string }): Promise<void> {

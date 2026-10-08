@@ -1,4 +1,4 @@
-import { defineConfig } from 'firestore-denormalize'
+import { defineConfig, defineView } from 'firestore-denormalize'
 
 export default defineConfig({
   name: 'doc-sync',
@@ -57,5 +57,16 @@ export default defineConfig({
       aggregate: { sum: 'amount' },
       targetField: 'total',
     },
+  ],
+
+  views: [
+    defineView({
+      // post.latestComments = the 2 newest comments of post/{postId}/comment, as [{ id, body }]
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments',
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+      build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+    }),
   ],
 })

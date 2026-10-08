@@ -18,9 +18,9 @@ We stay with **Eventarc → one HTTP function**. We do not intend to add a secon
 | `rebuild` / backfill | Done (v0.2) |
 | Subcollections | Done (v0.2) |
 | Emulator support (`doc-sync dev`) | Done (v0.2) |
-| `doc-sync verify` | Planned |
+| `doc-sync verify` | Done (v0.3) |
 | Typed config | Planned |
-| Views (`build` + `patch`) | Planned |
+| Views (`build` + `patch`) | Done (v0.3) |
 | Cost estimate in `validate` | Planned |
 | Sync metadata (`_sync`) | Planned |
 
@@ -66,9 +66,9 @@ Uses only public APIs, so it does not depend on firebase-tools internals. The br
 
 ## 2. Reasons to choose this package
 
-### `doc-sync verify`
+### `doc-sync verify` — done
 
-`doc-sync verify [--connection <name>] [--fix]` reads the derived data, recomputes it from the sources and reports every mismatch. With `--fix` it repairs them with the same conditional writes the handler uses. Being able to *prove* that derived data is correct is the main advantage over both hand-written triggers and the existing Extensions.
+`doc-sync verify [--rule <name>] [--fix]` reads the derived data, recomputes it from the sources and reports every mismatch. With `--fix` it repairs them with the same conditional writes the handler uses. Being able to *prove* that derived data is correct is the main advantage over both hand-written triggers and the existing Extensions. Shipped in v0.3; exits non-zero while a mismatch remains, so it can run as a CI check.
 
 ### Typed config
 
@@ -78,14 +78,15 @@ defineConfig<{ post: Post; category: Category }>({ ... })
 
 With the collection types supplied, `fields`, `idField` and `targetField` are checked at compile time, so a renamed field fails the build instead of silently copying `undefined`.
 
-### Views (`build` + `patch`)
+### Views (`build` + `patch`) — done
 
 Rules that compute a derived value with user code instead of a fixed field list, for shapes the built-in rules cannot express: "latest N items", a dictionary keyed by id, a denormalized summary.
 
-- `build(sources) => value` recomputes the whole value from a fresh read, so results stay deterministic.
+- `build({ target, sources }) => value` recomputes the whole value from a fresh read, so results stay deterministic.
 - `patch(current, change) => value` is an optional fast path; `rebuild` and `verify` always use `build`.
+- Sources relate to the target by `idField`, `idParam` or `refField`, with optional `orderBy`, `limit` and `watch`.
 
-Lower priority than the items in section 1 because it requires the user to write code.
+Shipped in v0.3.
 
 ## 3. Nice to have
 
@@ -112,5 +113,6 @@ These change the correctness model and belong in a separate package, if anywhere
 |---|---|
 | v0.1 | copy sync, `validate` / `setup` / `deploy` |
 | v0.2 | counts and sums, subcollections, `rebuild`, `doc-sync dev` |
-| v1.0 (public release) | `verify`, typed config, validated in the first production project |
-| v1.x | views, cost estimate, `_sync` metadata |
+| v0.3 | verify, views |
+| v1.0 (public release) | typed config, validated in the first production project |
+| v1.x | cost estimate, `_sync` metadata |

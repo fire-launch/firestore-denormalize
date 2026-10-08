@@ -7,7 +7,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type { DocumentSnapshot, Firestore } from 'firebase-admin/firestore'
-import { collectionsOf, type DocSyncConfig, validateConfig } from './config.js'
+import { collectionsOf, type DocSyncConfig, type ResolvedConfig, resolveConfig } from './config.js'
 import { encodeDocumentEventData } from './encode.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { matchDocumentPath } from './paths.js'
@@ -32,8 +32,8 @@ export interface DevBridge {
   stop(): void
 }
 
-export function startDevBridge(config: DocSyncConfig, options: DevBridgeOptions): DevBridge {
-  const resolved = validateConfig(config)
+export function startDevBridge(config: DocSyncConfig | ResolvedConfig, options: DevBridgeOptions): DevBridge {
+  const resolved = resolveConfig(config)
   const logger = options.logger ?? jsonLogger
   const doFetch = options.fetch ?? fetch
   const database = resolved.database
