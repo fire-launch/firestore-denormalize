@@ -646,7 +646,7 @@ export class Processor {
       // The event payload may be stale or duplicated; give `patch` the document as it is now (read after the target).
       const current = await this.db().doc(opts.change.path).get()
       const change: ViewChange = { ...opts.change, after: current.exists ? current.data() : undefined }
-      const patched = await view.patch(target.get(view.targetField), change, { target })
+      const patched = await view.patch(target.get(view.targetField), change, { target, firestore: this.db() })
       if (patched !== undefined) return { value: patched }
     }
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
@@ -655,7 +655,7 @@ export class Processor {
       if (docs === undefined) return { value: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
       sources[source.key] = docs
     }
-    const built = await view.build({ target, sources })
+    const built = await view.build({ target, sources, firestore: this.db() })
     return { value: built === undefined ? DELETE : built }
   }
 

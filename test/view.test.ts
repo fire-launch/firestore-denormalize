@@ -72,12 +72,41 @@ const mentions = defineView({
   build: ({ sources }) => sources.mentions.map((m: QueryDocumentSnapshot) => m.ref.path),
 })
 
+/** thread.latest = newest 2 messages, maintained by patch with at most one extra read per event (refill after a delete). */
+let refills = 0
+type Item = { id: string; body: unknown; at: number }
+const latestMessages = defineView({
+  name: 'thread-latest',
+  target: 'thread',
+  targetField: 'latest',
+  sources: { messages: { collection: 'message', idField: 'threadId', orderBy: [['at', 'desc']], limit: 2, watch: ['body', 'at'] } },
+  build: ({ sources }) => {
+    builds++
+    return sources.messages.map((m): Item => ({ id: m.id, body: m.get('body'), at: m.get('at') }))
+  },
+  patch: async (current, change, { target, firestore }) => {
+    const id = change.path.split('/').pop()!
+    const rest = (current ?? []).filter((m) => m.id !== id)
+    const after = change.after
+    if (after && after.threadId === target.id) {
+      return [...rest, { id, body: after.body, at: after.at as number }].sort((a, b) => b.at - a.at).slice(0, 2)
+    }
+    if (rest.length === (current ?? []).length) return current
+    if (rest.length < 2 && rest.length > 0) {
+      refills++
+      const older = await firestore.collection('message').where('threadId', '==', target.id).where('at', '<', rest[rest.length - 1]!.at).orderBy('at', 'desc').limit(1).get()
+      for (const m of older.docs) rest.push({ id: m.id, body: m.get('body'), at: m.get('at') })
+    }
+    return rest
+  },
+})
+
 const config = defineConfig({
   name: 'doc-sync',
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  views: [latestComments, badges, summary, nested, mentions],
+  views: [latestComments, badges, summary, nested, mentions, latestMessages],
 })
 
 function handlerFor(cfg: DocSyncConfig = config, opts: Parameters<typeof createDocSyncHandler>[1] = {}) {
@@ -96,6 +125,7 @@ beforeAll(() => {
 beforeEach(async () => {
   await clearFirestore()
   builds = 0
+  refills = 0
 })
 
 describe('views: idParam source (latest N)', () => {
@@ -230,6 +260,46 @@ describe('views: idField source with patch', () => {
     expect((await db.doc('user/u1').get()).get('badges')).toEqual({})
     expect((await db.doc('user/u2').get()).get('badges')).toEqual({ b1: { name: 'Gold' } })
     expect(processed(logs, 'user-badges')).toMatchObject({ targets: 2, writes: 2 })
+  })
+})
+
+describe('views: latest N maintained by patch with one extra read', () => {
+  it('inserts, replaces, drops and refills by id without calling build', async () => {
+    const thread = db.doc('thread/t1')
+    await thread.set({ title: 'T', latest: [] })
+    const { handler, logs } = handlerFor()
+    const send = async (id: string, data: object) => {
+      const ref = db.doc(`message/${id}`)
+      expect(await invoke(handler, await change(ref, () => ref.set(data)))).toBe(204)
+    }
+    await send('m1', { threadId: 't1', body: 'one', at: 1 })
+    await send('m2', { threadId: 't1', body: 'two', at: 2 })
+    await send('m3', { threadId: 't1', body: 'three', at: 3 })
+    expect((await thread.get()).get('latest')).toEqual([
+      { id: 'm3', body: 'three', at: 3 },
+      { id: 'm2', body: 'two', at: 2 },
+    ])
+
+    // an old message arriving late is not in the window: no write
+    await send('m0', { threadId: 't1', body: 'zero', at: 0 })
+    expect(processed(logs, 'thread-latest')).toMatchObject({ action: 'skip', reason: 'targets up to date' })
+
+    // edit in place
+    await send('m3', { threadId: 't1', body: 'THREE', at: 3 })
+    expect((await thread.get()).get('latest')).toEqual([
+      { id: 'm3', body: 'THREE', at: 3 },
+      { id: 'm2', body: 'two', at: 2 },
+    ])
+
+    // delete the newest: m1 is pulled back in with one limit(1) query
+    const m3 = db.doc('message/m3')
+    await invoke(handler, await change(m3, () => m3.delete()))
+    expect((await thread.get()).get('latest')).toEqual([
+      { id: 'm2', body: 'two', at: 2 },
+      { id: 'm1', body: 'one', at: 1 },
+    ])
+    expect(refills).toBe(1)
+    expect(builds).toBe(0)
   })
 })
 

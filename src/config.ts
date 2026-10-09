@@ -4,7 +4,7 @@
  * The same config object is consumed by the Cloud Run handler
  * (`createDocSyncHandler`) and by the CLI (`doc-sync validate|setup|deploy|rebuild|dev`).
  */
-import type { DocumentData, DocumentSnapshot, QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import type { DocumentData, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { fieldPathsOverlap, isValidFieldPath } from './fields.js'
 import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug } from './paths.js'
 
@@ -92,6 +92,8 @@ export interface BuildContext<S extends Record<string, ViewSource> = Record<stri
   target: DocumentSnapshot
   /** Documents per source key, in query order. A `refField` source has zero or one document. */
   sources: { [K in keyof S]: QueryDocumentSnapshot[] }
+  /** The Firestore instance the handler uses, for extra reads. Reads happen after the target was read, so the conditional write stays safe. */
+  firestore: Firestore
 }
 
 /** The source change `patch` is asked to apply. */
@@ -112,6 +114,8 @@ export interface ViewChange {
 export interface PatchContext {
   /** Freshly read target document. */
   target: DocumentSnapshot
+  /** The Firestore instance the handler uses, for a small extra read (e.g. refilling a "latest N" list after a delete). */
+  firestore: Firestore
 }
 
 /**
