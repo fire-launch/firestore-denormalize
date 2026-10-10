@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { validateConfig } from '../../src/config.js'
-import { deploy, setup, type Context } from '../../src/cli/commands.js'
+import { defineView, validateConfig } from '../../src/config.js'
+import { deploy, setup, validate, type Context } from '../../src/cli/commands.js'
 import { CommandError, formatCommand, type Runner } from '../../src/cli/exec.js'
 
 const config = validateConfig({
@@ -110,5 +110,48 @@ describe('deploy', () => {
     deploy(ctx(runner), { deployFunction: 'docSync' })
     expect(mutations[0]).toBe('firebase deploy --only functions:docSync --project=my-proj')
     expect(mutations.filter((m) => m.includes('triggers create'))).toHaveLength(2)
+  })
+})
+
+describe('validate', () => {
+  const costConfig = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    connections: [
+      { name: 'area-category', source: 'area', target: 'category', idField: 'areaId', fields: ['name'], targetField: 'parent', onSourceDelete: 'setNull' },
+      { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'parent'], targetField: 'category', onSourceDelete: 'setNull' },
+    ],
+    views: [
+      defineView({
+        name: 'post-summary',
+        target: 'post',
+        targetField: 'summary',
+        sources: { author: { collection: 'user', refField: 'authorId' } },
+        build: () => 'x',
+      }),
+    ],
+  })
+  const costCtx = (log: (line?: string) => void): Context => ({
+    config: costConfig,
+    configPath: '/x/doc-sync.config.ts',
+    project: 'my-proj',
+    runner: fakeRunner({}).runner,
+    log,
+  })
+
+  it('prints a cost section, a write chain and a warning', () => {
+    const lines: string[] = []
+    validate(costCtx((l = '') => lines.push(l)))
+    const output = lines.join('\n')
+    expect(output).toContain('Cost per event (N = targets matching the changed source, M = source documents of one target):')
+    expect(output).toContain('Write chains')
+    expect(output).toContain('area-category -> post-category')
+    expect(output).toContain('source "author" (refField) fans out')
+  })
+
+  it('throws with --strict when there is a warning', () => {
+    expect(() => validate(costCtx(() => {}), { strict: true })).toThrow(/1 warning\(s\); failing because of --strict/)
   })
 })

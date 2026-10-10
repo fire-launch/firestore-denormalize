@@ -40,6 +40,9 @@ describe('rebuild', () => {
       ['post-category', 14, 7], // 6 stale + orphan -> null
       ['category-posts', 1, 1],
     ])
+    // 3 pages of 5/5/4 posts (14 reads, 3 queries); sources c1 and "gone" read once per page they appear in
+    expect(results[0]).toMatchObject({ reads: 14 + 3 + 1, queries: 3, aggregations: 0 })
+    expect(results[1]).toMatchObject({ reads: 1, queries: 1, aggregations: 1 })
     expect((await db.doc('post/p1').get()).get('category')).toEqual({ name: 'A' })
     expect((await db.doc('post/orphan').get()).get('category')).toBeNull()
     expect((await db.doc('post/none').get()).data()).toEqual({ title: 'no category' })

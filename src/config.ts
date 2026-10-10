@@ -682,28 +682,47 @@ export function collectionGroupQueries(rule: ResolvedRule): { collection: string
   return queries
 }
 
+/** One rule's write that makes another rule run: `from` writes `field` (`collection.path`) which `to` watches. */
+export interface WriteTrigger {
+  from: string
+  field: string
+  to: string
+}
+
+/**
+ * Every (writer, watcher) pair among the rules: `a` writes `a.targetField` on a collection
+ * that `b` reads as a source, and `b` watches that field (or any field). Order: writers in
+ * config order, then watchers in config order.
+ */
+export function writeTriggers(config: ResolvedConfig): WriteTrigger[] {
+  return writeTriggerEdges(rulesOf(config))
+}
+
+function writeTriggerEdges(rules: ResolvedRule[]): WriteTrigger[] {
+  const watchers = (r: ResolvedRule): { key: string; fields: string[] | undefined }[] => {
+    if (r.kind === 'connection') return [{ key: r.sourcePattern.key, fields: r.fields }]
+    if (r.kind === 'aggregate') return [{ key: r.sourcePattern.key, fields: r.watchedFields }]
+    return r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))
+  }
+  const edges: WriteTrigger[] = []
+  for (const a of rules) {
+    for (const b of rules) {
+      const hit = watchers(b).some((w) => w.key === a.targetPattern.key && (w.fields === undefined || w.fields.some((f) => fieldPathsOverlap(f, a.targetField))))
+      if (hit) edges.push({ from: a.name, field: `${a.target}.${a.targetField}`, to: b.name })
+    }
+  }
+  return edges
+}
+
 /**
  * Finds a loop of rules where each rule's write changes a field the next rule watches on
  * the same collection. Chains without such a loop always terminate because a rule skips
  * when none of its watched fields changed.
  */
 function findCycle(rules: ResolvedRule[]): string[] | undefined {
-  const watchers = (r: ResolvedRule): { key: string; fields: string[] | undefined }[] => {
-    if (r.kind === 'connection') return [{ key: r.sourcePattern.key, fields: r.fields }]
-    if (r.kind === 'aggregate') return [{ key: r.sourcePattern.key, fields: r.watchedFields }]
-    return r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))
-  }
   const next = new Map<string, string[]>()
-  for (const a of rules) {
-    next.set(
-      a.name,
-      rules
-        .filter((b) =>
-          watchers(b).some((w) => w.key === a.targetPattern.key && (w.fields === undefined || w.fields.some((f) => fieldPathsOverlap(f, a.targetField)))),
-        )
-        .map((b) => b.name),
-    )
-  }
+  for (const r of rules) next.set(r.name, [])
+  for (const e of writeTriggerEdges(rules)) next.get(e.from)!.push(e.to)
   const state = new Map<string, 'visiting' | 'done'>()
   const stack: string[] = []
   const visit = (node: string): string[] | undefined => {

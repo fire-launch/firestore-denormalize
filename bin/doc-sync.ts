@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process'
 const HELP = `doc-sync — sync denormalized Firestore documents with one function and per-collection Eventarc triggers
 
 Usage:
-  doc-sync validate [--config <path>]
+  doc-sync validate [--config <path>] [--strict]
   doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
   doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
   doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>]
@@ -26,6 +26,7 @@ Commands:
 
 Options:
   --config <path>           Config file (default: ${DEFAULT_CONFIG_PATH})
+  --strict                  validate: exit 1 when the cost estimate has warnings
   --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then gcloud's active project)
   --dry-run                 setup/deploy: print gcloud commands; rebuild: report without writing
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
@@ -49,6 +50,7 @@ async function main(argv: string[]): Promise<number> {
     options: {
       config: { type: 'string' },
       project: { type: 'string' },
+      strict: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       'deploy-function': { type: 'string' },
       fix: { type: 'boolean', default: false },
@@ -95,7 +97,7 @@ async function main(argv: string[]): Promise<number> {
 
   switch (command) {
     case 'validate':
-      validate(ctx)
+      validate(ctx, { strict: values.strict })
       break
     case 'setup':
       setup(ctx)

@@ -223,7 +223,7 @@ Documents that already exist when the bridge starts are cached silently; changes
 ## CLI
 
 ```
-doc-sync validate [--config <path>]
+doc-sync validate [--config <path>] [--strict]
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
@@ -232,6 +232,12 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 ```
 
 `--config` defaults to `./doc-sync.config.ts`. `--project` defaults to `$GOOGLE_CLOUD_PROJECT`, then gcloud's active project. The config may be TypeScript or JavaScript, ESM or CJS.
+
+### Cost estimate
+
+`doc-sync validate` prints, per rule, the Firestore reads and writes one event causes, as formulas over `N` (the targets matching the changed source) and `M` (the source documents belonging to one target). Reads are billable document reads; aggregation queries (`count()` / `sum()`) are counted separately since they are billed differently. Reads a view's `build` or `patch` performs itself are user code and cannot be counted statically, so they show as "(+ reads inside build)" / "(+ reads inside patch)"; the handler reports the actual counts per event in its logs as `reads` / `queries` / `aggregations` (see *Logs* below), and `rebuild` / `verify` print them per rule.
+
+Two warnings call out shapes that are expensive by construction: a `refField` view source fans out, since one change to the referenced document rebuilds every target that points at it; and a many-to-one source with no `limit` and no `patch` reads every source document of the target on every event, since there is no fast path and no cap on the query. Pass `--strict` to turn either warning into a failing exit code, so it can gate CI before an expensive rule reaches production.
 
 ## How a change is processed
 
@@ -262,7 +268,7 @@ For an event on `collection/docId`, every connection whose `source` or `target` 
 
 **Responses.** `204` for done or nothing to do, and also for unrecoverable input (undecodable payload, unknown collection, other database) which is logged at `error`/`warn` level and not retried. `500` for transient failures, which Eventarc retries with backoff for up to 24 hours. Processing is idempotent.
 
-**Logs.** One structured line per rule per event: `rule`, `kind`, `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `durationMs`.
+**Logs.** One structured line per rule per event: `rule`, `kind`, `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs`. The read counters follow Firestore billing: one per document read (missing documents included), one per document a query returned (at least one per query), and aggregations counted separately. Reads a view's `build` / `patch` makes through the `firestore` in its context are included; reads through a Firestore instance obtained elsewhere are not. Summing `reads` by `rule` in Cloud Logging shows which rule costs what.
 
 ## Known limitations
 

@@ -54,6 +54,9 @@ describe('verify', () => {
     ])
     expect(seen).toEqual([...results[0]!.mismatches, ...results[1]!.mismatches])
     expect(results[0]!.lastPath).toBe('post/unlinked')
+    // pages of 3 + 3 posts plus a final empty page (still one billed read); c1 / gone read once per page a post points at them
+    expect(results[0]).toMatchObject({ reads: 6 + 1 + 3, queries: 3, aggregations: 0 })
+    expect(results[1]).toMatchObject({ reads: 1, queries: 1, aggregations: 1 })
 
     // nothing was written
     expect((await db.doc('post/stale').get()).get('category')).toEqual({ name: 'old' })

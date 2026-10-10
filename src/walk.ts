@@ -4,6 +4,7 @@
  */
 import type { DocumentSnapshot, Firestore, Query, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { type ResolvedConfig, type ResolvedRule, rulesOf } from './config.js'
+import type { ReadCounter } from './counter.js'
 import { matchDocumentPath } from './paths.js'
 
 export interface WalkOptions {
@@ -13,6 +14,8 @@ export interface WalkOptions {
   concurrency: number
   /** Resume after this target document path. */
   startAfter?: string
+  /** Receives the page queries (and the `startAfter` lookup). */
+  counter?: ReadCounter
 }
 
 /** Fresh per page: shares source reads between targets of the same page. */
@@ -36,6 +39,7 @@ export async function walkTargets(
   const base = targetsQuery(firestore, rule)
   let cursor: DocumentSnapshot | undefined
   if (opts.startAfter) {
+    opts.counter?.doc()
     cursor = await firestore.doc(opts.startAfter).get()
     if (!cursor.exists) throw new Error(`cannot resume: ${opts.startAfter} does not exist`)
   }
@@ -44,6 +48,7 @@ export async function walkTargets(
   let lastPath: string | undefined
   for (;;) {
     const page = await (cursor ? base.startAfter(cursor) : base).limit(pageSize).get()
+    opts.counter?.query(page.size)
     if (page.empty) break
     const docs = page.docs.filter((d) => matchDocumentPath(rule.targetPattern, d.ref.path))
     const sourceCache = new Map<string, Promise<DocumentSnapshot>>()

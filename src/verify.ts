@@ -5,6 +5,7 @@
  */
 import type { Firestore } from 'firebase-admin/firestore'
 import { type DocSyncConfig, type ResolvedConfig, type ResolvedRule, resolveConfig } from './config.js'
+import { ReadCounter, type ReadCounts } from './counter.js'
 import { Processor } from './handler.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { selectRules, walkTargets } from './walk.js'
@@ -43,7 +44,7 @@ export interface Mismatch {
   fixed: boolean
 }
 
-export interface VerifyProgress {
+export interface VerifyProgress extends ReadCounts {
   rule: string
   /** Targets inspected so far. */
   scanned: number
@@ -78,18 +79,19 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
     let fixed = 0
     const mismatches: Mismatch[] = []
     let pending: Mismatch[] = []
+    const counter = new ReadCounter()
 
     const { scanned, lastPath } = await walkTargets(
       options.firestore,
       rule,
-      { pageSize, concurrency, startAfter },
+      { pageSize, concurrency, startAfter, counter },
       async (target, page) => {
-        const check = await processor.check(target, rule, { sourceCache: page.sourceCache })
+        const check = await processor.check(target, rule, { sourceCache: page.sourceCache, counter })
         if (check.status !== 'mismatch') return
         let didFix = false
         if (fix) {
           // `sync` re-reads before writing; a skip means someone else corrected the value (or removed the target) meanwhile.
-          await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache })
+          await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, counter })
           didFix = true
         }
         pending.push({
@@ -111,11 +113,11 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
           options.onMismatch?.(m)
         }
         pending = []
-        options.onProgress?.({ rule: rule.name, scanned: p.scanned, mismatched, fixed, lastPath: p.lastPath })
+        options.onProgress?.({ rule: rule.name, scanned: p.scanned, mismatched, fixed, lastPath: p.lastPath, ...counter.counts() })
       },
     )
     startAfter = undefined
-    results.push({ rule: rule.name, scanned, mismatched, fixed, lastPath, kind: rule.kind, fix, mismatches })
+    results.push({ rule: rule.name, scanned, mismatched, fixed, lastPath, kind: rule.kind, fix, mismatches, ...counter.counts() })
   }
   return results
 }

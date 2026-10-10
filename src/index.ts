@@ -8,6 +8,8 @@ export {
   collectionGroupQueries,
   defineView,
   rulesOf,
+  writeTriggers,
+  type WriteTrigger,
   ConfigError,
   type Connection,
   type AggregateRule,
@@ -72,5 +74,6 @@ export {
   type Params,
   type Leaf,
 } from './types.js'
+export { ReadCounter, countingFirestore, type ReadCounts } from './counter.js'
 export { verify, type VerifyOptions, type VerifyProgress, type VerifyResult, type Mismatch } from './verify.js'
 export { startDevBridge, type DevBridge, type DevBridgeOptions } from './dev.js'

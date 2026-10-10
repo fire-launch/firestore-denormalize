@@ -193,6 +193,33 @@ describe('source events (5.2)', () => {
   })
 })
 
+describe('read counters', () => {
+  it('counts billable reads per rule and event: pages, source reads, aggregations', async () => {
+    const cat = db.doc('category/c1')
+    await cat.set({ name: 'A' })
+    for (let i = 0; i < 5; i++) await db.doc(`post/p${i}`).set({ categoryId: 'c1' })
+    const { handler, logs } = handlerFor() // pageSize 2 -> pages of 2, 2, 1
+
+    expect(await invoke(handler, await change(cat, () => cat.update({ name: 'B' })))).toBe(204)
+    // 3 page queries returning 5 documents + one source read per page
+    expect(processed(logs, 'post-category')).toMatchObject({ reads: 8, queries: 3, aggregations: 0, writes: 5 })
+
+    // target side: target + source
+    const p9 = db.doc('post/p9')
+    await invoke(handler, await change(p9, () => p9.set({ categoryId: 'c1' })))
+    expect(processed(logs, 'post-category')).toMatchObject({ reads: 2, queries: 0, aggregations: 0 })
+
+    // a skipped event reads nothing
+    await invoke(handler, await change(cat, () => cat.update({ unrelated: 1 })))
+    expect(processed(logs, 'post-category')).toMatchObject({ action: 'skip', reads: 0, queries: 0 })
+
+    // an empty page still costs one read
+    const lonely = db.doc('category/lonely')
+    await invoke(handler, await change(lonely, () => lonely.set({ name: 'x' })))
+    expect(processed(logs, 'post-category')).toMatchObject({ reads: 1, queries: 1, targets: 0 })
+  })
+})
+
 describe('target events (5.3)', () => {
   it('populates a newly created target', async () => {
     await db.doc('category/c1').set({ name: 'A', color: 'red' })
@@ -624,6 +651,7 @@ describe('aggregates (count / sum)', () => {
     const l2 = db.doc('post/p1/like/u2')
     expect(await invoke(handler, await change(l2, () => l2.set({ at: 2 })))).toBe(204)
     expect((await post.get()).get('likeCount')).toBe(2)
+    expect(processed(logs, 'post-likes')).toMatchObject({ reads: 1, queries: 0, aggregations: 1 })
 
     // an update that changes nothing we watch is skipped without a query
     expect(await invoke(handler, await change(l2, () => l2.update({ at: 3 })))).toBe(204)

@@ -1,4 +1,5 @@
-import { collectionGroupQueries, type ResolvedConfig, type ResolvedRule } from '../config.js'
+import { collectionGroupQueries, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
+import { estimateCost, formatChains } from '../cost.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
 import { verify as runVerify } from '../verify.js'
@@ -77,10 +78,43 @@ export function printSummary(ctx: Context): void {
   for (const t of triggers) log(`  ${t.name}  <-  ${eventarcPathPattern(t.collection)}`)
 }
 
-export function validate(ctx: Context): void {
+export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
   printSummary(ctx)
   ctx.log()
-  ctx.log('Config is valid.')
+
+  const { config, log } = ctx
+  const rules: ResolvedRule[] = [...config.connections, ...config.aggregates, ...config.views]
+  const costs = rules.map((r) => estimateCost(r))
+  const maxTrigger = Math.max(0, ...costs.flatMap((c) => c.lines.map((l) => l.trigger.length)))
+
+  log('Cost per event (N = targets matching the changed source, M = source documents of one target):')
+  for (const cost of costs) {
+    log(`  ${cost.rule}`)
+    for (const line of cost.lines) {
+      log(`    ${line.trigger.padEnd(maxTrigger + 3)}reads ${line.reads}, writes ${line.writes}`)
+    }
+  }
+
+  const chains = formatChains(writeTriggers(config))
+  if (chains.length) {
+    log()
+    log("Write chains (a rule's write starts the next rule):")
+    for (const chain of chains) log(`  ${chain}`)
+  }
+
+  const warnings = costs.flatMap((c) => c.warnings.map((w) => `${c.rule}: ${w}`))
+  if (warnings.length) {
+    log()
+    log('Warnings:')
+    for (const w of warnings) log(`  ${w}`)
+  }
+
+  log()
+  log('Config is valid.')
+
+  if (opts.strict && warnings.length) {
+    throw new Error(`${warnings.length} warning(s); failing because of --strict`)
+  }
 }
 
 export function setup(ctx: Context): void {
@@ -244,7 +278,7 @@ export async function rebuild(
   })
   log()
   for (const r of results) {
-    log(`${r.rule}: ${r.scanned} targets, ${r.written} ${r.dryRun ? 'would be written' : 'written'}`)
+    log(`${r.rule}: ${r.scanned} targets, ${r.written} ${r.dryRun ? 'would be written' : 'written'} (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
   }
   log()
   log(opts.dryRun ? 'Dry run complete. Re-run without --dry-run to apply.' : 'Rebuild complete.')
@@ -286,7 +320,7 @@ export async function verify(
   })
   log()
   for (const r of results) {
-    log(`${r.rule}: ${r.scanned} targets, ${r.mismatched} mismatched, ${r.fixed} fixed`)
+    log(`${r.rule}: ${r.scanned} targets, ${r.mismatched} mismatched, ${r.fixed} fixed (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
   }
   log()
   const totalMismatched = results.reduce((n, r) => n + r.mismatched, 0)

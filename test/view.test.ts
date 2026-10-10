@@ -139,6 +139,8 @@ describe('views: idParam source (latest N)', () => {
     expect(await invoke(handler, await change(c1, () => c1.set({ body: 'one', createdAt: 1 })))).toBe(204)
     expect((await post.get()).get('latestComments')).toEqual([{ id: 'c1', body: 'one' }])
     expect(processed(logs, 'post-latest-comments')).toMatchObject({ kind: 'view', role: 'source', source: 'comments', action: 'write', targets: 1, writes: 1 })
+    // target read + one query returning one comment
+    expect(processed(logs, 'post-latest-comments')).toMatchObject({ reads: 2, queries: 1, aggregations: 0 })
 
     const c2 = db.doc('post/p1/comment/c2')
     await invoke(handler, await change(c2, () => c2.set({ body: 'two', createdAt: 2 })))
@@ -300,6 +302,8 @@ describe('views: latest N maintained by patch with one extra read', () => {
     ])
     expect(refills).toBe(1)
     expect(builds).toBe(0)
+    // target + the deleted message (missing, still billed) + the limit(1) refill query made inside patch
+    expect(processed(logs, 'thread-latest')).toMatchObject({ reads: 3, queries: 1, aggregations: 0 })
   })
 })
 

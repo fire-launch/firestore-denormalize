@@ -5,6 +5,7 @@
  */
 import type { Firestore } from 'firebase-admin/firestore'
 import { type DocSyncConfig, type ResolvedConfig, type ResolvedRule, resolveConfig } from './config.js'
+import { ReadCounter, type ReadCounts } from './counter.js'
 import { Processor } from './handler.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { selectRules, walkTargets } from './walk.js'
@@ -27,7 +28,7 @@ export interface RebuildOptions {
   onProgress?: (progress: RebuildProgress) => void
 }
 
-export interface RebuildProgress {
+export interface RebuildProgress extends ReadCounts {
   rule: string
   /** Targets inspected so far. */
   scanned: number
@@ -55,21 +56,22 @@ export async function rebuild(config: DocSyncConfig | ResolvedConfig, options: R
   let startAfter = options.startAfter
   for (const rule of selected) {
     let written = 0
+    const counter = new ReadCounter()
     const { scanned, lastPath } = await walkTargets(
       options.firestore,
       rule,
-      { pageSize, concurrency, startAfter },
+      { pageSize, concurrency, startAfter, counter },
       async (target, page) => {
-        const outcome = await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, dryRun: options.dryRun })
+        const outcome = await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, dryRun: options.dryRun, counter })
         if (outcome !== 'skip') {
           written++
           if (options.dryRun) logger.info('doc-sync rebuild: would write', { rule: rule.name, document: target.ref.path, action: outcome })
         }
       },
-      (p) => options.onProgress?.({ rule: rule.name, scanned: p.scanned, written, lastPath: p.lastPath }),
+      (p) => options.onProgress?.({ rule: rule.name, scanned: p.scanned, written, lastPath: p.lastPath, ...counter.counts() }),
     )
     startAfter = undefined
-    results.push({ rule: rule.name, scanned, written, lastPath, kind: rule.kind, dryRun: Boolean(options.dryRun) })
+    results.push({ rule: rule.name, scanned, written, lastPath, kind: rule.kind, dryRun: Boolean(options.dryRun), ...counter.counts() })
   }
   return results
 }

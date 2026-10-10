@@ -24,6 +24,7 @@ import {
 import { DecodeError, decodeDocumentEventData, type DecodedDocument } from './decode.js'
 import { isEqual } from './equal.js'
 import { getField, setField } from './fields.js'
+import { countingFirestore, ReadCounter, type ReadCounts } from './counter.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
@@ -57,8 +58,8 @@ export interface DocSyncResponse {
 
 export type DocSyncHandler = (req: DocSyncRequest, res: DocSyncResponse) => Promise<void>
 
-/** Result of processing one rule for one event. */
-export interface RuleResult {
+/** Result of processing one rule for one event. Read counts follow Firestore billing (see {@link ReadCounts}). */
+export interface RuleResult extends ReadCounts {
   rule: string
   kind: 'connection' | 'aggregate' | 'view'
   role: 'source' | 'target'
@@ -99,6 +100,8 @@ export interface CheckResult {
 export interface CheckOptions {
   /** Shares source reads between targets (e.g. within one page of `verify`). */
   sourceCache?: Map<string, Promise<DocumentSnapshot>>
+  /** Receives the reads issued. */
+  counter?: ReadCounter
 }
 
 /** Options shared by {@link Processor.syncCopy} and {@link Processor.syncAggregate}. */
@@ -111,6 +114,8 @@ export interface SyncOptions {
   dryRun?: boolean
   /** Shares source reads between targets (e.g. within one page of `rebuild`). */
   sourceCache?: Map<string, Promise<DocumentSnapshot>>
+  /** Receives the reads issued. */
+  counter?: ReadCounter
 }
 
 export interface DeletedSource {
@@ -271,12 +276,13 @@ export class Processor {
    */
   async check(target: DocumentSnapshot, rule: ResolvedRule, opts: CheckOptions = {}): Promise<CheckResult> {
     if (!target.exists) return { status: 'skip', reason: 'target missing' }
+    const counter = opts.counter ?? new ReadCounter()
     const computed =
       rule.kind === 'connection'
-        ? await this.computeCopy(target, rule, { sourceCache: opts.sourceCache, deleted: { onSourceDelete: rule.onSourceDelete } })
+        ? await this.computeCopy(target, rule, { sourceCache: opts.sourceCache, counter, deleted: { onSourceDelete: rule.onSourceDelete } })
         : rule.kind === 'aggregate'
-          ? await this.computeAggregate(target, rule)
-          : await this.computeView(target, rule, {})
+          ? await this.computeAggregate(target, rule, counter)
+          : await this.computeView(target, rule, { counter })
     const actual: unknown = target.get(rule.targetField)
     if (computed.value === NOTHING) return { status: 'skip', reason: computed.reason, actual }
     if (!needsWrite(target, rule.targetField, computed.value)) return { status: 'ok', actual }
@@ -315,6 +321,7 @@ export class Processor {
       return result
     }
 
+    const counter = new ReadCounter()
     const firestore = this.db()
     const sourceRef = firestore.doc(source.path)
     const query = this.targetsOf(conn, source).limit(this.pageSize)
@@ -326,12 +333,14 @@ export class Processor {
 
     for (;;) {
       const page = await (last ? query.startAfter(last) : query).get()
+      counter.query(page.size)
       if (page.empty) break
       const docs = page.docs.filter((d) => this.belongsTo(conn, source, d.ref.path))
       result.targets += docs.length
 
       // Read the source only after the targets, so a stale source value can never pass the precondition.
       const sourceSnap = await sourceRef.get()
+      counter.doc()
       const desired = copyValue(sourceSnap, conn, conn.onSourceDelete)
       if (desired === NOTHING) {
         result.reason = 'source missing and onSourceDelete=nothing'
@@ -364,10 +373,10 @@ export class Processor {
 
     for (const ref of retry) {
       result.retries++
-      count(result, await this.syncCopy(ref, conn, { deleted: { sourcePath: source.path, onSourceDelete: conn.onSourceDelete }, attempt: 1 }))
+      count(result, await this.syncCopy(ref, conn, { deleted: { sourcePath: source.path, onSourceDelete: conn.onSourceDelete }, attempt: 1, counter }))
     }
     if (result.writes === 0 && !result.reason) result.reason = result.targets ? 'targets up to date' : 'no targets'
-    return result
+    return finish(result, counter)
   }
 
   /** 5.3: the changed document is a target of `conn`. */
@@ -387,9 +396,10 @@ export class Processor {
       result.reason = 'idField unchanged'
       return result
     }
-    count(result, await this.syncCopy(this.db().doc(target.path), conn, {}))
+    const counter = new ReadCounter()
+    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter }))
     if (result.writes === 0) result.reason = 'target up to date'
-    return result
+    return finish(result, counter)
   }
 
   /**
@@ -405,19 +415,27 @@ export class Processor {
   async syncCopy(ref: DocumentReference, conn: ResolvedConnection, opts: SyncOptions & { deleted?: DeletedSource }): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
-    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
+    const counter = opts.counter ?? new ReadCounter()
+    const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
-    const { value } = await this.computeCopy(target, conn, opts)
+    const { value } = await this.computeCopy(target, conn, { ...opts, counter })
     if (value === NOTHING || !needsWrite(target, conn.targetField, value)) return 'skip'
     if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
-    return this.write(ref, target, conn.targetField, value, () => this.syncCopy(ref, conn, { ...opts, attempt: attempt + 1, sourceCache: undefined }))
+    return this.write(ref, target, conn.targetField, value, () => this.syncCopy(ref, conn, { ...opts, counter, attempt: attempt + 1, sourceCache: undefined }))
+  }
+
+  /** The target for this attempt: the caller's snapshot on a first try, else a fresh (counted) read. */
+  private async readTarget(ref: DocumentReference, opts: SyncOptions, counter: ReadCounter): Promise<DocumentSnapshot> {
+    if (opts.target && (opts.attempt ?? 0) === 0) return opts.target
+    counter.doc()
+    return ref.get()
   }
 
   /** The value `conn.targetField` of `target` should hold, read from the source it points at. */
   private async computeCopy(
     target: DocumentSnapshot,
     conn: ResolvedConnection,
-    opts: { sourceCache?: Map<string, Promise<DocumentSnapshot>>; deleted?: DeletedSource },
+    opts: { sourceCache?: Map<string, Promise<DocumentSnapshot>>; deleted?: DeletedSource; counter: ReadCounter },
   ): Promise<{ value: Computed; reason?: string }> {
     const currentId: unknown = target.get(conn.idField)
     if (currentId === undefined || currentId === null || currentId === '') return { value: DELETE }
@@ -432,20 +450,20 @@ export class Processor {
     }
     const sourcePath = this.sourcePathFor(conn, target.ref.path, currentId)
     if (!sourcePath) return { value: NOTHING, reason: 'cannot locate source' }
-    const sourceSnap = await this.readSource(sourcePath, opts.sourceCache)
+    const sourceSnap = await this.readSource(sourcePath, opts.counter, opts.sourceCache)
     const { deleted } = opts
     const applies = deleted && (deleted.sourcePath === undefined || deleted.sourcePath === sourcePath)
     const value = copyValue(sourceSnap, conn, applies ? deleted.onSourceDelete : 'nothing')
     return value === NOTHING ? { value, reason: 'source missing' } : { value }
   }
 
-  /** Reads a source document, sharing reads across targets of the same page when a cache is given. */
-  private readSource(path: string, cache?: Map<string, Promise<DocumentSnapshot>>): Promise<DocumentSnapshot> {
-    if (!cache) return this.db().doc(path).get()
-    let p = cache.get(path)
+  /** Reads a source document, sharing reads across targets of the same page when a cache is given (only actual reads are counted). */
+  private readSource(path: string, counter: ReadCounter, cache?: Map<string, Promise<DocumentSnapshot>>): Promise<DocumentSnapshot> {
+    let p = cache?.get(path)
     if (!p) {
+      counter.doc()
       p = this.db().doc(path).get()
-      cache.set(path, p)
+      cache?.set(path, p)
     }
     return p
   }
@@ -500,12 +518,13 @@ export class Processor {
       result.reason = 'target collection unresolvable'
       return result
     }
+    const counter = new ReadCounter()
     for (const id of ids) {
       result.targets++
-      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, {}))
+      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, { counter }))
     }
     if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no target id'
-    return result
+    return finish(result, counter)
   }
 
   /** A target was created: give it its initial value. Other target changes are ignored. */
@@ -525,27 +544,30 @@ export class Processor {
       result.reason = 'not a create'
       return result
     }
-    count(result, await this.syncAggregate(this.db().doc(target.path), rule, {}))
+    const counter = new ReadCounter()
+    count(result, await this.syncAggregate(this.db().doc(target.path), rule, { counter }))
     if (result.writes === 0) result.reason = 'target up to date'
-    return result
+    return finish(result, counter)
   }
 
   /** Reads the target, runs the aggregation query, writes the number if it differs (conditional on the target's updateTime). */
   async syncAggregate(ref: DocumentReference, rule: ResolvedAggregate, opts: SyncOptions): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
-    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
+    const counter = opts.counter ?? new ReadCounter()
+    const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
-    const { value } = await this.computeAggregate(target, rule)
+    const { value } = await this.computeAggregate(target, rule, counter)
     if (value === NOTHING || !needsWrite(target, rule.targetField, value)) return 'skip'
     if (opts.dryRun) return 'write'
-    return this.write(ref, target, rule.targetField, value, () => this.syncAggregate(ref, rule, { ...opts, attempt: attempt + 1 }))
+    return this.write(ref, target, rule.targetField, value, () => this.syncAggregate(ref, rule, { ...opts, counter, attempt: attempt + 1 }))
   }
 
   /** The number `rule.targetField` of `target` should hold, from an aggregation query over its sources. */
-  private async computeAggregate(target: DocumentSnapshot, rule: ResolvedAggregate): Promise<{ value: Computed; reason?: string }> {
+  private async computeAggregate(target: DocumentSnapshot, rule: ResolvedAggregate, counter: ReadCounter): Promise<{ value: Computed; reason?: string }> {
     const query = this.sourcesOf(rule, target.ref.path)
     if (!query) return { value: NOTHING, reason: 'target path does not match the rule' }
+    counter.aggregation()
     return { value: await aggregateValue(query, rule) }
   }
 
@@ -588,16 +610,17 @@ export class Processor {
       }
     }
     const change: ViewChange = { source: source.key, path: match.path, before: before?.data, after: after?.data }
-    const resolvable = await this.forEachViewTarget(view, source, match, before, after, async (ref, snapshot) => {
+    const counter = new ReadCounter()
+    const resolvable = await this.forEachViewTarget(view, source, match, before, after, counter, async (ref, snapshot) => {
       result.targets++
-      count(result, await this.syncView(ref, view, { change, target: snapshot }))
+      count(result, await this.syncView(ref, view, { change, target: snapshot, counter }))
     })
     if (!resolvable) {
       result.reason = 'target collection unresolvable'
-      return result
+      return finish(result, counter)
     }
     if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no targets'
-    return result
+    return finish(result, counter)
   }
 
   /** A target was created, or one of the fields pointing at a `refField` source changed: recompute it. */
@@ -620,9 +643,10 @@ export class Processor {
         return result
       }
     }
-    count(result, await this.syncView(this.db().doc(target.path), view, {}))
+    const counter = new ReadCounter()
+    count(result, await this.syncView(this.db().doc(target.path), view, { counter }))
     if (result.writes === 0) result.reason = 'target up to date'
-    return result
+    return finish(result, counter)
   }
 
   /**
@@ -632,35 +656,48 @@ export class Processor {
   async syncView(ref: DocumentReference, view: ResolvedView, opts: SyncOptions & { change?: ViewChange }): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
-    const target = opts.target && attempt === 0 ? opts.target : await ref.get()
+    const counter = opts.counter ?? new ReadCounter()
+    const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
-    const { value } = await this.computeView(target, view, opts)
+    const { value } = await this.computeView(target, view, { ...opts, counter })
     if (value === NOTHING || !needsWrite(target, view.targetField, value)) return 'skip'
     if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
-    return this.write(ref, target, view.targetField, value, () => this.syncView(ref, view, { ...opts, attempt: attempt + 1 }))
+    return this.write(ref, target, view.targetField, value, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
   }
 
   /** The value `view.targetField` of `target` should hold: `patch` applied to the current value, or `build` over fresh reads. */
-  private async computeView(target: DocumentSnapshot, view: ResolvedView, opts: { change?: ViewChange }): Promise<{ value: Computed; reason?: string }> {
+  private async computeView(
+    target: DocumentSnapshot,
+    view: ResolvedView,
+    opts: { change?: ViewChange; counter: ReadCounter },
+  ): Promise<{ value: Computed; reason?: string }> {
+    const { counter } = opts
+    const firestore = countingFirestore(this.db(), counter)
     if (opts.change && view.patch) {
       // The event payload may be stale or duplicated; give `patch` the document as it is now (read after the target).
+      counter.doc()
       const current = await this.db().doc(opts.change.path).get()
       const change: ViewChange = { ...opts.change, after: current.exists ? current.data() : undefined }
-      const patched = await view.patch(target.get(view.targetField), change, { target, firestore: this.db() })
+      const patched = await view.patch(target.get(view.targetField), change, { target, firestore })
       if (patched !== undefined) return { value: patched }
     }
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
     for (const source of view.sources) {
-      const docs = await this.viewSourceDocs(view, source, target)
+      const docs = await this.viewSourceDocs(view, source, target, counter)
       if (docs === undefined) return { value: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
       sources[source.key] = docs
     }
-    const built = await view.build({ target, sources, firestore: this.db() })
+    const built = await view.build({ target, sources, firestore })
     return { value: built === undefined ? DELETE : built }
   }
 
   /** Current documents of one source for a target: a query (`idField` / `idParam`) or the one referenced document (`refField`). */
-  private async viewSourceDocs(view: ResolvedView, source: ResolvedViewSource, target: DocumentSnapshot): Promise<QueryDocumentSnapshot[] | undefined> {
+  private async viewSourceDocs(
+    view: ResolvedView,
+    source: ResolvedViewSource,
+    target: DocumentSnapshot,
+    counter: ReadCounter,
+  ): Promise<QueryDocumentSnapshot[] | undefined> {
     const m = matchDocumentPath(view.targetPattern, target.ref.path)
     if (!m) return undefined
     if (source.refField !== undefined) {
@@ -672,6 +709,7 @@ export class Processor {
       }
       const collection = resolveCollectionPath(source.pattern, m.params)
       if (!collection) return undefined
+      counter.doc()
       const snap = await this.db().doc(`${collection}/${id}`).get()
       return snap.exists ? [snap as QueryDocumentSnapshot] : []
     }
@@ -693,6 +731,7 @@ export class Processor {
     let last: QueryDocumentSnapshot | undefined
     for (;;) {
       const snap = await (last ? query.startAfter(last) : query).get()
+      counter.query(snap.size)
       for (const d of snap.docs) if (matchDocumentPath(source.pattern, d.ref.path) && this.sourceBelongsTo(source, m, d.ref.path)) out.push(d)
       if (source.limit === undefined || out.length >= source.limit || snap.size < source.limit) break
       last = snap.docs[snap.docs.length - 1]
@@ -719,6 +758,7 @@ export class Processor {
     match: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    counter: ReadCounter,
     fn: (ref: DocumentReference, snapshot?: DocumentSnapshot) => Promise<void>,
   ): Promise<boolean> {
     const firestore = this.db()
@@ -729,6 +769,7 @@ export class Processor {
       let last: DocumentSnapshot | undefined
       for (;;) {
         const page = await (last ? query.startAfter(last) : query).get()
+        counter.query(page.size)
         const docs = page.docs.filter((d) => {
           const tm = matchDocumentPath(view.targetPattern, d.ref.path)
           return tm !== undefined && Object.entries(match.params).every(([k, v]) => tm.params[k] === undefined || tm.params[k] === v)
@@ -766,7 +807,11 @@ async function aggregateValue(query: Query, rule: ResolvedAggregate): Promise<nu
 }
 
 function newResult(rule: ResolvedRule, role: RuleResult['role']): RuleResult {
-  return { rule: rule.name, kind: rule.kind, role, action: 'skip', targets: 0, writes: 0, retries: 0 }
+  return { rule: rule.name, kind: rule.kind, role, action: 'skip', targets: 0, writes: 0, retries: 0, reads: 0, queries: 0, aggregations: 0 }
+}
+
+function finish(result: RuleResult, counter: ReadCounter): RuleResult {
+  return Object.assign(result, counter.counts())
 }
 
 function count(result: RuleResult, outcome: Outcome): void {

@@ -223,7 +223,7 @@ FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
 ## CLI
 
 ```
-doc-sync validate [--config <path>]
+doc-sync validate [--config <path>] [--strict]
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
@@ -232,6 +232,12 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 ```
 
 `--config` の既定は `./doc-sync.config.ts`、`--project` の既定は `$GOOGLE_CLOUD_PROJECT`、次いで gcloud のアクティブなプロジェクトです。設定ファイルは TypeScript / JavaScript、ESM / CJS のいずれでも構いません。
+
+### コストの見積もり
+
+`doc-sync validate` はルールごとに、1 イベントが引き起こす Firestore の読み取り・書き込みを、`N`（変更されたソースにマッチするターゲットの数）と `M`（1 つのターゲットに属するソースドキュメントの数）の式として表示します。読み取りは課金対象のドキュメント読み取りを指し、集計クエリ（`count()` / `sum()`）は課金体系が異なるため別枠で数えます。ビューの `build` / `patch` 自身が行う読み取りはユーザーコードなので静的には数えられず、「(+ reads inside build)」「(+ reads inside patch)」として示されます。ハンドラはイベントごとの実際の件数を `reads` / `queries` / `aggregations` としてログに出し（後述の「ログ」）、`rebuild` / `verify` もルールごとに表示します。
+
+2 種類の警告は、構造的にコストがかかる形を指摘します。`refField` を使うビューのソースはファンアウトします。参照先ドキュメントが 1 件変わるだけで、それを指す全ターゲットが再計算されるためです。`limit` も `patch` も指定していない多対一のソースは、近道も上限もないため、毎イベントでターゲットの全ソースドキュメントを読みます。`--strict` を付けると、いずれかの警告が出た場合に終了コードを失敗にできるので、コストの高いルールが本番に届く前に CI で止められます。
 
 ## 変更はこう処理される
 
@@ -262,7 +268,7 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 
 **レスポンス。** 完了・処理不要は `204`。回復不能な入力（壊れたペイロード、未知のコレクション、別データベース）も `error` / `warn` ログを出して `204`（再送させない）。一時的な失敗は `500` で、Eventarc が最大 24 時間バックオフ再送します。処理は冪等です。
 
-**ログ。** 1 イベント・1 ルールにつき 1 行の構造化ログ: `rule`、`kind`、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`durationMs`。
+**ログ。** 1 イベント・1 ルールにつき 1 行の構造化ログ: `rule`、`kind`、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`reads`、`queries`、`aggregations`、`durationMs`。読み取りのカウンタは Firestore の課金に合わせています。ドキュメント読み取り 1 件につき 1（存在しないドキュメントも含む）、クエリは返ってきたドキュメント 1 件につき 1（クエリ 1 回につき最低 1）、集計は別枠です。ビューの `build` / `patch` がコンテキストの `firestore` を通して行う読み取りは含まれ、別経路で取得した Firestore インスタンスによる読み取りは含まれません。Cloud Logging で `rule` ごとに `reads` を合計すると、どのルールがコストを使っているかが分かります。
 
 ## 既知の制約
 
