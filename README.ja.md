@@ -103,6 +103,38 @@ Firebase プロジェクトのルートに `doc-sync.config.ts` を置きます�
 
 バリデーションでは、名前の重複、同じコレクションの重なるフィールドへの二重書き込み、解決できないプレースホルダ、不正なパス、「あるルールの書き込みが次のルールを起動し、一周して戻る」ループを拒否します。
 
+#### 型付きの設定
+
+`typed<Collections>()` にコレクションパスをキーにしたドキュメント型を渡すと、設定内のフィールド名がすべてコンパイル時に検査されます。フィールドをリネームしたとき、黙って `undefined` がコピーされる代わりに `tsc` が失敗します。
+
+```ts
+import { typed } from 'firestore-denormalize'
+import type { Post, Category, Comment } from './types'
+
+type Collections = { post: Post; category: Category; 'post/{postId}/comment': Comment }
+const { defineConfig, defineView } = typed<Collections>()
+
+export default defineConfig({
+  // ...
+  connections: [
+    // `source` / `target` は Collections のキー。`fields` は Category のパス、
+    // `idField` は Post の string フィールド、`targetField` は Post のフィールド
+    { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' },
+  ],
+  views: [
+    defineView({
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments', // Post に存在する必要があり、build はその型を返す
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+      build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.data().body })), // c は QueryDocumentSnapshot<Comment>
+    }),
+  ],
+})
+```
+
+フィールドパスはドット区切りも使えます（`'address.city'`）。`idField` / `refField` は string のフィールド、`sum` と集計の `targetField` は number のフィールド、`idParam` はソースパスのプレースホルダに限られます。`Collections` はインターフェースではなく型エイリアスで書いてください。どちらの関数も実行時には何もしないので、`validateConfig` と CLI には通常の設定として見えます。
+
 ### 2. ハンドラを HTTP 関数として公開する
 
 ```ts
@@ -239,6 +271,8 @@ doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emul
 - ターゲット検索のため `idField` に既定の単一フィールドインデックスが必要です。コレクショングループクエリが必要なルール（`validate` が一覧します）には、そのフィールドのコレクショングループスコープのインデックスが必要です。初回実行時に Firestore が作成用リンクを出します。
 - 件数・合計は、影響を受けるターゲット 1 つにつきイベントごとに集計読み取り 1 回のコストがかかります。ビューは `patch` で処理できない限り、影響を受けるターゲット 1 つにつきソースごとに読み取り（またはクエリ）1 回です。
 - 遅延は Eventarc の配信遅延（通常 1 秒未満〜数秒）に依存します。
+
+型付き設定やコスト見積もりなど、今後の予定は [ROADMAP.ja.md](./ROADMAP.ja.md) を参照してください。
 
 ## 推奨する関数の設定
 

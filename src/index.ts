@@ -54,5 +54,23 @@ export {
   type DocumentMatch,
 } from './paths.js'
 export { rebuild, type RebuildOptions, type RebuildProgress, type RebuildResult } from './rebuild.js'
+export {
+  typed,
+  type Collections,
+  type Typed,
+  type TypedDocSyncConfig,
+  type TypedConnection,
+  type TypedAggregate,
+  type TypedViewRule,
+  type TypedViewSource,
+  type TypedBuildContext,
+  type TypedPatchContext,
+  type TypedViewChange,
+  type FieldPath,
+  type FieldPathOf,
+  type Get,
+  type Params,
+  type Leaf,
+} from './types.js'
 export { verify, type VerifyOptions, type VerifyProgress, type VerifyResult, type Mismatch } from './verify.js'
 export { startDevBridge, type DevBridge, type DevBridgeOptions } from './dev.js'

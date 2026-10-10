@@ -103,6 +103,38 @@ Many-to-one sources accept `orderBy` (`['createdAt', ['score', 'desc']]`) and `l
 
 Validation rejects duplicate names, two rules writing overlapping fields of the same collection, unresolvable placeholders, malformed paths, and loops where one rule's write would trigger the next rule back around to the first.
 
+#### Typed config
+
+Give `typed<Collections>()` your document types, keyed by collection path, and every field name in the config is checked at compile time. A renamed field then fails `tsc` instead of silently copying `undefined`.
+
+```ts
+import { typed } from 'firestore-denormalize'
+import type { Post, Category, Comment } from './types'
+
+type Collections = { post: Post; category: Category; 'post/{postId}/comment': Comment }
+const { defineConfig, defineView } = typed<Collections>()
+
+export default defineConfig({
+  // ...
+  connections: [
+    // `source` / `target` must be keys of Collections; `fields` are paths of Category,
+    // `idField` a string field of Post, `targetField` a field of Post
+    { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' },
+  ],
+  views: [
+    defineView({
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments', // must exist on Post; build must return its type
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+      build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.data().body })), // c is QueryDocumentSnapshot<Comment>
+    }),
+  ],
+})
+```
+
+Field paths may be dotted (`'address.city'`), `idField` / `refField` must be string fields, `sum` and aggregate `targetField` numeric fields, `idParam` a placeholder of the source path. `Collections` must be a type alias (not an interface). Both functions are identities at runtime, so `validateConfig` and the CLI see an ordinary config.
+
 ### 2. Expose the handler as an HTTP function
 
 ```ts

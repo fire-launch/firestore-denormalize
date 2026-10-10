@@ -1,5 +1,7 @@
 # Roadmap
 
+[日本語版ロードマップ](./ROADMAP.ja.md)
+
 This document lists what `firestore-denormalize` needs before it is useful outside the project it was built for, and in which order we intend to build it. It is a plan, not a promise; items move as we learn more.
 
 The guiding principle does not change: **derived Firestore data, kept correct, with one function.** Values are always re-read from the source, every write is conditional on the target's `updateTime`, and the whole thing deploys as a single Cloud Run service with one Eventarc trigger per collection. Features that would require a different correctness model are listed under *Not planned*.
@@ -19,7 +21,7 @@ We stay with **Eventarc → one HTTP function**. We do not intend to add a secon
 | Subcollections | Done (v0.2) |
 | Emulator support (`doc-sync dev`) | Done (v0.2) |
 | `doc-sync verify` | Done (v0.3) |
-| Typed config | Planned |
+| Typed config | Done (v0.4) |
 | Views (`build` + `patch`) | Done (v0.3) |
 | Cost estimate in `validate` | Planned |
 | Sync metadata (`_sync`) | Planned |
@@ -70,13 +72,13 @@ Uses only public APIs, so it does not depend on firebase-tools internals. The br
 
 `doc-sync verify [--rule <name>] [--fix]` reads the derived data, recomputes it from the sources and reports every mismatch. With `--fix` it repairs them with the same conditional writes the handler uses. Being able to *prove* that derived data is correct is the main advantage over both hand-written triggers and the existing Extensions. Shipped in v0.3; exits non-zero while a mismatch remains, so it can run as a CI check.
 
-### Typed config
+### Typed config — done
 
 ```ts
-defineConfig<{ post: Post; category: Category }>({ ... })
+const { defineConfig, defineView } = typed<{ post: Post; category: Category }>()
 ```
 
-With the collection types supplied, `fields`, `idField` and `targetField` are checked at compile time, so a renamed field fails the build instead of silently copying `undefined`.
+With the collection types supplied, `source` / `target`, `fields`, `idField`, `targetField`, `idParam`, view `sources` and the `build` return type are checked at compile time, so a renamed field fails the build instead of silently copying `undefined`. Shipped in v0.4; type-only, the runtime config is unchanged.
 
 ### Views (`build` + `patch`) — done
 
@@ -114,5 +116,6 @@ These change the correctness model and belong in a separate package, if anywhere
 | v0.1 | copy sync, `validate` / `setup` / `deploy` |
 | v0.2 | counts and sums, subcollections, `rebuild`, `doc-sync dev` |
 | v0.3 | verify, views |
-| v1.0 (public release) | typed config, validated in the first production project |
+| v0.4 | typed config |
+| v1.0 (public release) | validated in the first production project |
 | v1.x | cost estimate, `_sync` metadata |
