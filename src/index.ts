@@ -40,6 +40,7 @@ export {
   type DocSyncRequest,
   type DocSyncResponse,
   type RuleResult,
+  type Outcome,
   type FieldMismatch,
   type CheckResult,
 } from './handler.js'

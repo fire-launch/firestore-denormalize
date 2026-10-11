@@ -128,8 +128,6 @@ export interface SyncOptions {
   sourceCache?: Map<string, Promise<DocumentSnapshot>>
   /** Receives the reads issued. */
   counter?: ReadCounter
-  /** Already-read base snapshot to use for the first attempt instead of reading again (views with `base`). */
-  base?: DocumentSnapshot
   /** Views with `base`: only remove the target when its base is gone; do nothing when the base exists (second pass of `rebuild` / `verify`). */
   orphansOnly?: boolean
 }
@@ -689,7 +687,7 @@ export class Processor {
       // The target of a base view was deleted by hand: recreate it while the base exists.
       const counter = new ReadCounter()
       count(result, await this.syncView(this.db().doc(target.path), view, { counter }))
-      if (result.writes === 0) result.reason = 'base missing too'
+      if (result.writes === 0) result.reason = 'nothing to recreate (base missing or unresolvable)'
       return finish(result, counter)
     }
     if (before && !view.targetFields.some((f) => fieldRemoved(before, after, f))) {
@@ -721,11 +719,12 @@ export class Processor {
     result.targets = 1
     const counter = new ReadCounter()
     count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter }))
-    if (result.writes === 0) result.reason = 'target up to date'
+    // `after` missing means the base was just deleted: a skip there means the target was already absent, not that it is up to date.
+    if (result.writes === 0) result.reason = after ? 'target up to date' : 'target already absent'
     return finish(result, counter)
   }
 
-  /** The base for this attempt: the caller's snapshot on a first try, else a fresh (counted) read. `undefined` when the target path does not match the view. */
+  /** The base for this attempt: `opts.base` on a first try when given (`checkView` only), else a fresh (counted) read. `undefined` when the target path does not match the view. */
   private async readBase(targetPath: string, view: ResolvedView, opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: Map<string, Promise<DocumentSnapshot>> }, counter: ReadCounter): Promise<DocumentSnapshot | undefined> {
     if (opts.base && (opts.attempt ?? 0) === 0) return opts.base
     const path = basePathForTarget(view, targetPath)
@@ -772,11 +771,13 @@ export class Processor {
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
     const counter = opts.counter ?? new ReadCounter()
     const target = await this.readTarget(ref, opts, counter)
-    // A redo re-reads everything: no cached target, base or source (the page cache may hold the base as it was before another writer changed it).
-    const redo = () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1, target: undefined, base: undefined, sourceCache: undefined })
+    // A redo re-reads everything: no cached target or source (the page cache may hold the base as it was before another writer changed it).
+    const redo = () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1, target: undefined, sourceCache: undefined })
     let base: DocumentSnapshot | undefined
     if (view.basePattern) {
-      base = await this.readBase(ref.path, view, { ...opts, attempt }, counter)
+      // Always a fresh read, taken after the target above: a page snapshot of the base would be older than the
+      // target read that just happened, and a concurrent update to the base could be overwritten with a stale value.
+      base = await this.readBase(ref.path, view, { attempt, sourceCache: opts.sourceCache }, counter)
       if (!base) return 'skip'
       if (!base.exists) {
         if (!target.exists) return 'skip'
@@ -862,7 +863,7 @@ export class Processor {
     }
     if (view.rest) {
       const reserved = new Set(view.reservedRootKeys)
-      for (const [key, value] of Object.entries(target.data() ?? {})) if (!reserved.has(key) && !(key in out)) out[key] = value
+      for (const [key, value] of Object.entries(target.data() ?? {})) if (!reserved.has(key) && !Object.hasOwn(out, key)) out[key] = value
     }
     return out
   }
@@ -875,7 +876,9 @@ export class Processor {
   private planOf(view: ResolvedView, target: DocumentSnapshot, built: DocumentData | undefined): FieldPlan {
     const plan: FieldPlan = new Map()
     for (const path of view.targetFields) {
-      const v = getField(built, path)
+      let v = getField(built, path)
+      // A result key written literally as a dotted path equal to a declared path (`{ 'stats.count': 3 }`) counts as that path.
+      if (v === undefined && built !== undefined && Object.hasOwn(built, path)) v = built[path]
       plan.set(path, v === undefined ? DELETE : v)
     }
     if (view.rest) {
@@ -883,7 +886,7 @@ export class Processor {
       for (const [key, value] of Object.entries(built ?? {})) {
         if (reserved.has(key)) continue
         if (key.includes('.') || !isValidFieldPath(key)) {
-          this.logger.warn('doc-sync: build returned a root key that is not a valid field name, ignored', { rule: view.name, field: key })
+          this.warnOnce(`${view.name}:dotted:${key}`, 'doc-sync: build returned a root key that is not a valid field name, ignored', { rule: view.name, field: key })
           continue
         }
         plan.set(key, value)
@@ -892,7 +895,11 @@ export class Processor {
         if (reserved.has(key) || plan.has(key)) continue
         if (key.includes('.') || !isValidFieldPath(key)) {
           // `update()` would read a dotted key as a path (and reject reserved characters): leave such keys alone rather than fail every event.
-          this.logger.warn('doc-sync: target has a root key that is not a valid field name, left in place', { rule: view.name, document: target.ref.path, field: key })
+          this.warnOnce(`${view.name}:target:${key}`, 'doc-sync: target has a root key that is not a valid field name, left in place', {
+            rule: view.name,
+            document: target.ref.path,
+            field: key,
+          })
           continue
         }
         plan.set(key, DELETE)
@@ -902,15 +909,19 @@ export class Processor {
     return plan
   }
 
-  private readonly warnedUndeclared = new Set<string>()
+  private readonly warnedOnce = new Set<string>()
+
+  /** Logs `message` once per `key`, ever (not just per view). */
+  private warnOnce(key: string, message: string, fields: Record<string, unknown>): void {
+    if (this.warnedOnce.has(key)) return
+    this.warnedOnce.add(key)
+    this.logger.warn(message, fields)
+  }
 
   private warnUndeclared(view: ResolvedView, built: DocumentData | undefined): void {
     const undeclared = undeclaredPaths(view, built)
     for (const path of undeclared) {
-      const key = `${view.name}:${path}`
-      if (this.warnedUndeclared.has(key)) continue
-      this.warnedUndeclared.add(key)
-      this.logger.warn('doc-sync: build returned a field the view does not declare, ignored', { rule: view.name, field: path })
+      this.warnOnce(`${view.name}:undeclared:${path}`, 'doc-sync: build returned a field the view does not declare, ignored', { rule: view.name, field: path })
     }
   }
 

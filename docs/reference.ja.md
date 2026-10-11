@@ -66,13 +66,15 @@ export default defineConfig({
 | `refField: 'authorId'` | 一対一: ターゲットのフィールドがソース ID を持つ（0 または 1 件） | `watch` |
 
 - `orderBy`: `['createdAt', ['score', 'desc']]`。`limit`: 読む最大件数。`watch`: 再計算のきっかけになるソースのフィールド（既定は何でも）。`idField` と `orderBy` のフィールドは常に監視されます。`base` ドキュメントの変更は常に再計算のきっかけになります。
-- 書き込み: 値が違う宣言パスだけを 1 回の `update()` にまとめ、ターゲットの `updateTime` を条件にします。`targetFields` 外のフィールドには触れません。戻り値にある宣言外のパスは 1 回だけ `warn` ログを出して無視します。
-- `base`: `target/{id}` は `base/{id}` が存在するときだけ存在します。base・ソース・ターゲットのどのイベントでも、読み直した時点の base で判定します。ターゲットが無ければ `create()` で作り、base が消えていれば `delete({ lastUpdateTime })` で消します。消したターゲット配下のサブコレクションは残ります（Firestore の仕様）。同じターゲットに対して複数の view が同じ `base` を宣言でき、`validate` は一致を確認します。そのターゲットの他のルールは、ターゲットが無い間は skip し、作成イベントで追いつきます。
+- 書き込み: 値が違う宣言パスだけを 1 回の `update()` にまとめ、ターゲットの `updateTime` を条件にします。`targetFields` 外のフィールドには触れません。戻り値にある宣言外のパスは 1 回だけ `warn` ログを出して無視します。宣言パスと同じドット区切りの literal キー（`{ 'stats.count': 3 }`）もそのパスの値として受け付けます。
+- `base`: `target/{id}` は `base/{id}` が存在するときだけ存在します。base・ソースのイベント、およびターゲットの作成・削除イベントで読み直して判定します（ターゲットの単なる更新では base を見直しません）。ターゲットが無ければ `create()` で作り、base が消えていれば `delete({ lastUpdateTime })` で消します。消したターゲット配下のサブコレクションは残ります（Firestore の仕様）。同じターゲットに対して複数の view が同じ `base` を宣言でき、`validate` は一致を確認します。そのターゲットの他のルールは、ターゲットが無い間は skip し、作成イベントで追いつきます。
+- `base` 付きターゲットでは、他ルールが id に使うフィールド（`idField` / `refField`）はどのルールも書けず `'rest'` の対象にもなりません。ターゲットが削除・再作成されると失われるので、そのような id は base 側に置き、`targetFields` で写してください。
 - `'rest'`: どのルールも書かず id にも使っていないルート直下のキー全部をこの view が所有します。戻り値にあるそのようなキーは書き、ターゲットにあって戻り値に無いものは削除します。`base` 付きの view でのみ使えます。
 - `build` / `patch` の戻り値: `undefined` のマップ要素は落とし、配列の `undefined` 要素は `null` になります。
 - `change.after` は変更ドキュメントの読み直しです（削除済み、またはこのターゲットに属さなくなった場合は `undefined`）。`patch` は冪等で、要素をドキュメント ID で管理すること。
 - ターゲット側: 作成時、`refField` の変更時、宣言パスが消えた時、そして `base` 付きなら削除時（base があれば作り直す）に再計算します。`build` が読む他のターゲットフィールドは監視しません。
 - `rebuild` / `verify` は常に `build` を使います。`base` 付き view では先に base コレクションを歩いて（ターゲットの作成・検査）、次にターゲットコレクションを歩きます（base を失ったターゲットの削除・報告）。`verify` は各件を `issue: 'value' | 'missing' | 'orphan'` で報告します。
+- ルールは設定の順序どおり connection → aggregate → view の順に実行されるため、トリガーのない新しいデータベースでは、base 付き view のターゲットはその view の順番が来るまで作成されません。それより前にある aggregate や connection のルールは、まだ存在しないターゲットに対しては何もしません。`rebuild` をもう一度実行するか、`--rule` で base 付き view を先に rebuild してください。
 - 型付き設定では「`'rest'` には `base` が必要」「view には `base` か最低 1 つのソースが必要」を表現できません。どちらも `validate` が実行時に検出します。
 
 ### `defineProjection`: `build` の無い `base` 付き view

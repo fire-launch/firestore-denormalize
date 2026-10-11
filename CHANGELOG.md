@@ -11,6 +11,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Breaking:** a view declares `targetFields: string[]` instead of `targetField`. `build` returns an object holding the declared paths (nested); a declared path whose value is `undefined` is deleted; undeclared paths are logged once and ignored. `patch` receives and returns the same object shape.
 - `verify` mismatches carry `issue: 'value' | 'missing' | 'orphan'`; `field` is set for `value` only.
 - Handler results (`RuleResult.action`) may now be `create` or `remove` (target document created / removed).
+- The view source key `base` is reserved (it names the base in `RuleResult.source`); rename such a source.
 
 ### Added
 

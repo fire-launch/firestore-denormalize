@@ -19,6 +19,7 @@
 - `build` はネストしたオブジェクトを返す。ライブラリは宣言したパスの値だけを取り出して書く。
   - 宣言パスの値が `undefined`（または親が無い）→ `FieldValue.delete()`。
   - 宣言外のパスに値がある → 1 回だけ `logger.warn`（ルール名・パス）して無視する。typed config の型でコンパイル時に弾くのが主で、実行時は警告にとどめる。
+  - 宣言パスと同じドット区切りの literal キー（`{ 'stats.followerCount': 3 }`）は、そのパスの値として受け付ける（ネストした形で書かなくても良い）。
   - `build` が `undefined` を返す → 全宣言パスを削除。
 - 書き込みは変化したパスだけを 1 回の `update` にまとめ、従来どおり `lastUpdateTime` を条件にする。`set` は使わない。
 - 同じ view 内でパスが重なる宣言（`profile` と `profile.bio`）は validate で拒否。他ルールとの重なりは既存の `writtenFields` の判定を複数パスに広げる。

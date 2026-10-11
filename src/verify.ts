@@ -130,7 +130,7 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
           if (check.status !== 'mismatch') return
           let didFix = false
           if (fix) {
-            await processor.sync(target.ref, rule, { target, base: baseDoc, sourceCache: page.sourceCache, counter })
+            await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, counter })
             didFix = true
           }
           record(targetPath, check, didFix)

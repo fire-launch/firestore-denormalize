@@ -83,7 +83,7 @@ export async function rebuild(config: DocSyncConfig | ResolvedConfig, options: R
         async (baseDoc, page) => {
           const targetPath = targetPathForBase(baseView, baseDoc.ref.path)
           if (!targetPath) return
-          report(targetPath, await processor.sync(options.firestore.doc(targetPath), rule, { base: baseDoc, sourceCache: page.sourceCache, dryRun: options.dryRun, counter }))
+          report(targetPath, await processor.sync(options.firestore.doc(targetPath), rule, { sourceCache: page.sourceCache, dryRun: options.dryRun, counter }))
         },
         progress,
       )

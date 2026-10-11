@@ -538,6 +538,23 @@ describe('views: several declared paths', () => {
     await invoke(handler, await change(c5, () => c5.set({ body: 'e' })))
     expect((await post.get()).data()).toEqual({ commentCount: 5, lastBody: 'e' })
   })
+
+  it('accepts a result key written as a literal dotted path equal to a declared path', async () => {
+    const dotted = defineView({
+      name: 'post-dotted',
+      target: 'post',
+      targetFields: ['stats.followerCount'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: () => ({ 'stats.followerCount': 3 }),
+    })
+    const post = db.doc('post/p1')
+    await post.set({ title: 'keep' })
+    const { handler, logs } = handlerFor(defineConfig({ ...config, rules: [dotted] }))
+    const c1 = db.doc('post/p1/comment/c1')
+    await invoke(handler, await change(c1, () => c1.set({ body: 'x' })))
+    expect((await post.get()).data()).toEqual({ title: 'keep', stats: { followerCount: 3 } })
+    expect(logs.some((l) => l.message === 'doc-sync: build returned a field the view does not declare, ignored')).toBe(false)
+  })
 })
 
 describe('views: base decides whether the target exists', () => {
@@ -720,6 +737,18 @@ describe('views: rebuild and verify with base', () => {
     expect((await db.doc(lastPath).get()).exists).toBe(false) // the last document rebuild visited no longer exists
     const [resumed] = await rebuild(cfg, { firestore: db, logger: silentLogger(), startAfter: lastPath })
     expect(resumed).toMatchObject({ scanned: 0, written: 0 })
+  })
+
+  it('rebuild reads the base fresh after the target, not from the page snapshot it was walking', async () => {
+    await db.doc('post/p1').set({ title: 'a' }) // no target yet
+    const [r] = await rebuild(cfg, { firestore: db, logger: silentLogger() })
+    expect(r).toMatchObject({ written: 1 })
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 0 })
+    // Pass 1: query the base collection (1), read the target (1), read the base fresh for the sync (1),
+    // query the empty comments source (1) = 4. Pass 2: query the target collection (1), read the base
+    // fresh again for the orphan check (1) = 2. Total 6. Before the fix, pass 1 reused the page's base
+    // snapshot instead of re-reading it, so this total was 5.
+    expect(r!.reads).toBe(6)
   })
 })
 

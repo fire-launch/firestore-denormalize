@@ -280,7 +280,7 @@ export async function rebuild(
   })
   log()
   for (const r of results) {
-    log(`${r.rule}: ${r.scanned} targets, ${r.written} ${r.dryRun ? 'would be written' : 'written'} (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
+    log(`${r.rule}: ${r.scanned} documents, ${r.written} ${r.dryRun ? 'would be written' : 'written'} (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
   }
   log()
   log(opts.dryRun ? 'Dry run complete. Re-run without --dry-run to apply.' : 'Rebuild complete.')
@@ -323,7 +323,7 @@ export async function verify(
   })
   log()
   for (const r of results) {
-    log(`${r.rule}: ${r.scanned} targets, ${r.mismatched} mismatched, ${r.fixed} fixed (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
+    log(`${r.rule}: ${r.scanned} documents, ${r.mismatched} mismatched, ${r.fixed} fixed (${r.reads} reads, ${r.queries} queries, ${r.aggregations} aggregations)`)
   }
   log()
   const totalMismatched = results.reduce((n, r) => n + r.mismatched, 0)
