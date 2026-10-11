@@ -6,9 +6,10 @@
 import type { Firestore } from 'firebase-admin/firestore'
 import { type DocSyncConfig, type ResolvedConfig, type ResolvedRule, resolveConfig } from './config.js'
 import { ReadCounter, type ReadCounts } from './counter.js'
-import { Processor } from './handler.js'
+import { type Outcome, Processor, targetPathForBase } from './handler.js'
 import { jsonLogger, type Logger } from './logger.js'
-import { selectRules, walkTargets } from './walk.js'
+import { matchDocumentPath } from './paths.js'
+import { selectRules, walkCollection, walkTargets } from './walk.js'
 
 export interface RebuildOptions {
   firestore: Firestore
@@ -56,20 +57,49 @@ export async function rebuild(config: DocSyncConfig | ResolvedConfig, options: R
   let startAfter = options.startAfter
   for (const rule of selected) {
     let written = 0
+    let scanned = 0
+    let lastPath: string | undefined
     const counter = new ReadCounter()
-    const { scanned, lastPath } = await walkTargets(
+    const progress = (p: { scanned: number; lastPath: string }) =>
+      options.onProgress?.({ rule: rule.name, scanned: scanned + p.scanned, written, lastPath: p.lastPath, ...counter.counts() })
+    const report = (document: string, outcome: Outcome) => {
+      if (outcome === 'skip') return
+      written++
+      if (options.dryRun) logger.info('doc-sync rebuild: would write', { rule: rule.name, document, action: outcome })
+    }
+    const baseView = rule.kind === 'view' && rule.basePattern ? rule : undefined
+    const resumeInTargets = startAfter !== undefined && matchDocumentPath(rule.targetPattern, startAfter) !== undefined
+
+    // Pass 1 (views with `base`): every base document gets its target created or brought up to date.
+    if (baseView?.basePattern && !resumeInTargets) {
+      const walked = await walkCollection(
+        options.firestore,
+        baseView.basePattern,
+        { pageSize, concurrency, startAfter, counter },
+        async (baseDoc, page) => {
+          const targetPath = targetPathForBase(baseView, baseDoc.ref.path)
+          if (!targetPath) return
+          report(targetPath, await processor.sync(options.firestore.doc(targetPath), rule, { base: baseDoc, sourceCache: page.sourceCache, dryRun: options.dryRun, counter }))
+        },
+        progress,
+      )
+      scanned += walked.scanned
+      lastPath = walked.lastPath ?? lastPath
+      startAfter = undefined
+    }
+
+    // Pass 2: every existing target. For a base view only orphans are removed here (pass 1 synced the rest).
+    const walked = await walkTargets(
       options.firestore,
       rule,
       { pageSize, concurrency, startAfter, counter },
       async (target, page) => {
-        const outcome = await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, dryRun: options.dryRun, counter })
-        if (outcome !== 'skip') {
-          written++
-          if (options.dryRun) logger.info('doc-sync rebuild: would write', { rule: rule.name, document: target.ref.path, action: outcome })
-        }
+        report(target.ref.path, await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, dryRun: options.dryRun, counter, orphansOnly: baseView !== undefined }))
       },
-      (p) => options.onProgress?.({ rule: rule.name, scanned: p.scanned, written, lastPath: p.lastPath, ...counter.counts() }),
+      progress,
     )
+    scanned += walked.scanned
+    lastPath = walked.lastPath ?? lastPath
     startAfter = undefined
     results.push({ rule: rule.name, scanned, written, lastPath, kind: rule.kind, dryRun: Boolean(options.dryRun), ...counter.counts() })
   }

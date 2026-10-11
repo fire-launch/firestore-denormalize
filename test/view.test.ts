@@ -636,3 +636,75 @@ describe('views: base decides whether the target exists', () => {
     expect(processed(logs, 'post-public-racy')).toMatchObject({ action: 'write', writes: 1 })
   })
 })
+
+describe('views: rebuild and verify with base', () => {
+  const publicView = defineView({
+    name: 'post-public',
+    target: 'postPublic',
+    base: 'post',
+    targetFields: ['title', 'commentCount'],
+    sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+    build: ({ base, sources }) => ({ title: base!.get('title'), commentCount: sources.comments.length }),
+  })
+  const cfg = defineConfig({ ...config, rules: [publicView] })
+
+  it('rebuild creates missing targets, updates stale ones and removes orphans', async () => {
+    await db.doc('post/p1').set({ title: 'a' }) // no target yet
+    await db.doc('post/p2').set({ title: 'b' })
+    await db.doc('postPublic/p2').set({ title: 'old', commentCount: 0 }) // stale
+    await db.doc('postPublic/orphan').set({ title: 'x' }) // base gone
+    const [dry] = await rebuild(cfg, { firestore: db, logger: silentLogger(), dryRun: true })
+    expect(dry).toMatchObject({ scanned: 4, written: 3 })
+    expect((await db.doc('postPublic/p1').get()).exists).toBe(false)
+    const [r] = await rebuild(cfg, { firestore: db, logger: silentLogger() })
+    expect(r).toMatchObject({ scanned: 5, written: 3 }) // pass 2 also visits postPublic/p1, which pass 1 just created
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 0 })
+    expect((await db.doc('postPublic/p2').get()).data()).toEqual({ title: 'b', commentCount: 0 })
+    expect((await db.doc('postPublic/orphan').get()).exists).toBe(false)
+  })
+
+  it('rebuild resumes inside the target collection without walking the bases again', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    await db.doc('postPublic/orphan').set({ title: 'x' })
+    await db.doc('postPublic/zz').set({ title: 'y' })
+    const [r] = await rebuild(cfg, { firestore: db, logger: silentLogger(), startAfter: 'postPublic/orphan' })
+    expect(r).toMatchObject({ scanned: 1, written: 1 })
+    expect((await db.doc('postPublic/p1').get()).exists).toBe(false) // base walk skipped
+    expect((await db.doc('postPublic/orphan').get()).exists).toBe(true) // before the cursor
+    expect((await db.doc('postPublic/zz').get()).exists).toBe(false)
+  })
+
+  it('verify reports missing targets, differing fields and orphans, and fixes all three', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    await db.doc('post/p2').set({ title: 'b' })
+    await db.doc('postPublic/p2').set({ title: 'old', commentCount: 0 })
+    await db.doc('postPublic/orphan').set({ title: 'x' })
+    const [report] = await verify(cfg, { firestore: db, logger: silentLogger() })
+    expect(report!.mismatches.map((m) => [m.document, m.issue, m.field])).toEqual([
+      ['postPublic/p1', 'missing', undefined],
+      ['postPublic/p2', 'value', 'title'],
+      ['postPublic/orphan', 'orphan', undefined],
+    ])
+    expect((await db.doc('postPublic/p1').get()).exists).toBe(false)
+    const [fixed] = await verify(cfg, { firestore: db, logger: silentLogger(), fix: true })
+    expect(fixed!.fixed).toBe(3)
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 0 })
+    expect((await db.doc('postPublic/p2').get()).get('title')).toBe('b')
+    expect((await db.doc('postPublic/orphan').get()).exists).toBe(false)
+    expect((await verify(cfg, { firestore: db, logger: silentLogger() }))[0]!.mismatched).toBe(0)
+  })
+
+  it('handler: removes a target that still exists when a stale source event arrives after the base was deleted', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'a' })
+    const target = db.doc('postPublic/p1')
+    await target.set({ title: 'a', commentCount: 0 })
+    const c1 = db.doc('post/p1/comment/c1')
+    const staleCreate = await change(c1, () => c1.set({ body: 'x' })) // captured while the base existed
+    await post.delete() // base gone, target left behind (no handler ran)
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, staleCreate)
+    expect((await target.get()).exists).toBe(false)
+    expect(processed(logs, 'post-public')).toMatchObject({ source: 'comments', action: 'remove', writes: 1 })
+  })
+})

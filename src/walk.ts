@@ -2,10 +2,10 @@
  * Paging loop shared by `rebuild` and `verify`: visits every target document of a rule's
  * target collection(s), in document-name order, `concurrency` at a time within a page.
  */
-import type { DocumentSnapshot, Firestore, Query, QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import type { DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { type ResolvedConfig, type ResolvedRule, rulesOf } from './config.js'
 import type { ReadCounter } from './counter.js'
-import { matchDocumentPath } from './paths.js'
+import { type CollectionPattern, matchDocumentPath } from './paths.js'
 
 export interface WalkOptions {
   /** Documents per query page. */
@@ -24,19 +24,19 @@ export interface WalkPage {
 }
 
 /**
- * Visits every document of the rule's target collection(s) in document-name order,
- * `concurrency` at a time within a page. Returns the number of documents visited and
- * the path of the last one (pass it back as `startAfter` to resume).
+ * Visits every document of a collection pattern in document-name order, `concurrency` at a
+ * time within a page. Returns the number of documents visited and the path of the last one
+ * (pass it back as `startAfter` to resume).
  */
-export async function walkTargets(
+export async function walkCollection(
   firestore: Firestore,
-  rule: ResolvedRule,
+  pattern: CollectionPattern,
   opts: WalkOptions,
-  visit: (target: QueryDocumentSnapshot, page: WalkPage) => Promise<void>,
+  visit: (doc: QueryDocumentSnapshot, page: WalkPage) => Promise<void>,
   onPage?: (progress: { scanned: number; lastPath: string }) => void,
 ): Promise<{ scanned: number; lastPath: string | undefined }> {
   const { pageSize, concurrency } = opts
-  const base = targetsQuery(firestore, rule)
+  const base = pattern.params.length ? firestore.collectionGroup(pattern.collectionId) : firestore.collection(pattern.raw)
   let cursor: DocumentSnapshot | undefined
   if (opts.startAfter) {
     opts.counter?.doc()
@@ -50,10 +50,10 @@ export async function walkTargets(
     const page = await (cursor ? base.startAfter(cursor) : base).limit(pageSize).get()
     opts.counter?.query(page.size)
     if (page.empty) break
-    const docs = page.docs.filter((d) => matchDocumentPath(rule.targetPattern, d.ref.path))
+    const docs = page.docs.filter((d) => matchDocumentPath(pattern, d.ref.path))
     const sourceCache = new Map<string, Promise<DocumentSnapshot>>()
 
-    await forEachLimit(docs, concurrency, (target) => visit(target, { sourceCache }))
+    await forEachLimit(docs, concurrency, (doc) => visit(doc, { sourceCache }))
 
     scanned += docs.length
     lastPath = page.docs[page.docs.length - 1]!.ref.path
@@ -64,10 +64,15 @@ export async function walkTargets(
   return { scanned, lastPath }
 }
 
-/** All documents of the rule's target collection(s), in document-name order so paging is stable. */
-function targetsQuery(firestore: Firestore, rule: ResolvedRule): Query {
-  const p = rule.targetPattern
-  return p.params.length ? firestore.collectionGroup(p.collectionId) : firestore.collection(p.raw)
+/** {@link walkCollection} over the rule's target collection(s). */
+export function walkTargets(
+  firestore: Firestore,
+  rule: ResolvedRule,
+  opts: WalkOptions,
+  visit: (target: QueryDocumentSnapshot, page: WalkPage) => Promise<void>,
+  onPage?: (progress: { scanned: number; lastPath: string }) => void,
+): Promise<{ scanned: number; lastPath: string | undefined }> {
+  return walkCollection(firestore, rule.targetPattern, opts, visit, onPage)
 }
 
 /** Runs `fn` over `items` with at most `limit` in flight. */

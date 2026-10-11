@@ -38,6 +38,8 @@ export {
   type DocSyncRequest,
   type DocSyncResponse,
   type RuleResult,
+  type FieldMismatch,
+  type CheckResult,
 } from './handler.js'
 export { decodeDocumentEventData, DecodeError, type DecodedEvent, type DecodedDocument } from './decode.js'
 export { encodeDocumentEventData, type EncodableDocument, type EncodeOptions } from './encode.js'
