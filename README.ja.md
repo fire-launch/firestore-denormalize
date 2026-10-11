@@ -6,6 +6,116 @@ Firestore の派生データ（非正規化コピー・件数・合計）を、*
 
 `category/{id}` の一部フィールドを `post.category` にコピーしている、あるいは `post.likeCount` をいいねの件数に保っている場合、元が変わるたびに派生値を更新する必要があります。このパッケージは、そうしたルールを TypeScript の 1 ファイルで何個でも定義し、まとめて処理します。
 
+## できること
+
+ルールは 3 種類です。どれも「*ターゲット*文書の 1 フィールドを、他の文書から計算した値に保つ」もので、ハンドラはイベントの中身を信用せず、変更のたびに元の文書を読み直します。
+
+### コピー（`connections`）: 1 文書のフィールド → それを指す各文書のマップ
+
+```ts
+{ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId',
+  fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' }
+```
+
+```
+category/c1   { name: 'News', color: 'red', slug: 'news' }
+post/p1       { title: 'Hello', categoryId: 'c1' }
+                                   │
+                                   ▼
+post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
+```
+
+`category/c1` が変わると `categoryId == 'c1'` の全 post が更新され、`post.categoryId` が変わるとその post が新しい category を指し直し、`category/c1` が削除されると `onSourceDelete` に従って `post.category` が `null` になる・消える・そのまま残る、のいずれかになります。
+
+### 件数・合計（`aggregates`）: ターゲットに属する文書の数または合計
+
+```ts
+{ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId',
+  aggregate: 'count', targetField: 'likeCount' }                    // または aggregate: { sum: 'amount' }
+```
+
+```
+post/p1/like/u1   { at: ... }
+post/p1/like/u2   { at: ... }
+post/p1           { title: 'Hello' }
+                                   │
+                                   ▼
+post/p1           { title: 'Hello', likeCount: 2 }
+```
+
+`post/p1` 配下の like が作成・削除されたとき（`sum` なら合計対象のフィールドが変わったときも）に動きます。値は常に `count()` / `sum()` で再計算し、`increment()` で増減はしません。ターゲットはソース側のフィールドで指すこともできます（`source: 'order', idField: 'customerId'`）。
+
+### ビュー（`views`）: 自前の `build` が 1 つ以上のソースから計算する値
+
+```ts
+defineView({
+  name: 'post-latest-comments', target: 'post', targetField: 'latestComments',
+  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+  build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+})
+```
+
+```
+post/p1/comment/c1   { body: 'first',  createdAt: 1 }
+post/p1/comment/c2   { body: 'second', createdAt: 2 }
+post/p1/comment/c3   { body: 'third',  createdAt: 3 }
+post/p1              { title: 'Hello' }
+                                   │
+                                   ▼
+post/p1              { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
+```
+
+`post/p1` 配下の comment が変わると動きます。`build` には並び順と件数を指定して読み直したソースが渡され、値全体を返します。ソースとターゲットの関係は `idParam`（ターゲット配下）、`idField`（ソース側のフィールドがターゲット ID を持つ）、`refField`（ターゲット側のフィールドがソース ID を持つ）のいずれかで、任意の `patch` を書けば全件を読み直さずに 1 件の変更だけを反映できます。「最新 N 件」「ID をキーにしたマップ」「複数コレクションのサマリー」など、上の 2 種類では表現できない形のためのものです。
+
+## アーキテクチャ
+
+HTTP 関数 1 つがすべてのイベントを受け取り、Eventarc トリガーは設定に出てくるコレクション（ソースもターゲットも）ごとに 1 本です。CLI は関数が読むのと同じ設定ファイルからトリガーを作ります。
+
+```mermaid
+flowchart LR
+  subgraph fs[Firestore]
+    S[(ソースのコレクション)]
+    T[(ターゲットのコレクション)]
+  end
+  S -- 文書の書き込み --> E[Eventarc<br/>コレクションごとに 1 トリガー]
+  T -- 文書の書き込み --> E
+  E -- "CloudEvent (HTTP POST)" --> H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
+  H -- "1. ターゲットを読み、updateTime を控える" --> T
+  H -- "2. ソースを読み直す / count() / build()" --> S
+  H -- "3. 差があれば updateTime を条件に update" --> T
+  C[/doc-sync.config.ts/] -.-> H
+  C -.-> CLI["doc-sync CLI<br/>validate · setup · deploy · rebuild · verify · dev"]
+  CLI -- "gcloud: サービスアカウント・IAM・トリガー" --> E
+  CLI -- "rebuild / verify: 同じ読み・計算・書き込み" --> T
+```
+
+1 が 2 より先に行われるので、古い読み取りから計算した値が 3 の前提条件を通ることはありません。間にターゲットが変わっていれば書き込みは失敗し、そのターゲットをやり直します。遅延・重複・順序入れ替わりのイベントは読み取りのコストにしかならず、正しさには影響しません。
+
+## 特徴
+
+- `firestore-connect-document` 系 Extension の「ルール 1 つにつき関数 2 つ」を、関数 1 つに集約します。
+- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。イベントの値は「処理が必要か」の判定にだけ使い、書き込む値は**常に Firestore から読み直し**（コピー）または**集計クエリで再計算**（件数・合計）し、書き込みは**ターゲットの `updateTime` を前提条件にした条件付き書き込み**で行います。遅延・重複したイベントが新しい値を古い値で上書きすることはなく、`increment()` を使わないのでカウンタがずれることもありません。
+- トリガーの作成・削除は、同じ設定ファイルからコマンド 1 つで行います。`rebuild` で既存データをバックフィルでき、`dev` で同じハンドラを Emulator Suite で動かせます。
+
+## 必要なもの
+
+- Node.js 20 以上、`firebase-admin` 12 以上（peerDependency）
+- Native モードの Firestore。トリガーはデータベースのロケーション（`asia-northeast1`、`nam5` など）に作成します。
+- `doc-sync setup` / `doc-sync deploy` には認証済みの `gcloud` CLI
+- `--deploy-function` と Emulator Suite には Firebase CLI（`firebase-tools`）
+
+## インストール
+
+```sh
+npm install firestore-denormalize
+```
+
+## クイックスタート
+
+### 1. 設定ファイルを書く
+
+`doc-sync.config.ts` は functions のソースツリーの中、`functions/src/doc-sync.config.ts` に置きます。プロジェクトのルートではなくここに置く必要があります。`firebase deploy` は `functions/` 配下のファイルしかデプロイしませんし、`functions/src` に置くことで `tsc` がそれを他のコードと同じフラットな `functions/lib` にそのままコンパイルできるからです。3 種類のルールをすべて含む例:
+
 ```ts
 // doc-sync.config.ts
 import { defineConfig, defineView } from 'firestore-denormalize'
@@ -49,30 +159,7 @@ export default defineConfig({
 })
 ```
 
-## 特徴
-
-- `firestore-connect-document` 系 Extension の「ルール 1 つにつき関数 2 つ」を、関数 1 つに集約します。
-- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。イベントの値は「処理が必要か」の判定にだけ使い、書き込む値は**常に Firestore から読み直し**（コピー）または**集計クエリで再計算**（件数・合計）し、書き込みは**ターゲットの `updateTime` を前提条件にした条件付き書き込み**で行います。遅延・重複したイベントが新しい値を古い値で上書きすることはなく、`increment()` を使わないのでカウンタがずれることもありません。
-- トリガーの作成・削除は、同じ設定ファイルからコマンド 1 つで行います。`rebuild` で既存データをバックフィルでき、`dev` で同じハンドラを Emulator Suite で動かせます。
-
-## 必要なもの
-
-- Node.js 20 以上、`firebase-admin` 12 以上（peerDependency）
-- Native モードの Firestore。トリガーはデータベースのロケーション（`asia-northeast1`、`nam5` など）に作成します。
-- `doc-sync setup` / `doc-sync deploy` には認証済みの `gcloud` CLI
-- `--deploy-function` と Emulator Suite には Firebase CLI（`firebase-tools`）
-
-## インストール
-
-```sh
-npm install firestore-denormalize
-```
-
-## クイックスタート
-
-### 1. 設定ファイルを書く
-
-`doc-sync.config.ts` は functions のソースツリーの中、`functions/src/doc-sync.config.ts` に置きます（内容は上記参照）。プロジェクトのルートではなくここに置く必要があります。`firebase deploy` は `functions/` 配下のファイルしかデプロイしませんし、`functions/src` に置くことで `tsc` がそれを他のコードと同じフラットな `functions/lib` にそのままコンパイルできるからです。
+設定のキー:
 
 | キー | 意味 |
 |---|---|

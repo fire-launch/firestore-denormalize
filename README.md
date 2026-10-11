@@ -4,7 +4,117 @@ Derived Firestore data, kept correct, with **one Cloud Run function and one Even
 
 [日本語版 README](./README.ja.md)
 
-When you copy a few fields of `category/{id}` into `post.category`, or keep `post.likeCount` equal to the number of likes, something has to update the derived value whenever its inputs change. This package does that for any number of such rules, defined in a single TypeScript file:
+When you copy a few fields of `category/{id}` into `post.category`, or keep `post.likeCount` equal to the number of likes, something has to update the derived value whenever its inputs change. This package does that for any number of such rules, defined in a single TypeScript file.
+
+## What it does
+
+Three kinds of rules. Each keeps one field of a *target* document equal to something computed from other documents, and the handler re-reads those documents on every change instead of trusting the event.
+
+### Copy (`connections`): fields of one document → a map on each document that points at it
+
+```ts
+{ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId',
+  fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' }
+```
+
+```
+category/c1   { name: 'News', color: 'red', slug: 'news' }
+post/p1       { title: 'Hello', categoryId: 'c1' }
+                                   │
+                                   ▼
+post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
+```
+
+Runs when `category/c1` changes (every post with `categoryId == 'c1'` is updated), when `post.categoryId` changes (that post is re-pointed), and when `category/c1` is deleted (`post.category` becomes `null`, is removed, or is left alone, per `onSourceDelete`).
+
+### Count / sum (`aggregates`): a number over the documents that belong to the target
+
+```ts
+{ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId',
+  aggregate: 'count', targetField: 'likeCount' }                    // or aggregate: { sum: 'amount' }
+```
+
+```
+post/p1/like/u1   { at: ... }
+post/p1/like/u2   { at: ... }
+post/p1           { title: 'Hello' }
+                                   │
+                                   ▼
+post/p1           { title: 'Hello', likeCount: 2 }
+```
+
+Runs when a like under `post/p1` is created, deleted, or (for `sum`) its summed field changes; the number is always recomputed with `count()` / `sum()`, never adjusted with `increment()`. The target can also be named by a field on the source (`source: 'order', idField: 'customerId'`).
+
+### View (`views`): a value your own `build` computes from one or more sources
+
+```ts
+defineView({
+  name: 'post-latest-comments', target: 'post', targetField: 'latestComments',
+  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+  build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+})
+```
+
+```
+post/p1/comment/c1   { body: 'first',  createdAt: 1 }
+post/p1/comment/c2   { body: 'second', createdAt: 2 }
+post/p1/comment/c3   { body: 'third',  createdAt: 3 }
+post/p1              { title: 'Hello' }
+                                   │
+                                   ▼
+post/p1              { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
+```
+
+Runs when a comment under `post/p1` changes: `build` gets a fresh, ordered, limited read of the sources and returns the whole value. Sources relate to the target by `idParam` (under the target), `idField` (a source field holds the target id) or `refField` (a target field holds the source id); an optional `patch` applies a single change without re-reading everything. For shapes the two rules above cannot express: latest N, a map keyed by id, a summary of several collections.
+
+## Architecture
+
+One HTTP function receives every event; one Eventarc trigger exists per collection named in the config, whether it is a source or a target. The CLI creates the triggers from the same file the function reads.
+
+```mermaid
+flowchart LR
+  subgraph fs[Firestore]
+    S[(source collections)]
+    T[(target collections)]
+  end
+  S -- document written --> E[Eventarc<br/>one trigger per collection]
+  T -- document written --> E
+  E -- "CloudEvent (HTTP POST)" --> H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
+  H -- "1. read target(s), remember updateTime" --> T
+  H -- "2. re-read sources / count() / build()" --> S
+  H -- "3. update if changed, conditional on updateTime" --> T
+  C[/doc-sync.config.ts/] -.-> H
+  C -.-> CLI["doc-sync CLI<br/>validate · setup · deploy · rebuild · verify · dev"]
+  CLI -- "gcloud: service account, IAM, triggers" --> E
+  CLI -- "rebuild / verify: same read-compute-write" --> T
+```
+
+Because step 1 happens before step 2, a value computed from a stale read can never pass the precondition in step 3: if the target changed in between, the write fails and the target is redone. Late, duplicate or reordered events therefore only cost reads, never correctness.
+
+## Why
+
+- Replaces one `firestore-connect-document`-style extension (two functions) per rule with a single function.
+- Correct under Eventarc's at-least-once, unordered delivery. Event payloads only decide *whether* to act; the values written are always **re-read from Firestore** (copies) or **recomputed with an aggregation query** (counts and sums), and every write is **conditional on the target's `updateTime`**. Late or duplicate events can never overwrite newer data, and counters never drift because nothing is ever `increment()`ed.
+- Triggers are created and removed by one command from the same config file. `rebuild` backfills existing data, and `dev` runs the same handler against the Emulator Suite.
+
+## Requirements
+
+- Node.js 20+, `firebase-admin` 12+ (peer dependency)
+- Firestore in Native mode. Triggers run in the database's location (`asia-northeast1`, `nam5`, ...).
+- `gcloud` CLI, authenticated, for `doc-sync setup` / `doc-sync deploy`
+- Firebase CLI (`firebase-tools`), for `--deploy-function` and for the Emulator Suite
+
+## Install
+
+```sh
+npm install firestore-denormalize
+```
+
+## Quick start
+
+### 1. Write the config
+
+Create `doc-sync.config.ts` inside your functions source tree, at `functions/src/doc-sync.config.ts`. It has to live there rather than at the project root: `firebase deploy` only ships the files under `functions/`, and keeping the config under `functions/src` lets `tsc` compile it straight into a flat `functions/lib` alongside the rest of your code. A complete example with all three rule kinds:
 
 ```ts
 // doc-sync.config.ts
@@ -49,30 +159,7 @@ export default defineConfig({
 })
 ```
 
-## Why
-
-- Replaces one `firestore-connect-document`-style extension (two functions) per rule with a single function.
-- Correct under Eventarc's at-least-once, unordered delivery. Event payloads only decide *whether* to act; the values written are always **re-read from Firestore** (copies) or **recomputed with an aggregation query** (counts and sums), and every write is **conditional on the target's `updateTime`**. Late or duplicate events can never overwrite newer data, and counters never drift because nothing is ever `increment()`ed.
-- Triggers are created and removed by one command from the same config file. `rebuild` backfills existing data, and `dev` runs the same handler against the Emulator Suite.
-
-## Requirements
-
-- Node.js 20+, `firebase-admin` 12+ (peer dependency)
-- Firestore in Native mode. Triggers run in the database's location (`asia-northeast1`, `nam5`, ...).
-- `gcloud` CLI, authenticated, for `doc-sync setup` / `doc-sync deploy`
-- Firebase CLI (`firebase-tools`), for `--deploy-function` and for the Emulator Suite
-
-## Install
-
-```sh
-npm install firestore-denormalize
-```
-
-## Quick start
-
-### 1. Write the config
-
-Create `doc-sync.config.ts` inside your functions source tree, at `functions/src/doc-sync.config.ts` (contents as above). It has to live there rather than at the project root: `firebase deploy` only ships the files under `functions/`, and keeping the config under `functions/src` lets `tsc` compile it straight into a flat `functions/lib` alongside the rest of your code. Fields:
+Fields:
 
 | Key | Meaning |
 |---|---|
