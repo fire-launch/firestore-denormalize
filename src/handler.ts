@@ -874,16 +874,23 @@ export class Processor {
    * such key on the target that the result lacks is deleted. Undeclared paths are warned about once and ignored.
    */
   private planOf(view: ResolvedView, target: DocumentSnapshot, built: DocumentData | undefined): FieldPlan {
+    // A contract violation (build/patch returning something other than an object) must not crash the
+    // event: a non-null, non-object result is treated as nothing built; null/undefined stay silent
+    // (undefined is the documented "delete everything").
+    const data: DocumentData | undefined = built !== null && typeof built === 'object' && !Array.isArray(built) ? built : undefined
+    if (built !== null && built !== undefined && data === undefined) {
+      this.warnOnce(`${view.name}:not-object`, 'doc-sync: build did not return an object, treated as empty', { rule: view.name })
+    }
     const plan: FieldPlan = new Map()
     for (const path of view.targetFields) {
-      let v = getField(built, path)
+      let v = getField(data, path)
       // A result key written literally as a dotted path equal to a declared path (`{ 'stats.count': 3 }`) counts as that path.
-      if (v === undefined && built !== undefined && Object.hasOwn(built, path)) v = built[path]
+      if (v === undefined && data !== undefined && Object.hasOwn(data, path)) v = data[path]
       plan.set(path, v === undefined ? DELETE : v)
     }
     if (view.rest) {
       const reserved = new Set(view.reservedRootKeys)
-      for (const [key, value] of Object.entries(built ?? {})) {
+      for (const [key, value] of Object.entries(data ?? {})) {
         if (reserved.has(key)) continue
         if (key.includes('.') || !isValidFieldPath(key)) {
           this.warnOnce(`${view.name}:dotted:${key}`, 'doc-sync: build returned a root key that is not a valid field name, ignored', { rule: view.name, field: key })
@@ -905,7 +912,7 @@ export class Processor {
         plan.set(key, DELETE)
       }
     }
-    this.warnUndeclared(view, built)
+    this.warnUndeclared(view, data)
     return plan
   }
 

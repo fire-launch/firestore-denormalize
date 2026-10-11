@@ -555,6 +555,23 @@ describe('views: several declared paths', () => {
     expect((await post.get()).data()).toEqual({ title: 'keep', stats: { followerCount: 3 } })
     expect(logs.some((l) => l.message === 'doc-sync: build returned a field the view does not declare, ignored')).toBe(false)
   })
+
+  it('treats a null build result (contract violation) as nothing built, deleting every declared path', async () => {
+    const nullBuild = defineView({
+      name: 'post-null-build',
+      target: 'post',
+      targetFields: ['a', 'b'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: () => null as never,
+    })
+    const post = db.doc('post/p1')
+    await post.set({ a: 1, b: 2, keep: 3 })
+    const { handler } = handlerFor(defineConfig({ ...config, rules: [nullBuild] }))
+    const c1 = db.doc('post/p1/comment/c1')
+    const status = await invoke(handler, await change(c1, () => c1.set({ body: 'x' })))
+    expect(status).toBe(204)
+    expect((await post.get()).data()).toEqual({ keep: 3 })
+  })
 })
 
 describe('views: base decides whether the target exists', () => {
