@@ -65,7 +65,7 @@ export default defineConfig({
       // post.latestComments = the 2 newest comments of post/{postId}/comment, as [{ id, body }]
       name: "post-latest-comments",
       target: "post",
-      targetField: "latestComments",
+      targetFields: ["latestComments"],
       sources: {
         comments: {
           collection: "post/{postId}/comment",
@@ -74,8 +74,9 @@ export default defineConfig({
           limit: 2,
         },
       },
-      build: ({ sources }) =>
-        sources.comments.map((c) => ({ id: c.id, body: c.get("body") })),
+      build: ({ sources }) => ({
+        latestComments: sources.comments.map((c) => ({ id: c.id, body: c.get("body") })),
+      }),
     }),
 
     defineView({
@@ -84,18 +85,19 @@ export default defineConfig({
       // Without `patch` (or a `limit`), validate warns: every badge change would read all badges of the user.
       name: "user-badges",
       target: "user",
-      targetField: "badges",
+      targetFields: ["badges"],
       sources: { badges: { collection: "badge", idField: "userId", orderBy: ["name"] } },
-      build: ({ sources }) =>
-        Object.fromEntries(sources.badges.map((b) => [b.id, { name: b.get("name") }])),
+      build: ({ sources }) => ({
+        badges: Object.fromEntries(sources.badges.map((b) => [b.id, { name: b.get("name") }])),
+      }),
       patch: (current, change) => {
         const id = change.path.split("/").pop()!;
         if (change.before && change.after) return undefined; // an update: let build recompute
-        const next = { ...(current ?? {}) };
+        const next: Record<string, { name: unknown }> = { ...((current.badges as Record<string, { name: unknown }> | undefined) ?? {}) };
         // `after` is undefined when the badge was deleted or moved to another user
         if (change.after) next[id] = { name: change.after.name };
         else delete next[id];
-        return next;
+        return { badges: next };
       },
     }),
 
@@ -106,7 +108,7 @@ export default defineConfig({
       // validate; `patch` additionally keeps the per-event cost at two reads instead of 50.
       name: "thread-latest-messages",
       target: "thread",
-      targetField: "latest",
+      targetFields: ["latest"],
       sources: {
         messages: {
           collection: "message",
@@ -116,19 +118,21 @@ export default defineConfig({
           watch: ["body"], // threadId and createdAt are watched implicitly
         },
       },
-      build: ({ sources }) =>
-        sources.messages.map((m) => ({ id: m.id, body: m.get("body"), createdAt: m.get("createdAt") })),
+      build: ({ sources }) => ({
+        latest: sources.messages.map((m) => ({ id: m.id, body: m.get("body"), createdAt: m.get("createdAt") })),
+      }),
       patch: async (current, change, { target, firestore }) => {
         const id = change.path.split("/").pop()!;
-        const rest = (current ?? []).filter((m) => m.id !== id);
+        const list = (current.latest as { id: string; body: unknown; createdAt: any }[] | undefined) ?? [];
+        const rest = list.filter((m) => m.id !== id);
         const after = change.after;
         if (after) {
           // created or edited: upsert by id, newest first, keep 50
           const item = { id, body: after.body, createdAt: after.createdAt };
-          return [...rest, item].sort((a, b) => b.createdAt.toMillis() - a.createdAt.toMillis()).slice(0, 50);
+          return { latest: [...rest, item].sort((a, b) => b.createdAt.toMillis() - a.createdAt.toMillis()).slice(0, 50) };
         }
-        if (rest.length === current?.length) return current; // not in the window: nothing to do
-        if (rest.length === 0) return rest;
+        if (rest.length === list.length) return { latest: list }; // not in the window: nothing to do
+        if (rest.length === 0) return { latest: rest };
         // deleted: pull in the next older message so the window stays full (one limit(1) read)
         const older = await firestore
           .collection("message")
@@ -138,7 +142,7 @@ export default defineConfig({
           .limit(1)
           .get();
         for (const m of older.docs) rest.push({ id: m.id, body: m.get("body"), createdAt: m.get("createdAt") });
-        return rest;
+        return { latest: rest };
       },
     }),
 
@@ -148,17 +152,19 @@ export default defineConfig({
       // Without `patch` (or a `limit`), validate warns: every item change would read all items of the order.
       name: "order-summary",
       target: "order",
-      targetField: "summary",
+      targetFields: ["summary"],
       sources: { items: { collection: "order/{orderId}/item", idParam: "orderId" } },
-      build: ({ sources }) =>
-        summarize(Object.fromEntries(sources.items.map((i) => [i.id, { sku: i.get("sku") as string, amount: i.get("price") * i.get("qty") }]))),
+      build: ({ sources }) => ({
+        summary: summarize(Object.fromEntries(sources.items.map((i) => [i.id, { sku: i.get("sku") as string, amount: i.get("price") * i.get("qty") }]))),
+      }),
       patch: (current, change) => {
         // keyed by item id, so a duplicate or late event converges on the same value
         const id = change.path.split("/").pop()!;
-        const items = { ...(current?.items ?? {}) };
+        const summary = current.summary as { items: Record<string, { sku: string; amount: number }> } | undefined;
+        const items = { ...(summary?.items ?? {}) };
         if (change.after) items[id] = { sku: change.after.sku, amount: change.after.price * change.after.qty };
         else delete items[id];
-        return summarize(items);
+        return { summary: summarize(items) };
       },
     }),
 

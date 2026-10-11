@@ -131,7 +131,7 @@ defineConfig({
 const latest = defineView({
   name: 'post-latest',
   target: 'post',
-  targetField: 'latest',
+  targetFields: ['latest'],
   sources: {
     comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2, watch: ['body'] },
     cat: { collection: 'category', refField: 'categoryId' },
@@ -142,7 +142,7 @@ const latest = defineView({
     void title
     void color
     // sources.comments is QueryDocumentSnapshot<Comment>[]: data().body is a string
-    return sources.comments.map((c) => ({ id: c.id, body: c.data().body }))
+    return { latest: sources.comments.map((c) => ({ id: c.id, body: c.data().body })) }
   },
   patch: (current, change) => {
     if (change.source === 'comments') {
@@ -159,53 +159,44 @@ defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa'
 defineView({
   name: 'x',
   target: 'post',
-  targetField: 'latest',
+  targetFields: ['latest'],
   // @ts-expect-error unknown collection
   sources: { c: { collection: 'comments', idField: 'postId' } },
-  build: () => [],
+  build: () => ({}),
 })
 
 defineView({
   name: 'x',
   target: 'post',
-  targetField: 'latest',
+  targetFields: ['latest'],
   // @ts-expect-error refField must be a string field of the target
   sources: { c: { collection: 'category', refField: 'likeCount' } },
-  build: () => [],
+  build: () => ({}),
 })
 
 defineView({
   name: 'x',
   target: 'post',
-  targetField: 'latest',
+  targetFields: ['latest'],
   // @ts-expect-error orderBy must name a field of the source
   sources: { c: { collection: 'comment', idField: 'postId', orderBy: ['createdAtt'] } },
-  build: () => [],
+  build: () => ({}),
 })
 
 defineView({
   name: 'x',
   target: 'post',
   // @ts-expect-error targetField must exist on the target
-  targetField: 'latestt',
+  targetFields: ['latestt'],
   sources: { c: { collection: 'comment', idField: 'postId' } },
-  build: () => [],
+  build: () => ({}),
 })
 
 defineView({
   name: 'x',
   target: 'post',
-  targetField: 'likeCount',
-  sources: { c: { collection: 'comment', idField: 'postId' } },
-  // @ts-expect-error build must return the type of the target field (number)
-  build: ({ sources }) => sources.c.map((c) => c.id),
-})
-
-defineView({
-  name: 'x',
-  target: 'post',
-  targetField: 'likeCount',
+  targetFields: ['likeCount'],
   sources: { c: { collection: 'comment', idField: 'postId' } },
   // @ts-expect-error `bodyy` is not a field of Comment
-  build: ({ sources }) => sources.c.filter((c) => c.data().bodyy).length,
+  build: ({ sources }) => ({ likeCount: sources.c.filter((c) => c.data().bodyy).length }),
 })

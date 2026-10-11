@@ -9,6 +9,7 @@
  * ```
  */
 import type {
+  DocumentData,
   DocumentReference,
   DocumentSnapshot,
   FieldValue,
@@ -135,14 +136,10 @@ export interface TypedViewRule<C, T extends Key<C>, TF extends FieldPath<C[T]>, 
   kind: 'view'
   name: string
   target: T
-  targetField: TF
+  targetFields: TF[]
   sources: S
-  build(ctx: TypedBuildContext<C, T, S>): Get<C[T], TF> | undefined | Promise<Get<C[T], TF> | undefined>
-  patch?(
-    current: Get<C[T], TF> | undefined,
-    change: TypedViewChange<C, S>,
-    ctx: TypedPatchContext<C, T>,
-  ): Get<C[T], TF> | undefined | Promise<Get<C[T], TF> | undefined>
+  build(ctx: TypedBuildContext<C, T, S>): DocumentData | undefined | Promise<DocumentData | undefined>
+  patch?(current: DocumentData, change: TypedViewChange<C, S>, ctx: TypedPatchContext<C, T>): DocumentData | undefined | Promise<DocumentData | undefined>
 }
 
 /** A rule in a typed config: a typed connection or aggregate, or a view made with the typed `defineView`. */

@@ -34,12 +34,14 @@ export interface Mismatch {
   rule: string
   /** Target document path. */
   document: string
-  /** The rule's `targetField`. */
-  field: string
+  /** `value`: a field differs. `missing`: the base exists but the target does not. `orphan`: the target exists but its base does not. */
+  issue: 'value' | 'missing' | 'orphan'
+  /** The differing field path (`value` only). */
+  field?: string
   /** Current value of the field (`undefined` when absent). */
-  actual: unknown
+  actual?: unknown
   /** Value the field should hold (`undefined` when it should be absent). */
-  expected: unknown
+  expected?: unknown
   /** With `fix`: the value was repaired (or found already correct on re-read). Always false without `fix`. */
   fixed: boolean
 }
@@ -94,14 +96,9 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
           await processor.sync(target.ref, rule, { target, sourceCache: page.sourceCache, counter })
           didFix = true
         }
-        pending.push({
-          rule: rule.name,
-          document: target.ref.path,
-          field: rule.targetField,
-          actual: check.actual,
-          expected: check.expected,
-          fixed: didFix,
-        })
+        for (const f of check.fields ?? []) {
+          pending.push({ rule: rule.name, document: target.ref.path, issue: 'value', field: f.field, actual: f.actual, expected: f.expected, fixed: didFix })
+        }
       },
       (p) => {
         pending.sort((a, b) => (a.document < b.document ? -1 : a.document > b.document ? 1 : 0))

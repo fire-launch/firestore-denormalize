@@ -5,7 +5,7 @@
  * (`createDocSyncHandler`) and by the CLI (`doc-sync validate|setup|deploy|rebuild|dev`).
  */
 import type { DocumentData, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
-import { fieldPathsOverlap, isValidFieldPath } from './fields.js'
+import { fieldPathsOverlap, isValidFieldPath, splitFieldPath } from './fields.js'
 import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug, patternsIntersect } from './paths.js'
 
 /** What to write into `targetField` when the source document no longer exists. */
@@ -92,6 +92,8 @@ export interface ViewSource {
 /** What `build` receives: the target and the current documents of every source, all freshly read. */
 export interface BuildContext<S extends Record<string, ViewSource> = Record<string, ViewSource>> {
   target: DocumentSnapshot
+  /** The base document (views with `base`); always exists when `build` runs. */
+  base?: DocumentSnapshot
   /** Documents per source key, in query order. A `refField` source has zero or one document. */
   sources: { [K in keyof S]: QueryDocumentSnapshot[] }
   /** The Firestore instance the handler uses, for extra reads. Reads happen after the target was read, so the conditional write stays safe. */
@@ -116,38 +118,49 @@ export interface ViewChange {
 export interface PatchContext {
   /** Freshly read target document. */
   target: DocumentSnapshot
+  /** The base document (views with `base`); always exists when `patch` runs. */
+  base?: DocumentSnapshot
   /** The Firestore instance the handler uses, for a small extra read (e.g. refilling a "latest N" list after a delete). */
   firestore: Firestore
 }
 
 /**
- * View: keep `target.{targetField}` equal to `build(...)`, a value computed by user code
- * from the documents of one or more source collections. For shapes the other rules
- * cannot express: "latest N items", a map keyed by id, a custom summary.
+ * View: keep the declared `targetFields` of `target` equal to the matching paths of
+ * `build(...)`, an object computed by user code from the documents of one or more source
+ * collections. For shapes the other rules cannot express: "latest N items", a map keyed by
+ * id, a custom summary, a read model spread over several fields.
  */
-export interface ViewRule<S extends Record<string, ViewSource> = Record<string, ViewSource>, T = unknown> {
+export interface ViewRule<S extends Record<string, ViewSource> = Record<string, ViewSource>, T extends DocumentData = DocumentData> {
   kind: 'view'
   /** Unique name, used in logs. */
   name: string
   /** Collection holding the derived value. */
   target: string
-  /** Field on the target that receives the value. */
-  targetField: string
-  /** Source collections keyed by the name used in `build` / `patch`. */
-  sources: S
   /**
-   * Recomputes the whole value from a fresh read of every source. Must be deterministic.
-   * Return `undefined` to delete `targetField`. Used by the handler, `rebuild` and `verify`.
+   * Field paths of the target this view writes (`title`, `stats.count`, `profile`). Only these
+   * paths are read from the `build` result; a path whose value is `undefined` is deleted.
+   * `'rest'` (views with `base` only) adds every root key no rule declares.
+   */
+  targetFields: string[]
+  /**
+   * Collection whose document with the same ID decides whether the target exists: the target is
+   * created when the base exists and deleted when it does not. Must have the same placeholders as `target`.
+   */
+  base?: string
+  /** Source collections keyed by the name used in `build` / `patch`. May be omitted when `base` is set. */
+  sources?: S
+  /**
+   * Recomputes the declared fields from a fresh read of the base and every source. Must be
+   * deterministic. Return `undefined` to delete every declared field. Used by the handler,
+   * `rebuild` and `verify`.
    */
   build(ctx: BuildContext<S>): T | undefined | Promise<T | undefined>
   /**
-   * Optional fast path: derive the new value from the current one and the changed document
-   * (one fresh read) instead of reading every source. Return `undefined` to fall back to
-   * `build`. Events can be delivered more than once and out of order, so `patch` must be
-   * idempotent and must only use `change.after` (the current state) to decide what the item
-   * looks like, keyed by document id. `rebuild` and `verify` never use it.
+   * Optional fast path: derive the new values from the current ones (`current` holds the
+   * declared paths as they are on the target) and one changed source document. Return
+   * `undefined` to fall back to `build`.
    */
-  patch?(current: T | undefined, change: ViewChange, ctx: PatchContext): T | undefined | Promise<T | undefined>
+  patch?(current: T, change: ViewChange, ctx: PatchContext): T | undefined | Promise<T | undefined>
 }
 
 export interface DocSyncConfig {
@@ -200,11 +213,20 @@ export interface ResolvedView {
   kind: 'view'
   name: string
   target: string
-  targetField: string
+  /** Declared field paths, without `'rest'`. */
+  targetFields: string[]
+  /** Whether `'rest'` was declared. */
+  rest: boolean
+  /** Root keys of the target that `'rest'` must never touch: every root of a field written or used as an id by any rule on this collection. */
+  reservedRootKeys: string[]
+  base?: string
+  basePattern?: CollectionPattern
   targetPattern: CollectionPattern
   sources: ResolvedViewSource[]
   build: ViewRule['build']
   patch?: ViewRule['patch']
+  /** Set when the view was made from `defineProjection`. */
+  projection?: true
 }
 
 export type ResolvedRule = ResolvedConnection | ResolvedAggregate | ResolvedView
@@ -241,7 +263,7 @@ export function defineAggregate(rule: Omit<AggregateRule, 'kind'>): AggregateRul
 }
 
 /** Tags a view with its `kind` and types `build` / `patch` from the view's own `sources` keys. */
-export function defineView<S extends Record<string, ViewSource>, T>(view: Omit<ViewRule<S, T>, 'kind'>): ViewRule<S, T> {
+export function defineView<S extends Record<string, ViewSource>, T extends DocumentData>(view: Omit<ViewRule<S, T>, 'kind'>): ViewRule<S, T> {
   return { kind: 'view', ...view } as ViewRule<S, T>
 }
 
@@ -448,7 +470,30 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
     checkName(v, label)
     const target = pattern(v.target, label, 'target')
-    const okTargetField = fieldPath(v.targetField, label, 'targetField')
+    const okTargetFieldsShape = Array.isArray(v.targetFields) && v.targetFields.length > 0 && v.targetFields.every((f) => typeof f === 'string')
+    if (!okTargetFieldsShape) problems.push(`${label}: \`targetFields\` must be a non-empty array of field paths`)
+    const declared: string[] = okTargetFieldsShape ? (v.targetFields as string[]) : []
+    const explicit = declared.filter((f) => f !== 'rest')
+    const restCount = declared.length - explicit.length
+    let okTargetFields = okTargetFieldsShape
+    for (const f of explicit) {
+      if (!isValidFieldPath(f)) {
+        problems.push(`${label}: \`targetFields\` entry "${f}" is not a valid field path`)
+        okTargetFields = false
+      }
+    }
+    for (let a = 0; a < explicit.length; a++) {
+      for (let b = a + 1; b < explicit.length; b++) {
+        if (fieldPathsOverlap(explicit[a]!, explicit[b]!)) {
+          problems.push(`${label}: \`targetFields\` "${explicit[a]}" and "${explicit[b]}" overlap`)
+          okTargetFields = false
+        }
+      }
+    }
+    if (restCount > 0) {
+      problems.push(`${label}: 'rest' in \`targetFields\` requires \`base\``)
+      okTargetFields = false
+    }
 
     const sourcesIsObject = v.sources !== null && typeof v.sources === 'object' && !Array.isArray(v.sources)
     if (!sourcesIsObject) problems.push(`${label}: \`sources\` must be an object keyed by source name`)
@@ -563,8 +608,10 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         }
       }
 
-      if (okRefField && okTargetField && fieldPathsOverlap(s.refField!, v.targetField)) {
-        problems.push(`${sLabel}: \`refField\` "${s.refField}" and \`targetField\` must not overlap`)
+      if (okRefField) {
+        for (const f of explicit) {
+          if (fieldPathsOverlap(s.refField!, f)) problems.push(`${sLabel}: \`refField\` "${s.refField}" and \`targetFields\` must not overlap ("${f}")`)
+        }
       }
 
       if (target && okRefField) idFields.push({ target, field: s.refField! })
@@ -580,14 +627,16 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
       }
     }
 
-    if (target && okTargetField) writtenFields.push({ rule: label, target, field: v.targetField })
+    if (target && okTargetFields) for (const f of explicit) writtenFields.push({ rule: label, target, field: f })
 
-    if (target && okTargetField && okBuild && okPatch && sourcesOk) {
+    if (target && okTargetFields && okBuild && okPatch && sourcesOk) {
       resolvedViews.push({
         kind: 'view',
         name: v.name,
         target: v.target,
-        targetField: v.targetField,
+        targetFields: explicit,
+        rest: restCount === 1,
+        reservedRootKeys: [],
         targetPattern: target,
         sources: resolvedSources,
         build: v.build,
@@ -743,11 +792,16 @@ function writeTriggerEdges(rules: ResolvedRule[]): WriteTrigger[] {
     if (r.kind === 'aggregate') return [{ key: r.sourcePattern.key, fields: r.watchedFields }]
     return r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))
   }
+  /** Field paths a rule writes; `undefined` when it may write any field (`rest`). */
+  const written = (r: ResolvedRule): string[] | undefined => (r.kind === 'view' ? (r.rest ? undefined : r.targetFields) : [r.targetField])
   const edges: WriteTrigger[] = []
   for (const a of rules) {
+    const fields = written(a)
     for (const b of rules) {
-      const hit = watchers(b).some((w) => w.key === a.targetPattern.key && (w.fields === undefined || w.fields.some((f) => fieldPathsOverlap(f, a.targetField))))
-      if (hit) edges.push({ from: a.name, field: `${a.target}.${a.targetField}`, to: b.name })
+      const hit = watchers(b).some(
+        (w) => w.key === a.targetPattern.key && (w.fields === undefined || fields === undefined || w.fields.some((f) => fields.some((t) => fieldPathsOverlap(f, t)))),
+      )
+      if (hit) edges.push({ from: a.name, field: `${a.target}.${fields ? fields.join(',') : '*'}`, to: b.name })
     }
   }
   return edges

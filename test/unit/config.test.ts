@@ -225,9 +225,9 @@ describe('validateConfig', () => {
     const view: ViewRule = defineView({
       name: 'post-latest-comments',
       target: 'post',
-      targetField: 'latestComments',
+      targetFields: ['latestComments'],
       sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 3 } },
-      build: ({ sources }) => sources.comments!.map((c) => c.id),
+      build: ({ sources }) => ({ latestComments: sources.comments!.map((c) => c.id) }),
     })
     const only = (v: Partial<ViewRule>) => ({ ...base, rules: [{ ...view, ...v }] })
 
@@ -239,7 +239,7 @@ describe('validateConfig', () => {
           {
             ...view,
             sources: {
-              comments: view.sources.comments!,
+              comments: view.sources!.comments!,
               author: { collection: 'user', refField: 'authorId' },
               tags: { collection: 'tag', idField: 'postId', orderBy: ['label'], watch: ['label'] },
             },
@@ -263,14 +263,30 @@ describe('validateConfig', () => {
       expect(r.resolved).toBe(true)
     })
 
-    it('requires name, target, targetField, a non-empty sources map and a build function', () => {
+    it('requires name, target, non-empty targetFields, a non-empty sources map and a build function', () => {
       expect(problemsOf(only({ name: '' }))).toContainEqual(expect.stringContaining('`name` is required'))
       expect(problemsOf(only({ target: '' }))).toContainEqual(expect.stringContaining('`target` is required'))
-      expect(problemsOf(only({ targetField: 'a/b' }))).toContainEqual(expect.stringContaining('`targetField` must be a field path'))
+      expect(problemsOf(only({ targetFields: [] }))).toContainEqual(expect.stringContaining('`targetFields` must be a non-empty array'))
+      expect(problemsOf(only({ targetFields: 'latest' as never }))).toContainEqual(expect.stringContaining('`targetFields` must be a non-empty array'))
+      expect(problemsOf(only({ targetFields: ['a/b'] }))).toContainEqual(expect.stringContaining('`targetFields` entry "a/b" is not a valid field path'))
+      expect(problemsOf(only({ targetFields: ['stats', 'stats.count'] }))).toContainEqual(expect.stringContaining('`targetFields` "stats" and "stats.count" overlap'))
       expect(problemsOf(only({ sources: {} }))).toContainEqual(expect.stringContaining('`sources` must have at least one entry'))
       expect(problemsOf(only({ sources: [] as never }))).toContainEqual(expect.stringContaining('`sources` must be an object'))
       expect(problemsOf(only({ build: undefined as never }))).toContainEqual(expect.stringContaining('`build` must be a function'))
       expect(problemsOf(only({ patch: 'x' as never }))).toContainEqual(expect.stringContaining('`patch` must be a function'))
+    })
+
+    it('resolves targetFields and keeps every path apart from other rules and refFields', () => {
+      const r = validateConfig(only({ targetFields: ['latestComments', 'stats.commentCount'] }))
+      expect(r.views[0]).toMatchObject({ targetFields: ['latestComments', 'stats.commentCount'], rest: false, reservedRootKeys: [] })
+      // `only` drops the other rules, so put the base config's connection (writes post.category, idField categoryId) back
+      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetFields: ['category.name'] }] })).toContainEqual(
+        expect.stringContaining('overlaps "category" written by connection "post-category"'),
+      )
+      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetFields: ['categoryId'] }] })).toContainEqual(expect.stringContaining('is used as an `idField` by another rule'))
+      expect(
+        problemsOf(only({ targetFields: ['authorId'], sources: { author: { collection: 'user', refField: 'authorId' } } })),
+      ).toContainEqual(expect.stringContaining('`refField` "authorId" and `targetFields` must not overlap'))
     })
 
     it('rejects a view name shared with a connection or aggregate', () => {
@@ -324,21 +340,6 @@ describe('validateConfig', () => {
       )
     })
 
-    it('keeps targetField apart from other rules and from refFields', () => {
-      const c = base.rules[0] as Connection
-      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetField: 'category' }] })).toContainEqual(expect.stringContaining('overlaps "category"'))
-      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetField: 'categoryId' }] })).toContainEqual(expect.stringContaining('used as an `idField`'))
-      expect(
-        problemsOf({
-          ...base,
-          rules: [{ ...c, targetField: 'authorId' }, { ...view, sources: { author: { collection: 'user', refField: 'authorId' } } }],
-        }),
-      ).toContainEqual(expect.stringContaining('used as an `idField`'))
-      expect(
-        problemsOf(only({ sources: { author: { collection: 'user', refField: 'latestComments' } } })),
-      ).toContainEqual(expect.stringContaining('`refField` "latestComments" and `targetField` must not overlap'))
-    })
-
     it('treats a view without `watch` as watching every field in loop detection', () => {
       const c = base.rules[0] as Connection
       // post-category writes post.category; the view reads post (any field) and writes category.summary, which post-category copies
@@ -346,7 +347,7 @@ describe('validateConfig', () => {
         ...base,
         rules: [
           { ...c, fields: ['summary'] },
-          { ...view, name: 'category-summary', target: 'category', targetField: 'summary', sources: { posts: { collection: 'post', idField: 'categoryId' } } },
+          { ...view, name: 'category-summary', target: 'category', targetFields: ['summary'], sources: { posts: { collection: 'post', idField: 'categoryId' } } },
         ],
       })
       expect(problems).toEqual([expect.stringMatching(/form a loop.*post-category -> category-summary -> post-category/)])
@@ -356,7 +357,7 @@ describe('validateConfig', () => {
           ...base,
           rules: [
             { ...c, fields: ['summary'] },
-            { ...view, name: 'category-summary', target: 'category', targetField: 'summary', sources: { posts: { collection: 'post', idField: 'categoryId', watch: ['title'] } } },
+            { ...view, name: 'category-summary', target: 'category', targetFields: ['summary'], sources: { posts: { collection: 'post', idField: 'categoryId', watch: ['title'] } } },
           ],
         }),
       ).not.toThrow()
@@ -398,10 +399,10 @@ describe('validateConfig', () => {
       const v = defineView({
         name: 'x',
         target: 'post',
-        targetField: 'x',
+        targetFields: ['x'],
         sources: { comments: { collection: 'comment', idField: 'postId' } },
-        build: ({ sources }) => sources.comments.length,
-        patch: (current, change) => (change.after ? (current ?? 0) + 1 : undefined),
+        build: ({ sources }) => ({ x: sources.comments.length }),
+        patch: (current, change) => (change.after ? { x: ((current.x as number | undefined) ?? 0) + 1 } : undefined),
       })
       expect(() => validateConfig({ ...base, rules: [...base.rules, v] })).not.toThrow()
     })
@@ -435,9 +436,9 @@ describe('validateConfig', () => {
     const view = defineView({
       name: 'post-latest-comments',
       target: 'post',
-      targetField: 'latestComments',
+      targetFields: ['latestComments'],
       sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
-      build: () => [] as string[],
+      build: () => ({ latestComments: [] as string[] }),
     })
     const resolved = validateConfig({ ...base, rules: [agg, conn, view] })
     expect(resolved.connections).toHaveLength(1)
@@ -462,7 +463,7 @@ describe('collectionsOf / triggerName', () => {
     expect(list.map((p) => p.raw)).toEqual(['post', 'post/{postId}/comment', 'user'])
     const resolved = validateConfig({
       ...base,
-      rules: [defineView({ name: 'v', target: 'post', targetField: 'v', sources: { a: { collection: 'user', refField: 'authorId' } }, build: () => 1 })],
+      rules: [defineView({ name: 'v', target: 'post', targetFields: ['v'], sources: { a: { collection: 'user', refField: 'authorId' } }, build: () => ({ v: 1 }) })],
     })
     expect(collectionsOf(resolved).map((p) => p.raw)).toEqual(['post', 'user'])
   })

@@ -44,13 +44,13 @@ describe('verify', () => {
       ['category-posts', 'aggregate', 1, 1, 0, false],
     ])
     expect(results[0]!.mismatches).toEqual([
-      { rule: 'post-category', document: 'post/missing', field: 'category', actual: undefined, expected: { name: 'A' }, fixed: false },
-      { rule: 'post-category', document: 'post/orphan', field: 'category', actual: { name: 'x' }, expected: null, fixed: false },
-      { rule: 'post-category', document: 'post/stale', field: 'category', actual: { name: 'old' }, expected: { name: 'A' }, fixed: false },
-      { rule: 'post-category', document: 'post/unlinked', field: 'category', actual: { name: 'x' }, expected: undefined, fixed: false },
+      { rule: 'post-category', document: 'post/missing', issue: 'value', field: 'category', actual: undefined, expected: { name: 'A' }, fixed: false },
+      { rule: 'post-category', document: 'post/orphan', issue: 'value', field: 'category', actual: { name: 'x' }, expected: null, fixed: false },
+      { rule: 'post-category', document: 'post/stale', issue: 'value', field: 'category', actual: { name: 'old' }, expected: { name: 'A' }, fixed: false },
+      { rule: 'post-category', document: 'post/unlinked', issue: 'value', field: 'category', actual: { name: 'x' }, expected: undefined, fixed: false },
     ])
     expect(results[1]!.mismatches).toEqual([
-      { rule: 'category-posts', document: 'category/c1', field: 'postCount', actual: 1, expected: 3, fixed: false },
+      { rule: 'category-posts', document: 'category/c1', issue: 'value', field: 'postCount', actual: 1, expected: 3, fixed: false },
     ])
     expect(seen).toEqual([...results[0]!.mismatches, ...results[1]!.mismatches])
     expect(results[0]!.lastPath).toBe('post/unlinked')

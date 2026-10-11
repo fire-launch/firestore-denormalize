@@ -10,11 +10,11 @@ let builds = 0
 const latestComments = defineView({
   name: 'post-latest-comments',
   target: 'post',
-  targetField: 'latestComments',
+  targetFields: ['latestComments'],
   sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
   build: ({ sources }) => {
     builds++
-    return sources.comments.map((c) => ({ id: c.id, body: c.get('body') }))
+    return { latestComments: sources.comments.map((c) => ({ id: c.id, body: c.get('body') })) }
   },
 })
 
@@ -22,19 +22,19 @@ const latestComments = defineView({
 const badges = defineView({
   name: 'user-badges',
   target: 'user',
-  targetField: 'badges',
+  targetFields: ['badges'],
   sources: { badges: { collection: 'badge', idField: 'userId', orderBy: ['name'] } },
   build: ({ sources }) => {
     builds++
-    return Object.fromEntries(sources.badges.map((b) => [b.id, { name: b.get('name') }]))
+    return { badges: Object.fromEntries(sources.badges.map((b) => [b.id, { name: b.get('name') }])) }
   },
   patch: (current, change) => {
     const id = change.path.split('/').pop()!
     if (change.before && change.after) return undefined // an update: fall back to build
-    const next: Record<string, { name: unknown }> = { ...(current ?? {}) }
+    const next: Record<string, { name: unknown }> = { ...((current.badges as Record<string, { name: unknown }> | undefined) ?? {}) }
     if (change.after) next[id] = { name: change.after.name }
     else delete next[id]
-    return next
+    return { badges: next }
   },
 })
 
@@ -42,7 +42,7 @@ const badges = defineView({
 const summary = defineView({
   name: 'post-summary',
   target: 'post',
-  targetField: 'summary',
+  targetFields: ['summary'],
   sources: {
     author: { collection: 'user', refField: 'authorId' },
     category: { collection: 'category', refField: 'categoryId', watch: ['name'] },
@@ -52,7 +52,7 @@ const summary = defineView({
     const [author] = sources.author
     const [category] = sources.category
     if (!author && !category) return undefined
-    return `${author?.get('name') ?? '?'} / ${category?.get('name') ?? '?'}`
+    return { summary: `${author?.get('name') ?? '?'} / ${category?.get('name') ?? '?'}` }
   },
 })
 
@@ -60,16 +60,16 @@ const summary = defineView({
 const nested = defineView({
   name: 'user-post-comments',
   target: 'users/{uid}/post',
-  targetField: 'commentCount',
+  targetFields: ['commentCount'],
   sources: { comments: { collection: 'users/{uid}/post/{postId}/comment', idParam: 'postId' } },
-  build: ({ sources }) => sources.comments.length,
+  build: ({ sources }) => ({ commentCount: sources.comments.length }),
 })
 const mentions = defineView({
   name: 'post-mentions',
   target: 'post',
-  targetField: 'mentions',
+  targetFields: ['mentions'],
   sources: { mentions: { collection: 'users/{uid}/mention', idField: 'postId', orderBy: ['at'], limit: 2 } },
-  build: ({ sources }) => sources.mentions.map((m: QueryDocumentSnapshot) => m.ref.path),
+  build: ({ sources }) => ({ mentions: sources.mentions.map((m: QueryDocumentSnapshot) => m.ref.path) }),
 })
 
 /** thread.latest = newest 2 messages, maintained by patch with at most one extra read per event (refill after a delete). */
@@ -78,26 +78,27 @@ type Item = { id: string; body: unknown; at: number }
 const latestMessages = defineView({
   name: 'thread-latest',
   target: 'thread',
-  targetField: 'latest',
+  targetFields: ['latest'],
   sources: { messages: { collection: 'message', idField: 'threadId', orderBy: [['at', 'desc']], limit: 2, watch: ['body', 'at'] } },
   build: ({ sources }) => {
     builds++
-    return sources.messages.map((m): Item => ({ id: m.id, body: m.get('body'), at: m.get('at') }))
+    return { latest: sources.messages.map((m): Item => ({ id: m.id, body: m.get('body'), at: m.get('at') })) }
   },
   patch: async (current, change, { target, firestore }) => {
     const id = change.path.split('/').pop()!
-    const rest = (current ?? []).filter((m) => m.id !== id)
+    const list = (current.latest as Item[] | undefined) ?? []
+    const rest = list.filter((m) => m.id !== id)
     const after = change.after
     if (after && after.threadId === target.id) {
-      return [...rest, { id, body: after.body, at: after.at as number }].sort((a, b) => b.at - a.at).slice(0, 2)
+      return { latest: [...rest, { id, body: after.body, at: after.at as number }].sort((a, b) => b.at - a.at).slice(0, 2) }
     }
-    if (rest.length === (current ?? []).length) return current
+    if (rest.length === list.length) return { latest: list }
     if (rest.length < 2 && rest.length > 0) {
       refills++
       const older = await firestore.collection('message').where('threadId', '==', target.id).where('at', '<', rest[rest.length - 1]!.at).orderBy('at', 'desc').limit(1).get()
       for (const m of older.docs) rest.push({ id: m.id, body: m.get('body'), at: m.get('at') })
     }
-    return rest
+    return { latest: rest }
   },
 })
 
@@ -338,10 +339,10 @@ describe('views: refField fan-out with patch reads the changed document once per
   const summaryPatch = defineView({
     name: 'post-author-name',
     target: 'post',
-    targetField: 'authorName',
+    targetFields: ['authorName'],
     sources: { author: { collection: 'user', refField: 'authorId' } },
-    build: ({ sources }) => sources.author[0]?.get('name') ?? null,
-    patch: (_current, change) => (change.after ? (change.after.name as string) : null),
+    build: ({ sources }) => ({ authorName: sources.author[0]?.get('name') ?? null }),
+    patch: (_current, change) => ({ authorName: change.after ? (change.after.name as string) : null }),
   })
   it('counts N target reads plus one read per page', async () => {
     await db.doc('user/u1').set({ name: 'Ann' })
@@ -453,7 +454,7 @@ describe('views: rebuild and verify always use build', () => {
     expect(report).toHaveLength(1)
     expect(report[0]).toMatchObject({ rule: 'user-badges', kind: 'view', scanned: 2, mismatched: 1, fixed: 0, fix: false })
     expect(report[0]!.mismatches).toEqual([
-      { rule: 'user-badges', document: 'user/u1', field: 'badges', actual: { b1: { name: 'Old' } }, expected: { b1: { name: 'Gold' } }, fixed: false },
+      { rule: 'user-badges', document: 'user/u1', issue: 'value', field: 'badges', actual: { b1: { name: 'Old' } }, expected: { b1: { name: 'Gold' } }, fixed: false },
     ])
     expect((await db.doc('user/u1').get()).get('badges')).toEqual({ b1: { name: 'Old' } })
 

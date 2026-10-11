@@ -83,15 +83,24 @@ type Desired = unknown
 type Computed = Desired | typeof NOTHING
 type Outcome = 'skip' | 'write' | 'delete'
 
+/** One field whose current value differs from what the rule computes. */
+export interface FieldMismatch {
+  field: string
+  /** Current value (`undefined` when absent). */
+  actual: unknown
+  /** Value the field should hold (`undefined` when it should be absent). */
+  expected: unknown
+}
+
 /** Result of comparing one target with what its sources say it should hold. */
 export interface CheckResult {
   /** `ok`: up to date. `mismatch`: differs. `skip`: nothing to check (target missing, idField not a string, ...). */
   status: 'ok' | 'mismatch' | 'skip'
   reason?: string
-  /** Current value of `targetField` (`undefined` when absent). */
-  actual?: unknown
-  /** Value `targetField` should hold (`undefined` when it should be absent). Only for `mismatch`. */
-  expected?: unknown
+  /** For `mismatch`: `value` (fields differ), `missing` (base exists, target does not), `orphan` (target exists, base does not). */
+  issue?: 'value' | 'missing' | 'orphan'
+  /** For `value` / `missing`: the differing fields. */
+  fields?: FieldMismatch[]
 }
 
 /** Options for {@link Processor.check}. */
@@ -281,18 +290,23 @@ export class Processor {
    * writing. Missing sources of a connection follow `onSourceDelete`, as in `rebuild`.
    */
   async check(target: DocumentSnapshot, rule: ResolvedRule, opts: CheckOptions = {}): Promise<CheckResult> {
+    if (rule.kind === 'view') return this.checkView(target, rule, opts)
     if (!target.exists) return { status: 'skip', reason: 'target missing' }
     const counter = opts.counter ?? new ReadCounter()
     const computed =
       rule.kind === 'connection'
         ? await this.computeCopy(target, rule, { sourceCache: opts.sourceCache, counter, deleted: { onSourceDelete: rule.onSourceDelete } })
-        : rule.kind === 'aggregate'
-          ? await this.computeAggregate(target, rule, counter)
-          : await this.computeView(target, rule, { counter })
-    const actual: unknown = target.get(rule.targetField)
-    if (computed.value === NOTHING) return { status: 'skip', reason: computed.reason, actual }
-    if (!needsWrite(target, rule.targetField, computed.value)) return { status: 'ok', actual }
-    return { status: 'mismatch', actual, expected: computed.value === DELETE ? undefined : computed.value }
+        : await this.computeAggregate(target, rule, counter)
+    if (computed.value === NOTHING) return { status: 'skip', reason: computed.reason }
+    return checkPlan(target, new Map([[rule.targetField, computed.value]]))
+  }
+
+  private async checkView(target: DocumentSnapshot, view: ResolvedView, opts: CheckOptions): Promise<CheckResult> {
+    if (!target.exists) return { status: 'skip', reason: 'target missing' }
+    const counter = opts.counter ?? new ReadCounter()
+    const { plan, reason } = await this.computeView(target, view, { counter })
+    if (plan === NOTHING) return { status: 'skip', reason }
+    return checkPlan(target, plan)
   }
 
   /**
@@ -647,7 +661,7 @@ export class Processor {
       result.reason = 'target deleted'
       return result
     }
-    if (before && !fieldRemoved(before, after, view.targetField)) {
+    if (before && !view.targetFields.some((f) => fieldRemoved(before, after, f))) {
       const refFields = view.sources.map((s) => s.refField).filter((f): f is string => f !== undefined)
       if (refFields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
         result.reason = refFields.length ? 'refFields unchanged' : 'not a create'
@@ -671,24 +685,24 @@ export class Processor {
     const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
     // A redo re-read the target, so the changed document must be re-read after it as well.
-    const { value } = await this.computeView(target, view, { ...opts, counter, changeCache: attempt === 0 ? opts.changeCache : undefined })
-    if (value === NOTHING) return 'skip'
-    const { updates, outcome } = planUpdates(target, new Map([[view.targetField, value]]))
+    const { plan } = await this.computeView(target, view, { ...opts, counter, changeCache: attempt === 0 ? opts.changeCache : undefined })
+    if (plan === NOTHING) return 'skip'
+    const { updates, outcome } = planUpdates(target, plan)
     if (outcome === 'skip') return 'skip'
     if (opts.dryRun) return outcome
     return this.write(ref, target, updates, outcome, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
   }
 
-  /** The value `view.targetField` of `target` should hold: `patch` applied to the current value, or `build` over fresh reads. */
+  /** The values the declared paths of `target` should hold: `patch` applied to the current values, or `build` over fresh reads. */
   private async computeView(
     target: DocumentSnapshot,
     view: ResolvedView,
     opts: { change?: ViewChange; changeCache?: ChangeCache; counter: ReadCounter },
-  ): Promise<{ value: Computed; reason?: string }> {
+  ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const { counter } = opts
     const firestore = countingFirestore(this.db(), counter)
     const source = opts.change && view.sources.find((s) => s.key === opts.change!.source)
-    if (opts.change && source && view.patch) {
+    if (opts.change && source && view.patch && target.exists) {
       // The event payload may be stale, duplicated or forged: give `patch` the document as it is now,
       // read after the target (once per page when fanning out), and only if it still belongs to this target.
       const { path } = opts.change
@@ -712,23 +726,56 @@ export class Processor {
     current: DocumentSnapshot,
     counter: ReadCounter,
     firestore: Firestore,
-  ): Promise<{ value: Computed; reason?: string }> {
+  ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const belongs = current.exists && this.belongsToTarget(view, source, target, current)
     const fresh: ViewChange = { ...change, after: belongs ? current.data() : undefined }
-    const patched = await view.patch!(target.get(view.targetField), fresh, { target, firestore })
-    if (patched !== undefined) return { value: stripUndefined(patched) }
+    const patched = await view.patch!(this.currentValues(view, target), fresh, { target, firestore })
+    if (patched !== undefined) return { plan: this.planOf(view, target, stripUndefined(patched)) }
     return this.buildValue(target, view, counter, firestore)
   }
 
-  private async buildValue(target: DocumentSnapshot, view: ResolvedView, counter: ReadCounter, firestore: Firestore): Promise<{ value: Computed; reason?: string }> {
+  private async buildValue(target: DocumentSnapshot, view: ResolvedView, counter: ReadCounter, firestore: Firestore): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
     for (const source of view.sources) {
       const docs = await this.viewSourceDocs(view, source, target, counter)
-      if (docs === undefined) return { value: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
+      if (docs === undefined) return { plan: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
       sources[source.key] = docs
     }
     const built = await view.build({ target, sources, firestore })
-    return { value: built === undefined ? DELETE : stripUndefined(built) }
+    return { plan: this.planOf(view, target, built === undefined ? undefined : stripUndefined(built)) }
+  }
+
+  /** The declared paths of `view` as they are on `target`, as a nested object (what `patch` receives). */
+  private currentValues(view: ResolvedView, target: DocumentSnapshot): DocumentData {
+    const out: DocumentData = {}
+    for (const path of view.targetFields) {
+      const v: unknown = target.get(path)
+      if (v !== undefined) setField(out, path, v)
+    }
+    return out
+  }
+
+  /** Reads the declared paths out of a build/patch result; a missing path becomes a deletion. Paths the view does not declare are warned about once and ignored. */
+  private planOf(view: ResolvedView, target: DocumentSnapshot, built: DocumentData | undefined): FieldPlan {
+    const plan: FieldPlan = new Map()
+    for (const path of view.targetFields) {
+      const v = getField(built, path)
+      plan.set(path, v === undefined ? DELETE : v)
+    }
+    this.warnUndeclared(view, built)
+    return plan
+  }
+
+  private readonly warnedUndeclared = new Set<string>()
+
+  private warnUndeclared(view: ResolvedView, built: DocumentData | undefined): void {
+    const undeclared = undeclaredPaths(view, built)
+    for (const path of undeclared) {
+      const key = `${view.name}:${path}`
+      if (this.warnedUndeclared.has(key)) continue
+      this.warnedUndeclared.add(key)
+      this.logger.warn('doc-sync: build returned a field the view does not declare, ignored', { rule: view.name, field: path })
+    }
   }
 
   /** Whether `doc` (a fresh read of a source document) is one of `source`'s documents for `target`. */
@@ -946,6 +993,34 @@ function needsWrite(target: DocumentSnapshot, targetField: string, desired: Desi
   const current: unknown = target.get(targetField)
   if (desired === DELETE) return current !== undefined
   return !isEqual(current, desired)
+}
+
+/** Compares an existing target with a plan: `ok` when every path already holds its value. */
+function checkPlan(target: DocumentSnapshot, plan: FieldPlan): CheckResult {
+  const fields: FieldMismatch[] = []
+  for (const [path, desired] of plan) {
+    if (!needsWrite(target, path, desired)) continue
+    fields.push({ field: path, actual: target.get(path), expected: desired === DELETE ? undefined : desired })
+  }
+  return fields.length ? { status: 'mismatch', issue: 'value', fields } : { status: 'ok' }
+}
+
+/** Paths in `built` that no declared `targetFields` entry covers (root keys, or sub-keys next to a declared deeper path). */
+function undeclaredPaths(view: ResolvedView, built: DocumentData | undefined, prefix = ''): string[] {
+  if (built === undefined) return []
+  const out: string[] = []
+  for (const [key, value] of Object.entries(built)) {
+    const path = prefix ? `${prefix}.${key}` : key
+    if (view.targetFields.includes(path)) continue
+    if (!prefix && view.rest && !view.reservedRootKeys.includes(key)) continue
+    const deeper = view.targetFields.some((f) => f.startsWith(`${path}.`))
+    if (deeper && value !== null && typeof value === 'object' && !Array.isArray(value)) {
+      out.push(...undeclaredPaths(view, value as DocumentData, path))
+    } else {
+      out.push(path)
+    }
+  }
+  return out
 }
 
 function toFieldValue(desired: Desired): unknown {

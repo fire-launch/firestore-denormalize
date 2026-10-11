@@ -125,9 +125,9 @@ describe('validate', () => {
       defineView({
         name: 'post-summary',
         target: 'post',
-        targetField: 'summary',
+        targetFields: ['summary'],
         sources: { author: { collection: 'user', refField: 'authorId' } },
-        build: () => 'x',
+        build: () => ({ summary: 'x' }),
       }),
     ],
   })

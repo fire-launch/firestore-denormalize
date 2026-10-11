@@ -55,7 +55,7 @@ export function printSummary(ctx: Context): void {
   if (config.views.length) {
     log(`Views (${config.views.length}):`)
     for (const v of config.views) {
-      log(`  ${v.name}: build(${v.sources.map((s) => s.key).join(', ')}) -> ${v.target}.${v.targetField}`)
+      log(`  ${v.name}: build(${v.sources.map((s) => s.key).join(', ')}) -> ${v.target}.{${[...v.targetFields, ...(v.rest ? ['rest'] : [])].join(',')}}`)
       for (const s of v.sources) {
         const by = s.idField ? `by ${s.idField}` : s.idParam !== undefined ? `by {${s.idParam}}` : `via target.${s.refField}`
         const order = s.orderBy.length ? `, order by ${s.orderBy.map((o) => `${o.field} ${o.direction}`).join(', ')}` : ''
