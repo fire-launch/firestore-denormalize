@@ -296,14 +296,13 @@ export class Processor {
   }
 
   /**
-   * Writes `desired` to `ref.{field}` conditional on the `updateTime` of `target`, the snapshot
-   * the value was computed from. On a failed precondition `redo` runs the whole read-compute-write
-   * again (bounded by `maxRetries`, counted through `attempt`).
+   * Applies `updates` (field path → value or `FieldValue.delete()`) to `ref` conditional on the
+   * `updateTime` of `target`, the snapshot the values were computed from. On a failed
+   * precondition `redo` runs the whole read-compute-write again.
    */
-  private async write(ref: DocumentReference, target: DocumentSnapshot, field: string, desired: Desired, redo: () => Promise<Outcome>): Promise<Outcome> {
-    const outcome: Outcome = desired === DELETE ? 'delete' : 'write'
+  private async write(ref: DocumentReference, target: DocumentSnapshot, updates: Record<string, unknown>, outcome: Outcome, redo: () => Promise<Outcome>): Promise<Outcome> {
     try {
-      await ref.update({ [field]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
+      await ref.update(updates, { lastUpdateTime: target.updateTime })
       return outcome
     } catch (err) {
       if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
@@ -427,9 +426,11 @@ export class Processor {
     const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
     const { value } = await this.computeCopy(target, conn, { ...opts, counter })
-    if (value === NOTHING || !needsWrite(target, conn.targetField, value)) return 'skip'
-    if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
-    return this.write(ref, target, conn.targetField, value, () => this.syncCopy(ref, conn, { ...opts, counter, attempt: attempt + 1, sourceCache: undefined }))
+    if (value === NOTHING) return 'skip'
+    const { updates, outcome } = planUpdates(target, new Map([[conn.targetField, value]]))
+    if (outcome === 'skip') return 'skip'
+    if (opts.dryRun) return outcome
+    return this.write(ref, target, updates, outcome, () => this.syncCopy(ref, conn, { ...opts, counter, attempt: attempt + 1, sourceCache: undefined }))
   }
 
   /** The target for this attempt: the caller's snapshot on a first try, else a fresh (counted) read. */
@@ -566,9 +567,11 @@ export class Processor {
     const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
     const { value } = await this.computeAggregate(target, rule, counter)
-    if (value === NOTHING || !needsWrite(target, rule.targetField, value)) return 'skip'
-    if (opts.dryRun) return 'write'
-    return this.write(ref, target, rule.targetField, value, () => this.syncAggregate(ref, rule, { ...opts, counter, attempt: attempt + 1 }))
+    if (value === NOTHING) return 'skip'
+    const { updates, outcome } = planUpdates(target, new Map([[rule.targetField, value]]))
+    if (outcome === 'skip') return 'skip'
+    if (opts.dryRun) return outcome
+    return this.write(ref, target, updates, outcome, () => this.syncAggregate(ref, rule, { ...opts, counter, attempt: attempt + 1 }))
   }
 
   /** The number `rule.targetField` of `target` should hold, from an aggregation query over its sources. */
@@ -669,9 +672,11 @@ export class Processor {
     if (!target.exists) return 'skip'
     // A redo re-read the target, so the changed document must be re-read after it as well.
     const { value } = await this.computeView(target, view, { ...opts, counter, changeCache: attempt === 0 ? opts.changeCache : undefined })
-    if (value === NOTHING || !needsWrite(target, view.targetField, value)) return 'skip'
-    if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
-    return this.write(ref, target, view.targetField, value, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
+    if (value === NOTHING) return 'skip'
+    const { updates, outcome } = planUpdates(target, new Map([[view.targetField, value]]))
+    if (outcome === 'skip') return 'skip'
+    if (opts.dryRun) return outcome
+    return this.write(ref, target, updates, outcome, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
   }
 
   /** The value `view.targetField` of `target` should hold: `patch` applied to the current value, or `build` over fresh reads. */
@@ -915,6 +920,26 @@ export function copyValue(
     default:
       return NOTHING
   }
+}
+
+/** What a rule wants each written field path to hold: a value, or `DELETE` for "the path must be absent". */
+type FieldPlan = Map<string, Desired>
+
+/**
+ * The `update()` payload for the paths of `plan` whose current value on `target` differs, and
+ * the outcome that write would be (`skip` when nothing differs, `delete` when only deletions remain).
+ * Without an existing target every non-DELETE entry is included.
+ */
+function planUpdates(target: DocumentSnapshot | undefined, plan: FieldPlan): { updates: Record<string, unknown>; outcome: Outcome } {
+  const updates: Record<string, unknown> = {}
+  let outcome: Outcome = 'skip'
+  for (const [path, desired] of plan) {
+    if (target?.exists ? !needsWrite(target, path, desired) : desired === DELETE) continue
+    updates[path] = toFieldValue(desired)
+    if (desired !== DELETE) outcome = 'write'
+    else if (outcome === 'skip') outcome = 'delete'
+  }
+  return { updates, outcome }
 }
 
 function needsWrite(target: DocumentSnapshot, targetField: string, desired: Desired): boolean {
