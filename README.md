@@ -11,8 +11,15 @@ You describe rules in one TypeScript file. The function re-reads the source docu
 **Copy** (`connections`): fields of one document, copied into every document that points at it.
 
 ```ts
-{ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId',
-  fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' }
+{
+  name: 'post-category',
+  source: 'category',
+  target: 'post',
+  idField: 'categoryId',
+  fields: ['name', 'color'],
+  targetField: 'category',
+  onSourceDelete: 'setNull',
+}
 ```
 ```
 category/c1   { name: 'News', color: 'red', slug: 'news' }
@@ -24,8 +31,14 @@ post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', colo
 **Count / sum** (`aggregates`): a number over the documents that belong to the target, always recomputed with `count()` / `sum()`.
 
 ```ts
-{ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId',
-  aggregate: 'count', targetField: 'likeCount' }                    // or { sum: 'amount' }
+{
+  name: 'post-likes',
+  source: 'post/{postId}/like',
+  target: 'post',
+  idParam: 'postId',
+  aggregate: 'count', // or { sum: 'amount' }
+  targetField: 'likeCount',
+}
 ```
 ```
 post/p1/like/u1, post/p1/like/u2
@@ -38,8 +51,17 @@ post/p1       { title: 'Hello', likeCount: 2 }
 
 ```ts
 defineView({
-  name: 'post-latest-comments', target: 'post', targetField: 'latestComments',
-  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+  name: 'post-latest-comments',
+  target: 'post',
+  targetField: 'latestComments',
+  sources: {
+    comments: {
+      collection: 'post/{postId}/comment',
+      idParam: 'postId',
+      orderBy: [['createdAt', 'desc']],
+      limit: 2,
+    },
+  },
   build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
 })
 ```

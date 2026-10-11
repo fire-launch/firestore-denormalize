@@ -11,8 +11,15 @@ Firestore の派生データを、**Cloud Run 関数 1 つ ＋ コレクショ�
 **コピー**（`connections`）: 1 文書のフィールドを、それを指すすべての文書にコピーします。
 
 ```ts
-{ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId',
-  fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' }
+{
+  name: 'post-category',
+  source: 'category',
+  target: 'post',
+  idField: 'categoryId',
+  fields: ['name', 'color'],
+  targetField: 'category',
+  onSourceDelete: 'setNull',
+}
 ```
 ```
 category/c1   { name: 'News', color: 'red', slug: 'news' }
@@ -24,8 +31,14 @@ post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', colo
 **件数・合計**（`aggregates`）: ターゲットに属する文書についての数値を、常に `count()` / `sum()` で再計算します。
 
 ```ts
-{ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId',
-  aggregate: 'count', targetField: 'likeCount' }                    // または { sum: 'amount' }
+{
+  name: 'post-likes',
+  source: 'post/{postId}/like',
+  target: 'post',
+  idParam: 'postId',
+  aggregate: 'count', // または { sum: 'amount' }
+  targetField: 'likeCount',
+}
 ```
 ```
 post/p1/like/u1, post/p1/like/u2
@@ -38,8 +51,17 @@ post/p1       { title: 'Hello', likeCount: 2 }
 
 ```ts
 defineView({
-  name: 'post-latest-comments', target: 'post', targetField: 'latestComments',
-  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 2 } },
+  name: 'post-latest-comments',
+  target: 'post',
+  targetField: 'latestComments',
+  sources: {
+    comments: {
+      collection: 'post/{postId}/comment',
+      idParam: 'postId',
+      orderBy: [['createdAt', 'desc']],
+      limit: 2,
+    },
+  },
   build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
 })
 ```
