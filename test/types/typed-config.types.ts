@@ -31,6 +31,18 @@ interface UserPost {
 interface Tag {
   label: string
 }
+interface PostPublic {
+  title: string
+  likeCount?: number
+  stats?: { commentCount: number; likeCount?: number }
+}
+interface User {
+  displayName: string
+  email: string
+}
+interface UserPublic {
+  displayName: string
+}
 
 type Collections = {
   post: Post
@@ -39,9 +51,12 @@ type Collections = {
   'post/{postId}/comment': Comment
   'users/{uid}/posts': UserPost
   'users/{uid}/tags': Tag
+  postPublic: PostPublic
+  user: User
+  userPublic: UserPublic
 }
 
-const { defineConfig, defineConnection, defineAggregate, defineView } = typed<Collections>()
+const { defineConfig, defineConnection, defineAggregate, defineView, defineProjection } = typed<Collections>()
 
 // ---------------------------------------------------------------- helpers
 
@@ -199,4 +214,77 @@ defineView({
   sources: { c: { collection: 'comment', idField: 'postId' } },
   // @ts-expect-error `bodyy` is not a field of Comment
   build: ({ sources }) => ({ likeCount: sources.c.filter((c) => c.data().bodyy).length }),
+})
+
+// ---------------------------------------------------------------- views with base / several paths
+
+const pub = defineView({
+  name: 'post-public',
+  target: 'postPublic',
+  base: 'post',
+  targetFields: ['title', 'stats.commentCount'],
+  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+  build: ({ base, sources }) => {
+    const title: string = base.data()!.title
+    return { title, stats: { commentCount: sources.comments.length } }
+  },
+  patch: (current, change) => {
+    const n: number | undefined = current.stats?.commentCount
+    void change
+    return { ...current, stats: { commentCount: (n ?? 0) + 1 } }
+  },
+})
+
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [latest, pub] })
+
+defineView({
+  name: 'x',
+  target: 'postPublic',
+  base: 'post',
+  targetFields: ['title'],
+  // @ts-expect-error likeCount is a target key outside the declared roots
+  build: () => ({ title: 't', likeCount: 1 }),
+})
+
+defineView({
+  name: 'x',
+  target: 'postPublic',
+  base: 'post',
+  targetFields: ['title'],
+  // @ts-expect-error title must be a string
+  build: () => ({ title: 1 }),
+})
+
+defineView({
+  name: 'x',
+  target: 'postPublic',
+  targetFields: ['title'],
+  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+  // @ts-expect-error `base` is undefined on a view without `base`
+  build: ({ base }) => ({ title: base.data()!.title }),
+})
+
+defineView({
+  name: 'x',
+  target: 'postPublic',
+  base: 'post',
+  // @ts-expect-error nope is not a field of postPublic
+  targetFields: ['nope'],
+  build: () => ({}),
+})
+
+// `rest` lets build return any part of the target type
+defineView({ name: 'x', target: 'postPublic', base: 'post', targetFields: ['rest'], build: ({ base }) => ({ title: base.data()!.title, stats: { commentCount: 0 } }) })
+
+// ---------------------------------------------------------------- projections
+
+const proj = defineProjection({ name: 'user-public', base: 'user', target: 'userPublic', targetFields: ['displayName'] })
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [proj] })
+
+defineProjection({
+  name: 'x',
+  base: 'user',
+  target: 'userPublic',
+  // @ts-expect-error email is not a field of userPublic
+  targetFields: ['email'],
 })

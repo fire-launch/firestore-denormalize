@@ -18,7 +18,7 @@ import type {
   QueryDocumentSnapshot,
   Timestamp,
 } from 'firebase-admin/firestore'
-import type { DocSyncConfig, OnSourceDelete, ViewRule } from './config.js'
+import type { DocSyncConfig, OnSourceDelete, ProjectionRule, ViewRule } from './config.js'
 
 /** Collection path patterns (`post`, `users/{uid}/posts`) mapped to their document types. Use a type alias, not an interface. */
 export type Collections = Record<string, object>
@@ -117,8 +117,26 @@ export type TypedViewSource<C, T extends Key<C>> = {
 
 type SourceDoc<C, S> = S extends { collection: infer K extends Key<C> } ? C[K] : never
 
-export interface TypedBuildContext<C, T extends Key<C>, S extends Record<string, { collection: Key<C> }>> {
+/** The first segment of a field path. */
+type Root<P extends string> = P extends `${infer K}.${string}` ? K : P
+
+type DeepPartial<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T
+
+/**
+ * What `build` / `patch` return and `patch` receives: the target type, deep-partial, restricted to
+ * the root keys of the declared paths (every key with `'rest'`). Target keys outside the declared
+ * roots are typed `never` so returning them is a compile error; keys that are not in the target
+ * type at all are not caught at compile time (the handler warns at runtime).
+ */
+export type Declared<T, TF extends string> = 'rest' extends TF
+  ? DeepPartial<T>
+  : DeepPartial<Pick<T, Extract<Root<TF>, keyof T>>> & { [K in Exclude<keyof T, Root<TF>>]?: never }
+
+type BaseSnapshot<C, B extends Key<C> | undefined> = B extends Key<C> ? DocumentSnapshot<C[B]> : undefined
+
+export interface TypedBuildContext<C, T extends Key<C>, B extends Key<C> | undefined, S extends Record<string, { collection: Key<C> }>> {
   target: DocumentSnapshot<C[T]>
+  base: BaseSnapshot<C, B>
   sources: { [N in keyof S]: QueryDocumentSnapshot<SourceDoc<C, S[N]>>[] }
   firestore: Firestore
 }
@@ -127,23 +145,38 @@ export type TypedViewChange<C, S extends Record<string, { collection: Key<C> }>>
   [N in keyof S & string]: { source: N; path: string; before?: SourceDoc<C, S[N]>; after?: SourceDoc<C, S[N]> }
 }[keyof S & string]
 
-export interface TypedPatchContext<C, T extends Key<C>> {
+export interface TypedPatchContext<C, T extends Key<C>, B extends Key<C> | undefined> {
   target: DocumentSnapshot<C[T]>
+  base: BaseSnapshot<C, B>
   firestore: Firestore
 }
 
-export interface TypedViewRule<C, T extends Key<C>, TF extends FieldPath<C[T]>, S extends Record<string, TypedViewSource<C, T>>> {
+export interface TypedViewRule<C, T extends Key<C>, B extends Key<C> | undefined, TF extends FieldPath<C[T]> | 'rest', S extends Record<string, TypedViewSource<C, T>>> {
   kind: 'view'
   name: string
   target: T
+  base?: B
   targetFields: TF[]
-  sources: S
-  build(ctx: TypedBuildContext<C, T, S>): DocumentData | undefined | Promise<DocumentData | undefined>
-  patch?(current: DocumentData, change: TypedViewChange<C, S>, ctx: TypedPatchContext<C, T>): DocumentData | undefined | Promise<DocumentData | undefined>
+  sources?: S
+  build(ctx: TypedBuildContext<C, T, B, S>): Declared<C[T], TF> | undefined | Promise<Declared<C[T], TF> | undefined>
+  patch?(
+    current: Declared<C[T], TF>,
+    change: TypedViewChange<C, S>,
+    ctx: TypedPatchContext<C, T, B>,
+  ): Declared<C[T], TF> | undefined | Promise<Declared<C[T], TF> | undefined>
 }
 
-/** A rule in a typed config: a typed connection or aggregate, or a view made with the typed `defineView`. */
-export type TypedRule<C> = AnyTypedConnection<C> | AnyTypedAggregate<C> | ViewRule
+export interface TypedProjection<C, B extends Key<C>, T extends Key<C>> {
+  kind: 'projection'
+  name: string
+  base: B
+  target: T
+  /** Paths that exist on both the base and the target type. */
+  targetFields: (FieldPath<C[B]> & FieldPath<C[T]>)[]
+}
+
+/** A rule in a typed config: a typed connection, aggregate or projection, or a view made with the typed `defineView`. */
+export type TypedRule<C> = AnyTypedConnection<C> | AnyTypedAggregate<C> | ViewRule | ProjectionRule
 
 export interface TypedDocSyncConfig<C> extends Omit<DocSyncConfig, 'rules'> {
   rules: TypedRule<C>[]
@@ -156,10 +189,12 @@ export interface Typed<C> {
   defineConnection<S extends Key<C>, T extends Key<C>>(rule: Omit<TypedConnection<C, S, T>, 'kind'>): TypedConnection<C, S, T>
   /** Like `defineAggregate`, with `source` / `target` / field names checked against `C`. */
   defineAggregate<S extends Key<C>, T extends Key<C>>(rule: Omit<TypedAggregate<C, S, T>, 'kind'>): TypedAggregate<C, S, T>
-  /** Like `defineView`, with `sources` typed from `C` and `build` / `patch` typed from the target field. */
-  defineView<T extends Key<C>, TF extends FieldPath<C[T]>, S extends Record<string, TypedViewSource<C, T>>>(
-    view: Omit<TypedViewRule<C, T, TF, S>, 'kind'>,
+  /** Like `defineView`, with `sources` / `base` typed from `C` and `build` / `patch` typed from `targetFields`. */
+  defineView<T extends Key<C>, TF extends FieldPath<C[T]> | 'rest', S extends Record<string, TypedViewSource<C, T>> = Record<never, never>, B extends Key<C> | undefined = undefined>(
+    view: Omit<TypedViewRule<C, T, B, TF, S>, 'kind'>,
   ): ViewRule
+  /** Like `defineProjection`, with `base` / `target` / `targetFields` checked against `C`. */
+  defineProjection<B extends Key<C>, T extends Key<C>>(rule: Omit<TypedProjection<C, B, T>, 'kind'>): ProjectionRule
 }
 
 /**
@@ -172,5 +207,6 @@ export function typed<C extends Collections>(): Typed<C> {
     defineConnection: (rule) => ({ kind: 'connection', ...rule }),
     defineAggregate: (rule) => ({ kind: 'aggregate', ...rule }),
     defineView: (view) => ({ kind: 'view', ...view }) as unknown as ViewRule,
+    defineProjection: (rule) => ({ kind: 'projection', ...rule }) as unknown as ProjectionRule,
   }
 }

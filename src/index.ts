@@ -64,6 +64,8 @@ export {
   type TypedConnection,
   type TypedAggregate,
   type TypedViewRule,
+  type TypedProjection,
+  type Declared,
   type TypedRule,
   type TypedViewSource,
   type TypedBuildContext,
