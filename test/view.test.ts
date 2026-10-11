@@ -538,3 +538,101 @@ describe('views: several declared paths', () => {
     expect((await post.get()).data()).toEqual({ commentCount: 5, lastBody: 'e' })
   })
 })
+
+describe('views: base decides whether the target exists', () => {
+  const publicView = defineView({
+    name: 'post-public',
+    target: 'postPublic',
+    base: 'post',
+    targetFields: ['title', 'commentCount'],
+    sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+    build: ({ base, sources }) => ({ title: base!.get('title'), commentCount: sources.comments.length }),
+  })
+  const cfg = defineConfig({ ...config, rules: [publicView] })
+
+  it('creates the target when the base is created and updates it when the base changes', async () => {
+    const post = db.doc('post/p1')
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, await change(post, () => post.set({ title: 'a', secret: 's' })))
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 0 })
+    expect(processed(logs, 'post-public')).toMatchObject({ role: 'source', source: 'base', action: 'create', writes: 1 })
+    await invoke(handler, await change(post, () => post.update({ title: 'b' })))
+    expect((await db.doc('postPublic/p1').get()).get('title')).toBe('b')
+    expect(processed(logs, 'post-public')).toMatchObject({ action: 'write' })
+    await invoke(handler, await change(post, () => post.update({ secret: 't' })))
+    expect(processed(logs, 'post-public')).toMatchObject({ action: 'skip', reason: 'target up to date' })
+  })
+
+  it('creates the target from a source event when the base exists, and skips when it does not', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    const { handler, logs } = handlerFor(cfg)
+    const c1 = db.doc('post/p1/comment/c1')
+    await invoke(handler, await change(c1, () => c1.set({ body: 'x' })))
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 1 })
+    expect(processed(logs, 'post-public')).toMatchObject({ source: 'comments', action: 'create' })
+    const ghost = db.doc('post/ghost/comment/c1')
+    await invoke(handler, await change(ghost, () => ghost.set({ body: 'x' })))
+    expect((await db.doc('postPublic/ghost').get()).exists).toBe(false)
+    expect(processed(logs, 'post-public')).toMatchObject({ action: 'skip' })
+  })
+
+  it('removes the target when the base is deleted, but not when a source is deleted', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'a' })
+    const target = db.doc('postPublic/p1')
+    await target.set({ title: 'a', commentCount: 1, likeCount: 3 })
+    const c1 = db.doc('post/p1/comment/c1')
+    await c1.set({ body: 'x' })
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, await change(c1, () => c1.delete()))
+    expect((await target.get()).data()).toEqual({ title: 'a', commentCount: 0, likeCount: 3 })
+    await invoke(handler, await change(post, () => post.delete()))
+    expect((await target.get()).exists).toBe(false)
+    expect(processed(logs, 'post-public')).toMatchObject({ source: 'base', action: 'remove', writes: 1 })
+  })
+
+  it('does not resurrect the target from a stale source event after the base was deleted', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'a' })
+    const c1 = db.doc('post/p1/comment/c1')
+    const staleCreate = await change(c1, () => c1.set({ body: 'x' })) // captured while the base existed
+    await post.delete()
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, staleCreate)
+    expect((await db.doc('postPublic/p1').get()).exists).toBe(false)
+    expect(processed(logs, 'post-public')).toMatchObject({ action: 'skip' })
+  })
+
+  it('recreates a target that was deleted by hand while the base exists', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    const target = db.doc('postPublic/p1')
+    await target.set({ title: 'a', commentCount: 0 })
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, await change(target, () => target.delete()))
+    expect((await target.get()).data()).toEqual({ title: 'a', commentCount: 0 })
+    expect(processed(logs, 'post-public')).toMatchObject({ role: 'target', action: 'create' })
+  })
+
+  it('redoes the sync from a fresh read when create() loses a race', async () => {
+    let raced = false
+    const racy = defineView({
+      name: 'post-public-racy',
+      target: 'postPublic',
+      base: 'post',
+      targetFields: ['title', 'commentCount'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: async ({ base, sources }) => {
+        if (!raced) {
+          raced = true
+          await db.doc('postPublic/p1').set({ title: 'manual', likeCount: 1 }) // someone else creates it between our read and our create()
+        }
+        return { title: base!.get('title'), commentCount: sources.comments.length }
+      },
+    })
+    const post = db.doc('post/p1')
+    const { handler, logs } = handlerFor(defineConfig({ ...config, rules: [racy] }))
+    await invoke(handler, await change(post, () => post.set({ title: 'a' })))
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', commentCount: 0, likeCount: 1 })
+    expect(processed(logs, 'post-public-racy')).toMatchObject({ action: 'write', writes: 1 })
+  })
+})

@@ -61,11 +61,12 @@ export type DocSyncHandler = (req: DocSyncRequest, res: DocSyncResponse) => Prom
 /** Result of processing one rule for one event. Read counts follow Firestore billing (see {@link ReadCounts}). */
 export interface RuleResult extends ReadCounts {
   rule: string
-  kind: 'connection' | 'aggregate' | 'view'
+  kind: 'connection' | 'aggregate' | 'view' | 'projection'
   role: 'source' | 'target'
   /** Key of the matched view source (views, role `source`). */
   source?: string
-  action: 'skip' | 'write' | 'delete'
+  /** What happened: field write, field deletion, target document created, target document removed, or nothing. */
+  action: Outcome
   /** Why nothing was written (only for `skip`). */
   reason?: string
   /** Number of target documents inspected. */
@@ -81,7 +82,7 @@ const NOTHING = Symbol('nothing')
 /** A value to store in the target field, or `DELETE` for "the field must be absent". */
 type Desired = unknown
 type Computed = Desired | typeof NOTHING
-type Outcome = 'skip' | 'write' | 'delete'
+export type Outcome = 'skip' | 'write' | 'delete' | 'create' | 'remove'
 
 /** One field whose current value differs from what the rule computes. */
 export interface FieldMismatch {
@@ -109,6 +110,10 @@ export interface CheckOptions {
   sourceCache?: Map<string, Promise<DocumentSnapshot>>
   /** Receives the reads issued. */
   counter?: ReadCounter
+  /** Already-read base snapshot to use for the first attempt instead of reading again (views with `base`). */
+  base?: DocumentSnapshot
+  /** Views with `base`: only remove the target when its base is gone; do nothing when the base exists (second pass of `rebuild` / `verify`). */
+  orphansOnly?: boolean
 }
 
 /** Options shared by {@link Processor.syncCopy} and {@link Processor.syncAggregate}. */
@@ -123,6 +128,10 @@ export interface SyncOptions {
   sourceCache?: Map<string, Promise<DocumentSnapshot>>
   /** Receives the reads issued. */
   counter?: ReadCounter
+  /** Already-read base snapshot to use for the first attempt instead of reading again (views with `base`). */
+  base?: DocumentSnapshot
+  /** Views with `base`: only remove the target when its base is gone; do nothing when the base exists (second pass of `rebuild` / `verify`). */
+  orphansOnly?: boolean
 }
 
 export interface DeletedSource {
@@ -133,6 +142,7 @@ export interface DeletedSource {
 
 const GRPC_FAILED_PRECONDITION = 9
 const GRPC_NOT_FOUND = 5
+const GRPC_ALREADY_EXISTS = 6
 const FIRESTORE_EVENT_TYPE_PREFIX = 'google.cloud.firestore.document.v1.'
 /** Eventarc payloads hold at most two 1 MiB documents; anything far beyond that is not a Firestore event. */
 const MAX_BODY_BYTES = 16 * 1024 * 1024
@@ -201,6 +211,10 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const { before, after } = event
     for (const rule of rules) {
       if (rule.kind === 'view') {
+        if (rule.basePattern) {
+          const asBase = matchDocumentPath(rule.basePattern, document)
+          if (asBase) parallel.push({ rule: rule.name, run: () => processor.viewBase(rule, asBase, before, after) })
+        }
         for (const source of rule.sources) {
           const asSource = matchDocumentPath(source.pattern, document)
           if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after) })
@@ -302,10 +316,20 @@ export class Processor {
   }
 
   private async checkView(target: DocumentSnapshot, view: ResolvedView, opts: CheckOptions): Promise<CheckResult> {
-    if (!target.exists) return { status: 'skip', reason: 'target missing' }
     const counter = opts.counter ?? new ReadCounter()
-    const { plan, reason } = await this.computeView(target, view, { counter })
+    let base: DocumentSnapshot | undefined
+    if (view.basePattern) {
+      base = await this.readBase(target.ref.path, view, { base: opts.base, sourceCache: opts.sourceCache }, counter)
+      if (!base) return { status: 'skip', reason: 'base unresolvable' }
+      if (!base.exists) return target.exists ? { status: 'mismatch', issue: 'orphan' } : { status: 'skip', reason: 'base and target missing' }
+      if (opts.orphansOnly) return { status: 'ok' }
+    } else if (!target.exists) return { status: 'skip', reason: 'target missing' }
+    const { plan, reason } = await this.computeView(target, view, { counter, base })
     if (plan === NOTHING) return { status: 'skip', reason }
+    if (!target.exists) {
+      const fields: FieldMismatch[] = [...plan].filter(([, d]) => d !== DELETE).map(([field, expected]) => ({ field, actual: undefined, expected }))
+      return { status: 'mismatch', issue: 'missing', fields }
+    }
     return checkPlan(target, plan)
   }
 
@@ -657,9 +681,16 @@ export class Processor {
   ): Promise<RuleResult> {
     const result = newResult(view, 'target')
     result.targets = 1
-    if (!after) {
+    if (!after && !view.basePattern) {
       result.reason = 'target deleted'
       return result
+    }
+    if (!after) {
+      // The target of a base view was deleted by hand: recreate it while the base exists.
+      const counter = new ReadCounter()
+      count(result, await this.syncView(this.db().doc(target.path), view, { counter }))
+      if (result.writes === 0) result.reason = 'base missing too'
+      return finish(result, counter)
     }
     if (before && !view.targetFields.some((f) => fieldRemoved(before, after, f))) {
       const refFields = view.sources.map((s) => s.refField).filter((f): f is string => f !== undefined)
@@ -674,30 +705,100 @@ export class Processor {
     return finish(result, counter)
   }
 
+  /** The base document of a view changed: the target with the same ID is created, updated or removed. */
+  async viewBase(view: ResolvedView, match: DocumentMatch, before: DecodedDocument | undefined, after: DecodedDocument | undefined): Promise<RuleResult> {
+    const result = newResult(view, 'source')
+    result.source = 'base'
+    if (before && after && isEqual(before.data, after.data)) {
+      result.reason = 'unchanged'
+      return result
+    }
+    const collection = resolveCollectionPath(view.targetPattern, match.params)
+    if (!collection) {
+      result.reason = 'target collection unresolvable'
+      return result
+    }
+    result.targets = 1
+    const counter = new ReadCounter()
+    count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter }))
+    if (result.writes === 0) result.reason = 'target up to date'
+    return finish(result, counter)
+  }
+
+  /** The base for this attempt: the caller's snapshot on a first try, else a fresh (counted) read. `undefined` when the target path does not match the view. */
+  private async readBase(targetPath: string, view: ResolvedView, opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: Map<string, Promise<DocumentSnapshot>> }, counter: ReadCounter): Promise<DocumentSnapshot | undefined> {
+    if (opts.base && (opts.attempt ?? 0) === 0) return opts.base
+    const path = basePathForTarget(view, targetPath)
+    if (!path) {
+      this.logger.warn('doc-sync: cannot locate base for target, skipped', { rule: view.name, document: targetPath })
+      return undefined
+    }
+    return this.readSource(path, counter, opts.sourceCache)
+  }
+
+  /** Creates the target with the plan's values. `ALREADY_EXISTS` means someone else created it meanwhile: `redo` from a fresh read. */
+  private async createTarget(ref: DocumentReference, plan: FieldPlan, redo: () => Promise<Outcome>): Promise<Outcome> {
+    const data: DocumentData = {}
+    for (const [path, desired] of plan) if (desired !== DELETE) setField(data, path, desired)
+    try {
+      await ref.create(data)
+      return 'create'
+    } catch (err) {
+      if (!isCode(err, GRPC_ALREADY_EXISTS)) throw err
+      return redo()
+    }
+  }
+
+  /** Removes the target conditional on the `updateTime` it was read with. */
+  private async removeTarget(ref: DocumentReference, target: DocumentSnapshot, redo: () => Promise<Outcome>): Promise<Outcome> {
+    try {
+      await ref.delete({ lastUpdateTime: target.updateTime })
+      return 'remove'
+    } catch (err) {
+      if (isCode(err, GRPC_NOT_FOUND)) return 'skip'
+      if (!isCode(err, GRPC_FAILED_PRECONDITION)) throw err
+      return redo()
+    }
+  }
+
   /**
-   * Reads the target, computes the value with `patch` (when a `change` is given and the view
-   * defines one) or `build`, and writes it if it differs, conditional on the target's `updateTime`.
+   * Reads the target (and the base, for views with `base`), computes the declared fields with
+   * `patch` (when a `change` is given and the view defines one) or `build`, and writes the paths
+   * that differ, conditional on the target's `updateTime`. With `base`: a missing base removes
+   * the target, a missing target is created.
    */
   async syncView(ref: DocumentReference, view: ResolvedView, opts: SyncOptions & { change?: ViewChange; changeCache?: ChangeCache }): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
     const counter = opts.counter ?? new ReadCounter()
     const target = await this.readTarget(ref, opts, counter)
-    if (!target.exists) return 'skip'
+    // A redo re-reads everything: no cached target, base or source (the page cache may hold the base as it was before another writer changed it).
+    const redo = () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1, target: undefined, base: undefined, sourceCache: undefined })
+    let base: DocumentSnapshot | undefined
+    if (view.basePattern) {
+      base = await this.readBase(ref.path, view, { ...opts, attempt }, counter)
+      if (!base) return 'skip'
+      if (!base.exists) {
+        if (!target.exists) return 'skip'
+        return opts.dryRun ? 'remove' : this.removeTarget(ref, target, redo)
+      }
+      if (opts.orphansOnly) return 'skip'
+    } else if (!target.exists) return 'skip'
     // A redo re-read the target, so the changed document must be re-read after it as well.
-    const { plan } = await this.computeView(target, view, { ...opts, counter, changeCache: attempt === 0 ? opts.changeCache : undefined })
+    const { plan } = await this.computeView(target, view, { ...opts, counter, base, changeCache: attempt === 0 ? opts.changeCache : undefined })
     if (plan === NOTHING) return 'skip'
+    if (!target.exists) return opts.dryRun ? 'create' : this.createTarget(ref, plan, redo)
     const { updates, outcome } = planUpdates(target, plan)
     if (outcome === 'skip') return 'skip'
     if (opts.dryRun) return outcome
-    return this.write(ref, target, updates, outcome, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
+    return this.write(ref, target, updates, outcome, redo)
   }
 
   /** The values the declared paths of `target` should hold: `patch` applied to the current values, or `build` over fresh reads. */
   private async computeView(
     target: DocumentSnapshot,
     view: ResolvedView,
-    opts: { change?: ViewChange; changeCache?: ChangeCache; counter: ReadCounter },
+    opts: { change?: ViewChange; changeCache?: ChangeCache; base?: DocumentSnapshot; counter: ReadCounter },
   ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const { counter } = opts
     const firestore = countingFirestore(this.db(), counter)
@@ -711,11 +812,11 @@ export class Processor {
         counter.doc()
         const read = this.db().doc(path).get()
         if (cache) cache.doc = read
-        else return this.patchWith(target, view, source, opts.change, await read, counter, firestore)
+        else return this.patchWith(target, view, source, opts.change, await read, counter, firestore, opts.base)
       }
-      return this.patchWith(target, view, source, opts.change, await cache.doc!, counter, firestore)
+      return this.patchWith(target, view, source, opts.change, await cache.doc!, counter, firestore, opts.base)
     }
-    return this.buildValue(target, view, counter, firestore)
+    return this.buildValue(target, view, counter, firestore, opts.base)
   }
 
   private async patchWith(
@@ -726,22 +827,29 @@ export class Processor {
     current: DocumentSnapshot,
     counter: ReadCounter,
     firestore: Firestore,
+    base: DocumentSnapshot | undefined,
   ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const belongs = current.exists && this.belongsToTarget(view, source, target, current)
     const fresh: ViewChange = { ...change, after: belongs ? current.data() : undefined }
-    const patched = await view.patch!(this.currentValues(view, target), fresh, { target, firestore })
+    const patched = await view.patch!(this.currentValues(view, target), fresh, { target, base, firestore })
     if (patched !== undefined) return { plan: this.planOf(view, target, stripUndefined(patched)) }
-    return this.buildValue(target, view, counter, firestore)
+    return this.buildValue(target, view, counter, firestore, base)
   }
 
-  private async buildValue(target: DocumentSnapshot, view: ResolvedView, counter: ReadCounter, firestore: Firestore): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
+  private async buildValue(
+    target: DocumentSnapshot,
+    view: ResolvedView,
+    counter: ReadCounter,
+    firestore: Firestore,
+    base: DocumentSnapshot | undefined,
+  ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
     for (const source of view.sources) {
       const docs = await this.viewSourceDocs(view, source, target, counter)
       if (docs === undefined) return { plan: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
       sources[source.key] = docs
     }
-    const built = await view.build({ target, sources, firestore })
+    const built = await view.build({ target, base, sources, firestore })
     return { plan: this.planOf(view, target, built === undefined ? undefined : stripUndefined(built)) }
   }
 
@@ -914,6 +1022,20 @@ export function stripUndefined<T>(value: T): T {
   return value
 }
 
+/** Path of the base document of a target of `view`; `undefined` when the path does not match the view's target pattern. */
+export function basePathForTarget(view: ResolvedView, targetPath: string): string | undefined {
+  const m = matchDocumentPath(view.targetPattern, targetPath)
+  const collection = m && view.basePattern ? resolveCollectionPath(view.basePattern, m.params) : undefined
+  return m && collection ? `${collection}/${m.id}` : undefined
+}
+
+/** Path of the target that mirrors a base document of `view`; `undefined` when the path does not match the view's base pattern. */
+export function targetPathForBase(view: ResolvedView, basePath: string): string | undefined {
+  const m = view.basePattern ? matchDocumentPath(view.basePattern, basePath) : undefined
+  const collection = m ? resolveCollectionPath(view.targetPattern, m.params) : undefined
+  return m && collection ? `${collection}/${m.id}` : undefined
+}
+
 function fieldRemoved(before: DecodedDocument, after: DecodedDocument, field: string): boolean {
   return getField(before.data, field) !== undefined && getField(after.data, field) === undefined
 }
@@ -932,7 +1054,8 @@ async function aggregateValue(query: Query, rule: ResolvedAggregate): Promise<nu
 }
 
 function newResult(rule: ResolvedRule, role: RuleResult['role']): RuleResult {
-  return { rule: rule.name, kind: rule.kind, role, action: 'skip', targets: 0, writes: 0, retries: 0, reads: 0, queries: 0, aggregations: 0 }
+  const kind = rule.kind === 'view' && rule.projection ? 'projection' : rule.kind
+  return { rule: rule.name, kind, role, action: 'skip', targets: 0, writes: 0, retries: 0, reads: 0, queries: 0, aggregations: 0 }
 }
 
 function finish(result: RuleResult, counter: ReadCounter): RuleResult {
