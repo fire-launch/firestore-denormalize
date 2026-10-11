@@ -102,7 +102,11 @@ export function parseResourceName(name: string): { project: string; database: st
   return { project: m[1]!, database: m[2]!, path: m[3]! }
 }
 
-function fromValue(v: RawValue, firestore: Firestore): unknown {
+/** Firestore allows 20 levels of nesting; deeper payloads are not Firestore documents. */
+const MAX_DEPTH = 20
+
+function fromValue(v: RawValue, firestore: Firestore, depth = 0): unknown {
+  if (depth > MAX_DEPTH) throw new DecodeError(`value nested deeper than ${MAX_DEPTH} levels`)
   if ('nullValue' in v) return null
   if ('booleanValue' in v) return Boolean(v.booleanValue)
   if ('integerValue' in v) {
@@ -129,12 +133,12 @@ function fromValue(v: RawValue, firestore: Firestore): unknown {
   }
   if ('arrayValue' in v) {
     const values = ((v.arrayValue ?? {}) as { values?: RawValue[] }).values ?? []
-    return values.map((x) => fromValue(x, firestore))
+    return values.map((x) => fromValue(x, firestore, depth + 1))
   }
   if ('mapValue' in v) {
     const fields = ((v.mapValue ?? {}) as { fields?: Record<string, RawValue> }).fields ?? {}
     const out: DocumentData = {}
-    for (const [k, x] of Object.entries(fields)) out[k] = fromValue(x, firestore)
+    for (const [k, x] of Object.entries(fields)) out[k] = fromValue(x, firestore, depth + 1)
     return out
   }
   throw new DecodeError(`unknown value type: ${Object.keys(v).join(',') || '(empty)'}`)

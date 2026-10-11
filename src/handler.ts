@@ -26,7 +26,7 @@ import { isEqual } from './equal.js'
 import { getField, setField } from './fields.js'
 import { countingFirestore, ReadCounter, type ReadCounts } from './counter.js'
 import { jsonLogger, type Logger } from './logger.js'
-import { type DocumentMatch, matchDocumentPath, resolveCollectionPath } from './paths.js'
+import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
 
 export interface DocSyncHandlerOptions {
@@ -75,8 +75,6 @@ export interface RuleResult extends ReadCounts {
   /** Number of conditional writes that failed and were redone. */
   retries: number
 }
-/** @deprecated renamed to {@link RuleResult} */
-export type ConnectionResult = RuleResult
 
 const DELETE = Symbol('FieldValue.delete')
 const NOTHING = Symbol('nothing')
@@ -126,6 +124,9 @@ export interface DeletedSource {
 
 const GRPC_FAILED_PRECONDITION = 9
 const GRPC_NOT_FOUND = 5
+const FIRESTORE_EVENT_TYPE_PREFIX = 'google.cloud.firestore.document.v1.'
+/** Eventarc payloads hold at most two 1 MiB documents; anything far beyond that is not a Firestore event. */
+const MAX_BODY_BYTES = 16 * 1024 * 1024
 
 export class RetriesExhaustedError extends Error {
   constructor(path: string, attempts: number) {
@@ -154,6 +155,11 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const startedAt = Date.now()
     const eventId = header(req, 'ce-id')
     const eventType = header(req, 'ce-type')
+
+    if (eventType !== undefined && !eventType.startsWith(FIRESTORE_EVENT_TYPE_PREFIX)) {
+      logger.warn('doc-sync: not a Firestore document event, ignored', { eventId, eventType })
+      return respond(res, 204)
+    }
 
     let event
     try {
@@ -331,43 +337,45 @@ export class Processor {
     const failures: unknown[] = []
     let last: DocumentSnapshot | undefined
 
-    for (;;) {
-      const page = await (last ? query.startAfter(last) : query).get()
-      counter.query(page.size)
-      if (page.empty) break
-      const docs = page.docs.filter((d) => this.belongsTo(conn, source, d.ref.path))
-      result.targets += docs.length
+    try {
+      for (;;) {
+        const page = await (last ? query.startAfter(last) : query).get()
+        counter.query(page.size)
+        if (page.empty) break
+        const docs = page.docs.filter((d) => this.belongsTo(conn, source, d.ref.path))
+        result.targets += docs.length
 
-      // Read the source only after the targets, so a stale source value can never pass the precondition.
-      const sourceSnap = await sourceRef.get()
-      counter.doc()
-      const desired = copyValue(sourceSnap, conn, conn.onSourceDelete)
-      if (desired === NOTHING) {
-        result.reason = 'source missing and onSourceDelete=nothing'
-        break
+        // Read the source only after the targets, so a stale source value can never pass the precondition.
+        const sourceSnap = await sourceRef.get()
+        counter.doc()
+        const desired = copyValue(sourceSnap, conn, conn.onSourceDelete)
+        if (desired === NOTHING) {
+          result.reason = 'source missing and onSourceDelete=nothing'
+          break
+        }
+
+        for (const target of docs) {
+          if (!needsWrite(target, conn.targetField, desired)) continue
+          const p = writer
+            .update(target.ref, { [conn.targetField]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
+            .then(() => {
+              result.writes++
+              result.action = desired === DELETE ? 'delete' : 'write'
+            })
+            .catch((err: unknown) => {
+              // Never reject here: a rejection with no handler attached yet would be an unhandledRejection.
+              if (isCode(err, GRPC_FAILED_PRECONDITION)) retry.push(target.ref)
+              else if (!isCode(err, GRPC_NOT_FOUND)) failures.push(err)
+            })
+          pending.push(p)
+        }
+
+        if (page.size < this.pageSize) break
+        last = page.docs[page.docs.length - 1]
       }
-
-      for (const target of docs) {
-        if (!needsWrite(target, conn.targetField, desired)) continue
-        const p = writer
-          .update(target.ref, { [conn.targetField]: toFieldValue(desired) }, { lastUpdateTime: target.updateTime })
-          .then(() => {
-            result.writes++
-            result.action = desired === DELETE ? 'delete' : 'write'
-          })
-          .catch((err: unknown) => {
-            // Never reject here: a rejection with no handler attached yet would be an unhandledRejection.
-            if (isCode(err, GRPC_FAILED_PRECONDITION)) retry.push(target.ref)
-            else if (!isCode(err, GRPC_NOT_FOUND)) failures.push(err)
-          })
-        pending.push(p)
-      }
-
-      if (page.size < this.pageSize) break
-      last = page.docs[page.docs.length - 1]
+    } finally {
+      await writer.close()
     }
-
-    await writer.close()
     await Promise.all(pending)
     if (failures.length) throw failures[0]
 
@@ -392,12 +400,12 @@ export class Processor {
       result.reason = 'target deleted'
       return result
     }
-    if (before && isEqual(getField(before.data, conn.idField), getField(after.data, conn.idField))) {
+    if (before && !fieldRemoved(before, after, conn.targetField) && isEqual(getField(before.data, conn.idField), getField(after.data, conn.idField))) {
       result.reason = 'idField unchanged'
       return result
     }
     const counter = new ReadCounter()
-    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter }))
+    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter, deleted: { onSourceDelete: conn.onSourceDelete } }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -486,7 +494,7 @@ export class Processor {
   private sourcePathFor(conn: ResolvedConnection, targetPath: string, currentId: string): string | undefined {
     const m = matchDocumentPath(conn.targetPattern, targetPath)
     const collection = m && resolveCollectionPath(conn.sourcePattern, m.params)
-    if (!collection || currentId.includes('/')) {
+    if (!collection || !isValidDocumentId(currentId)) {
       this.logger.warn('doc-sync: cannot locate source for target, skipped', { rule: conn.name, document: targetPath, id: currentId })
       return undefined
     }
@@ -511,7 +519,7 @@ export class Processor {
     for (const doc of [before, after]) {
       if (!doc) continue
       const id = rule.idField ? getField(doc.data, rule.idField) : source.params[rule.idParam!]
-      if (typeof id === 'string' && id !== '' && !id.includes('/')) ids.add(id)
+      if (typeof id === 'string' && isValidDocumentId(id)) ids.add(id)
     }
     const targetCollection = resolveCollectionPath(rule.targetPattern, source.params)
     if (!targetCollection) {
@@ -540,7 +548,7 @@ export class Processor {
       result.reason = 'target deleted'
       return result
     }
-    if (before) {
+    if (before && !fieldRemoved(before, after, rule.targetField)) {
       result.reason = 'not a create'
       return result
     }
@@ -611,9 +619,9 @@ export class Processor {
     }
     const change: ViewChange = { source: source.key, path: match.path, before: before?.data, after: after?.data }
     const counter = new ReadCounter()
-    const resolvable = await this.forEachViewTarget(view, source, match, before, after, counter, async (ref, snapshot) => {
+    const resolvable = await this.forEachViewTarget(view, source, match, before, after, counter, async (ref, snapshot, changeCache) => {
       result.targets++
-      count(result, await this.syncView(ref, view, { change, target: snapshot, counter }))
+      count(result, await this.syncView(ref, view, { change, target: snapshot, counter, changeCache }))
     })
     if (!resolvable) {
       result.reason = 'target collection unresolvable'
@@ -636,7 +644,7 @@ export class Processor {
       result.reason = 'target deleted'
       return result
     }
-    if (before) {
+    if (before && !fieldRemoved(before, after, view.targetField)) {
       const refFields = view.sources.map((s) => s.refField).filter((f): f is string => f !== undefined)
       if (refFields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
         result.reason = refFields.length ? 'refFields unchanged' : 'not a create'
@@ -653,13 +661,14 @@ export class Processor {
    * Reads the target, computes the value with `patch` (when a `change` is given and the view
    * defines one) or `build`, and writes it if it differs, conditional on the target's `updateTime`.
    */
-  async syncView(ref: DocumentReference, view: ResolvedView, opts: SyncOptions & { change?: ViewChange }): Promise<Outcome> {
+  async syncView(ref: DocumentReference, view: ResolvedView, opts: SyncOptions & { change?: ViewChange; changeCache?: ChangeCache }): Promise<Outcome> {
     const attempt = opts.attempt ?? 0
     if (attempt > this.maxRetries) throw new RetriesExhaustedError(ref.path, attempt)
     const counter = opts.counter ?? new ReadCounter()
     const target = await this.readTarget(ref, opts, counter)
     if (!target.exists) return 'skip'
-    const { value } = await this.computeView(target, view, { ...opts, counter })
+    // A redo re-read the target, so the changed document must be re-read after it as well.
+    const { value } = await this.computeView(target, view, { ...opts, counter, changeCache: attempt === 0 ? opts.changeCache : undefined })
     if (value === NOTHING || !needsWrite(target, view.targetField, value)) return 'skip'
     if (opts.dryRun) return value === DELETE ? 'delete' : 'write'
     return this.write(ref, target, view.targetField, value, () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1 }))
@@ -669,18 +678,44 @@ export class Processor {
   private async computeView(
     target: DocumentSnapshot,
     view: ResolvedView,
-    opts: { change?: ViewChange; counter: ReadCounter },
+    opts: { change?: ViewChange; changeCache?: ChangeCache; counter: ReadCounter },
   ): Promise<{ value: Computed; reason?: string }> {
     const { counter } = opts
     const firestore = countingFirestore(this.db(), counter)
-    if (opts.change && view.patch) {
-      // The event payload may be stale or duplicated; give `patch` the document as it is now (read after the target).
-      counter.doc()
-      const current = await this.db().doc(opts.change.path).get()
-      const change: ViewChange = { ...opts.change, after: current.exists ? current.data() : undefined }
-      const patched = await view.patch(target.get(view.targetField), change, { target, firestore })
-      if (patched !== undefined) return { value: patched }
+    const source = opts.change && view.sources.find((s) => s.key === opts.change!.source)
+    if (opts.change && source && view.patch) {
+      // The event payload may be stale, duplicated or forged: give `patch` the document as it is now,
+      // read after the target (once per page when fanning out), and only if it still belongs to this target.
+      const { path } = opts.change
+      const cache = opts.changeCache
+      if (!cache?.doc) {
+        counter.doc()
+        const read = this.db().doc(path).get()
+        if (cache) cache.doc = read
+        else return this.patchWith(target, view, source, opts.change, await read, counter, firestore)
+      }
+      return this.patchWith(target, view, source, opts.change, await cache.doc!, counter, firestore)
     }
+    return this.buildValue(target, view, counter, firestore)
+  }
+
+  private async patchWith(
+    target: DocumentSnapshot,
+    view: ResolvedView,
+    source: ResolvedViewSource,
+    change: ViewChange,
+    current: DocumentSnapshot,
+    counter: ReadCounter,
+    firestore: Firestore,
+  ): Promise<{ value: Computed; reason?: string }> {
+    const belongs = current.exists && this.belongsToTarget(view, source, target, current)
+    const fresh: ViewChange = { ...change, after: belongs ? current.data() : undefined }
+    const patched = await view.patch!(target.get(view.targetField), fresh, { target, firestore })
+    if (patched !== undefined) return { value: stripUndefined(patched) }
+    return this.buildValue(target, view, counter, firestore)
+  }
+
+  private async buildValue(target: DocumentSnapshot, view: ResolvedView, counter: ReadCounter, firestore: Firestore): Promise<{ value: Computed; reason?: string }> {
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
     for (const source of view.sources) {
       const docs = await this.viewSourceDocs(view, source, target, counter)
@@ -688,7 +723,19 @@ export class Processor {
       sources[source.key] = docs
     }
     const built = await view.build({ target, sources, firestore })
-    return { value: built === undefined ? DELETE : built }
+    return { value: built === undefined ? DELETE : stripUndefined(built) }
+  }
+
+  /** Whether `doc` (a fresh read of a source document) is one of `source`'s documents for `target`. */
+  private belongsToTarget(view: ResolvedView, source: ResolvedViewSource, target: DocumentSnapshot, doc: DocumentSnapshot): boolean {
+    const tm = matchDocumentPath(view.targetPattern, target.ref.path)
+    const sm = matchDocumentPath(source.pattern, doc.ref.path)
+    if (!tm || !sm) return false
+    if (source.refField !== undefined) {
+      return target.get(source.refField) === doc.id && resolveCollectionPath(source.pattern, tm.params) === doc.ref.parent.path
+    }
+    const id = source.idParam !== undefined ? sm.params[source.idParam] : doc.get(source.idField!)
+    return id === target.id && this.sourceBelongsTo(source, tm, doc.ref.path)
   }
 
   /** Current documents of one source for a target: a query (`idField` / `idParam`) or the one referenced document (`refField`). */
@@ -703,7 +750,7 @@ export class Processor {
     if (source.refField !== undefined) {
       const id: unknown = target.get(source.refField)
       if (id === undefined || id === null || id === '') return []
-      if (typeof id !== 'string' || id.includes('/')) {
+      if (typeof id !== 'string' || !isValidDocumentId(id)) {
         this.logger.warn('doc-sync: refField is not a document id, treated as unset', { rule: view.name, document: target.ref.path, refField: source.refField })
         return []
       }
@@ -759,7 +806,7 @@ export class Processor {
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
     counter: ReadCounter,
-    fn: (ref: DocumentReference, snapshot?: DocumentSnapshot) => Promise<void>,
+    fn: (ref: DocumentReference, snapshot: DocumentSnapshot | undefined, changeCache: ChangeCache) => Promise<void>,
   ): Promise<boolean> {
     const firestore = this.db()
     if (source.refField !== undefined) {
@@ -774,7 +821,9 @@ export class Processor {
           const tm = matchDocumentPath(view.targetPattern, d.ref.path)
           return tm !== undefined && Object.entries(match.params).every(([k, v]) => tm.params[k] === undefined || tm.params[k] === v)
         })
-        await forEachLimit(docs, VIEW_FANOUT_CONCURRENCY, (d) => fn(d.ref, d))
+        // One fresh read of the changed document per page: it happens after the page (= every target in it) was read.
+        const changeCache: ChangeCache = {}
+        await forEachLimit(docs, VIEW_FANOUT_CONCURRENCY, (d) => fn(d.ref, d, changeCache))
         if (page.size < this.pageSize) break
         last = page.docs[page.docs.length - 1]
       }
@@ -784,13 +833,37 @@ export class Processor {
     for (const doc of [before, after]) {
       if (!doc) continue
       const id = source.idField !== undefined ? getField(doc.data, source.idField) : match.params[source.idParam!]
-      if (typeof id === 'string' && id !== '' && !id.includes('/')) ids.add(id)
+      if (typeof id === 'string' && isValidDocumentId(id)) ids.add(id)
     }
     const targetCollection = resolveCollectionPath(view.targetPattern, match.params)
     if (!targetCollection) return false
-    for (const id of ids) await fn(firestore.doc(`${targetCollection}/${id}`))
+    for (const id of ids) await fn(firestore.doc(`${targetCollection}/${id}`), undefined, {})
     return true
   }
+
+}
+
+/** Shares one read of the changed document between the targets of a page (see `forEachViewTarget`). */
+interface ChangeCache {
+  doc?: Promise<DocumentSnapshot>
+}
+
+/**
+ * Removes `undefined` values, which Firestore rejects: map entries are dropped, array elements
+ * become `null`. Plain maps and arrays only; Firestore value classes are left as they are.
+ */
+export function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) return value.map((v) => (v === undefined ? null : stripUndefined(v))) as T
+  if (value !== null && typeof value === 'object' && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null)) {
+    const out: Record<string, unknown> = {}
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) if (v !== undefined) out[k] = stripUndefined(v)
+    return out as T
+  }
+  return value
+}
+
+function fieldRemoved(before: DecodedDocument, after: DecodedDocument, field: string): boolean {
+  return getField(before.data, field) !== undefined && getField(after.data, field) === undefined
 }
 
 /** Targets of one view source change recomputed in parallel (each one reads its own sources). */
@@ -875,15 +948,22 @@ function header(req: DocSyncRequest, name: string): string | undefined {
 }
 
 async function readBody(req: DocSyncRequest): Promise<Uint8Array | string | object | undefined> {
-  if (req.rawBody instanceof Uint8Array) return req.rawBody
-  if (req.body instanceof Uint8Array || typeof req.body === 'string') return req.body
+  const given = req.rawBody instanceof Uint8Array ? req.rawBody : req.body instanceof Uint8Array || typeof req.body === 'string' ? req.body : undefined
+  if (given !== undefined) {
+    if (given.length > MAX_BODY_BYTES) throw new DecodeError(`request body larger than ${MAX_BODY_BYTES} bytes`)
+    return given
+  }
   if (req.body !== undefined && req.body !== null && typeof req.body === 'object' && Object.keys(req.body).length > 0) {
     return req.body
   }
   if (typeof req[Symbol.asyncIterator] === 'function') {
     const chunks: Buffer[] = []
+    let total = 0
     for await (const chunk of req as AsyncIterable<unknown>) {
-      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array))
+      const buf = typeof chunk === 'string' ? Buffer.from(chunk) : Buffer.from(chunk as Uint8Array)
+      total += buf.length
+      if (total > MAX_BODY_BYTES) throw new DecodeError(`request body larger than ${MAX_BODY_BYTES} bytes`)
+      chunks.push(buf)
     }
     return chunks.length ? Buffer.concat(chunks) : undefined
   }

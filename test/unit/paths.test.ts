@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { eventarcPathPattern, matchDocumentPath, parseCollectionPattern, resolveCollectionPath } from '../../src/paths.js'
+import { eventarcPathPattern, isValidDocumentId, matchDocumentPath, parseCollectionPattern, patternsIntersect, resolveCollectionPath } from '../../src/paths.js'
 import { fieldPathsOverlap, getField, setField } from '../../src/fields.js'
 
 describe('collection patterns', () => {
@@ -24,7 +24,25 @@ describe('collection patterns', () => {
     expect(resolveCollectionPath(p, { uid: 'u1' })).toBe('users/u1/posts')
     expect(resolveCollectionPath(p, {})).toBeUndefined()
     expect(eventarcPathPattern(p)).toBe('users/{uid}/posts/{docId}')
-    expect(eventarcPathPattern(parseCollectionPattern('a/{docId}/b'))).toBe('a/{docId}/b/{doc}')
+    expect(eventarcPathPattern(parseCollectionPattern('a/{docId}/b'))).toBe('a/{docId}/b/{docId2}')
+  })
+})
+
+describe('document ids and pattern overlap', () => {
+  it('validates document ids like Firestore does', () => {
+    expect(['a', 'a-b', 'ünï', '_x', 'x__', '__x'].every(isValidDocumentId)).toBe(true)
+    expect(['', '.', '..', 'a/b', '__x__', 'a'.repeat(1501)].some(isValidDocumentId)).toBe(false)
+  })
+  it('detects patterns that can match the same documents', () => {
+    const p = (s: string) => parseCollectionPattern(s)
+    expect(patternsIntersect(p('users/admin/posts'), p('users/{uid}/posts'))).toBe(true)
+    expect(patternsIntersect(p('users/{a}/posts'), p('users/{b}/posts'))).toBe(true)
+    expect(patternsIntersect(p('users/admin/posts'), p('users/guest/posts'))).toBe(false)
+    expect(patternsIntersect(p('users/{uid}/posts'), p('users/{uid}/likes'))).toBe(false)
+    expect(patternsIntersect(p('post'), p('users/{uid}/post'))).toBe(false)
+  })
+  it('picks an unused name for the document placeholder', () => {
+    expect(eventarcPathPattern(parseCollectionPattern('a/{docId}/b/{docId2}/c'))).toBe('a/{docId}/b/{docId2}/c/{docId3}')
   })
 })
 

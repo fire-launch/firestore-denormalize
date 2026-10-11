@@ -40,11 +40,11 @@ Maintain `post.likeCount` or `order.total` from a child or related collection. V
 
 - New rule kind alongside `connections`, with the aggregate (`count` | `sum(field)`), the target document and the target field.
 - Same conditional-write and retry loop as copy sync.
-- Cost is one aggregation read per event, which `validate` will report (see *Cost estimate*).
+- Cost is one aggregation read per event, which `validate` reports (see *Cost estimate*).
 
 ### `rebuild` / backfill — done
 
-`doc-sync rebuild [--connection <name>] [--dry-run]` walks the targets of a rule and brings every document in line with its current source. Required for introducing the package into a project that already has data, and for recovering after a rule change. Today existing targets are only fixed the next time their source changes; this moves backfill from "known limitation" into scope.
+`doc-sync rebuild [--rule <name>] [--dry-run]` walks the targets of a rule and brings every document in line with its current source. Required for introducing the package into a project that already has data, and for recovering after a rule change. Today existing targets are only fixed the next time their source changes; this moves backfill from "known limitation" into scope.
 
 - Runs from the CLI against production or the emulator, paged, resumable.
 - Reuses the handler's compute-and-conditionally-write code so the result is identical to what a live event would produce.
@@ -85,7 +85,7 @@ With the collection types supplied, `source` / `target`, `fields`, `idField`, `t
 Rules that compute a derived value with user code instead of a fixed field list, for shapes the built-in rules cannot express: "latest N items", a dictionary keyed by id, a denormalized summary.
 
 - `build({ target, sources }) => value` recomputes the whole value from a fresh read, so results stay deterministic.
-- `patch(current, change) => value` is an optional fast path; `rebuild` and `verify` always use `build`.
+- `patch(current, change, ctx) => value` is an optional fast path; `rebuild` and `verify` always use `build`.
 - Sources relate to the target by `idField`, `idParam` or `refField`, with optional `orderBy`, `limit` and `watch`.
 
 Shipped in v0.3.
@@ -94,7 +94,7 @@ Shipped in v0.3.
 
 ### Cost estimate in `validate` — done
 
-`doc-sync validate` prints, per rule, the maximum number of document reads and writes caused by one source update (for example "1 read of the source, up to N target reads and N writes, where N is the number of matching targets"). Firestore users are cost-sensitive, and this surfaces fan-out-shaped rules before they are deployed. Shipped in v0.5.
+`doc-sync validate` prints, per rule, the Firestore reads and writes one event causes, as formulas over N (the targets matching the changed source) and M (the source documents belonging to one target) — for example "reads N + 1, writes ≤ N" for a copy sync rule on a source change. Firestore users are cost-sensitive, and this surfaces fan-out-shaped rules before they are deployed. Shipped in v0.5.
 
 ## Not planned
 

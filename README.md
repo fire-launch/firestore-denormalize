@@ -60,6 +60,7 @@ export default defineConfig({
 - Node.js 20+, `firebase-admin` 12+ (peer dependency)
 - Firestore in Native mode. Triggers run in the database's location (`asia-northeast1`, `nam5`, ...).
 - `gcloud` CLI, authenticated, for `doc-sync setup` / `doc-sync deploy`
+- Firebase CLI (`firebase-tools`), for `--deploy-function` and for the Emulator Suite
 
 ## Install
 
@@ -71,19 +72,21 @@ npm install firestore-denormalize
 
 ### 1. Write the config
 
-Create `doc-sync.config.ts` at the root of your Firebase project (see above). Fields:
+Create `doc-sync.config.ts` inside your functions source tree, at `functions/src/doc-sync.config.ts` (contents as above). It has to live there rather than at the project root: `firebase deploy` only ships the files under `functions/`, and keeping the config under `functions/src` lets `tsc` compile it straight into a flat `functions/lib` alongside the rest of your code. Fields:
 
 | Key | Meaning |
 |---|---|
 | `name` | Instance name, used for trigger names and labels (`[a-z][a-z0-9-]*`) |
-| `region` | Eventarc trigger location. Must match the Firestore database location |
+| `region` | Eventarc trigger location. Must match the Firestore database location (`nam5` etc. for multi-region databases) |
 | `database` | Firestore database ID. Default `(default)` |
 | `service` | Cloud Run service name of the deployed function (for `onRequest`, the function name in lowercase) |
-| `serviceRegion` | Region of the Cloud Run service. Default `region` |
+| `serviceRegion` | Region of the Cloud Run service. Default `region`. Required when `region` is a multi-region (`nam5`, `eur3`, ...), since Cloud Run has no such region |
 | `serviceAccount` | Service account for the triggers. A bare ID is expanded to `<id>@<project>.iam.gserviceaccount.com` |
 | `connections[]` | Copy rules (below) |
 | `aggregates[]` | Count / sum rules (below) |
 | `views[]` | Rules computed by your own `build` function (below) |
+
+Trigger names are derived from the collections' ids, lower-cased (`chatRooms` → `chatrooms`); validation rejects a config where two of them would collide, and also rejects two collection patterns that can match the same documents, such as `users/admin/posts` next to `users/{uid}/posts`.
 
 **Collections** are paths. A subcollection uses placeholders for the parent IDs: `users/{uid}/posts`. **Fields** may be dotted paths: `address.city`.
 
@@ -99,7 +102,7 @@ Create `doc-sync.config.ts` at the root of your Firebase project (see above). Fi
 | `idParam: 'postId'` | Many-to-one: the source documents under the target (`post/{postId}/comment`) |
 | `refField: 'authorId'` | One-to-one: the document the target's own field points at |
 
-Many-to-one sources accept `orderBy` (`['createdAt', ['score', 'desc']]`) and `limit`. `watch` lists the source fields whose change triggers a recompute; without it, any change does. `build` receives every source as an array of `QueryDocumentSnapshot` (zero or one for `refField`), must be deterministic, and returns the value to store, or `undefined` to delete the field. The optional `patch(current, change, { target, firestore })` is a fast path that derives the new value from the current one and the changed document alone; return `undefined` to fall back to `build`. `change.after` is a fresh read of that document (`undefined` if it no longer exists), not the event payload, so a late or duplicate event still converges on the current state; `patch` must be idempotent and key items by document ID. `firestore` is there for a small extra read when one is needed, such as a `limit(1)` query to refill a "latest N" list after a delete. Only the target's `refField`s are watched on the target side: if `build` reads other target fields, they are picked up on the next source change or `rebuild`. Wrap each view in `defineView(...)` to get `sources` typed inside `build`.
+Many-to-one sources accept `orderBy` (`['createdAt', ['score', 'desc']]`) and `limit`. `watch` lists the source fields whose change triggers a recompute; without it, any change does. `watch` always also covers the source's `idField`, when it has one, and its `orderBy` fields, since those decide membership and order. `build` receives every source as an array of `QueryDocumentSnapshot` (zero or one for `refField`), must be deterministic, and returns the value to store, or `undefined` to delete the field; `undefined` is stripped out of whatever is returned before it is written — a map entry holding `undefined` is dropped, an array element holding `undefined` becomes `null`. The optional `patch(current, change, { target, firestore })` is a fast path that derives the new value from the current one and the changed document alone; return `undefined` to fall back to `build`. `change.after` is a fresh read of that document, not the event payload, so a late or duplicate event still converges on the current state; it is `undefined` both when the document was deleted and when it changed but no longer belongs to this target (for example it moved to another parent), so `patch` can treat "`after` is `undefined`" as "remove this item". `patch` must be idempotent and key items by document ID. `firestore` is there for a small extra read when one is needed, such as a `limit(1)` query to refill a "latest N" list after a delete. Only the target's `refField`s are watched on the target side: if `build` reads other target fields, they are picked up on the next source change or `rebuild`. Wrap each view in `defineView(...)` to get `sources` typed inside `build`.
 
 Validation rejects duplicate names, two rules writing overlapping fields of the same collection, unresolvable placeholders, malformed paths, and loops where one rule's write would trigger the next rule back around to the first.
 
@@ -143,7 +146,8 @@ import { initializeApp } from 'firebase-admin/app'
 import { getFirestore } from 'firebase-admin/firestore'
 import { onRequest } from 'firebase-functions/v2/https'
 import { createDocSyncHandler } from 'firestore-denormalize'
-import config from '../../doc-sync.config'
+// doc-sync.config.ts sits next to this file, inside functions/src.
+import config from './doc-sync.config'
 
 initializeApp()
 
@@ -172,28 +176,30 @@ The handler is a plain `(req, res) => Promise<void>`, so it also works with Expr
 ### 3. Create the trigger service account (once)
 
 ```sh
-npx doc-sync setup --project <project>
+npx doc-sync setup --project <project> --config functions/src/doc-sync.config.ts
 ```
 
 Creates the service account, grants `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the service, and enables the Eventarc and Cloud Run APIs. Idempotent. Add `--dry-run` to print the `gcloud` commands instead.
+
+The Cloud Run service does not exist yet on a first run, so `roles/run.invoker` cannot be granted to it; `setup` prints a note and skips that one step, relying on the `invoker:` option set in step 2 instead. Run `setup` again after the first `firebase deploy` and it grants the binding then — re-running it is always safe.
 
 ### 4. Deploy the function, then the triggers
 
 ```sh
 firebase deploy --only functions:docSync
-npx doc-sync deploy --project <project>
+npx doc-sync deploy --project <project> --config functions/src/doc-sync.config.ts
 ```
 
-`deploy` lists existing triggers labelled `doc-sync-instance=<name>`, creates one trigger per collection that appears as a `source` or `target`, updates triggers whose settings drifted from the config (service, region, database, service account), deletes triggers for collections no longer in the config, and leaves the rest untouched. Pass `--deploy-function docSync` to run `firebase deploy` first, or `--dry-run` to only print the commands.
+`deploy` lists existing triggers labelled `doc-sync-instance=<name>`, creates one trigger per collection that appears as a `source` or `target`, updates triggers whose settings drifted from the config (the Cloud Run service and its region, the document path pattern, and the service account), deletes triggers for collections no longer in the config, and leaves the rest untouched. Pass `--deploy-function docSync` to run `firebase deploy` first, or `--dry-run` to only print the commands.
 
 Trigger names are `<name>-<collection ids>` (`users/{uid}/payments` → `<name>-users-payments`, underscores become hyphens). Each trigger filters `google.cloud.firestore.document.v1.written` on the collection's path pattern (`document=users/{uid}/payments/{docId}`) and delivers protobuf payloads.
 
 ### 5. Backfill existing data
 
 ```sh
-npx doc-sync rebuild --project <project> --dry-run      # report what would change
-npx doc-sync rebuild --project <project>                 # apply
-npx doc-sync rebuild --project <project> --rule post-category --start-after post/abc   # one rule, resumed
+npx doc-sync rebuild --project <project> --config functions/src/doc-sync.config.ts --dry-run      # report what would change
+npx doc-sync rebuild --project <project> --config functions/src/doc-sync.config.ts                 # apply
+npx doc-sync rebuild --project <project> --config functions/src/doc-sync.config.ts --rule post-category --start-after post/abc   # one rule, resumed
 ```
 
 `rebuild` walks every target of each rule in pages and brings it in line with its current source, using the same compute-and-conditionally-write code as the handler. Missing sources get the rule's `onSourceDelete` treatment. Progress lines include the last processed path so an interrupted run can be resumed with `--start-after`. It uses Application Default Credentials (`gcloud auth application-default login`), or the emulator when `FIRESTORE_EMULATOR_HOST` is set.
@@ -201,9 +207,9 @@ npx doc-sync rebuild --project <project> --rule post-category --start-after post
 ### 6. Verify
 
 ```sh
-npx doc-sync verify --project <project>                 # report every mismatch
-npx doc-sync verify --project <project> --fix           # and repair them
-npx doc-sync verify --project <project> --rule post-category --start-after post/abc
+npx doc-sync verify --project <project> --config functions/src/doc-sync.config.ts                 # report every mismatch
+npx doc-sync verify --project <project> --config functions/src/doc-sync.config.ts --fix           # and repair them
+npx doc-sync verify --project <project> --config functions/src/doc-sync.config.ts --rule post-category --start-after post/abc
 ```
 
 `verify` walks every target the same way `rebuild` does, but compares instead of writing: it recomputes the value from the current sources and reports every document whose `targetField` differs, without touching it. Pass `--fix` to repair mismatches with the same conditional writes the handler uses. The command exits non-zero when a mismatch remains unfixed, so it can run as a CI or scheduled check against production.
@@ -215,6 +221,7 @@ The emulators have no Eventarc for Firestore, so `doc-sync dev` bridges the gap 
 ```sh
 firebase emulators:start --only firestore,functions
 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
+  --config functions/src/doc-sync.config.ts \
   --url http://127.0.0.1:5001/demo-app/asia-northeast1/docSync
 ```
 
@@ -231,7 +238,13 @@ doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... 
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
-`--config` defaults to `./doc-sync.config.ts`. `--project` defaults to `$GOOGLE_CLOUD_PROJECT`, then gcloud's active project. The config may be TypeScript or JavaScript, ESM or CJS.
+`--config` defaults to `./doc-sync.config.ts`; run from inside `functions/` with `--config src/doc-sync.config.ts`, or from the project root with `--config functions/src/doc-sync.config.ts`. `--project` defaults to `$GOOGLE_CLOUD_PROJECT`, then gcloud's active project. The config may be TypeScript or JavaScript, ESM or CJS.
+
+`--emulator-host` applies to `rebuild`, `verify` and `dev`, not only `dev`: set it (or `FIRESTORE_EMULATOR_HOST`) and any of the three talk to the emulator instead of production. `--start-after` resumes after a document path, but only for the first rule processed, so use it together with `--rule` to resume a specific one.
+
+`deploy`'s drift detection compares the service, its region, the document path pattern and the service account of each existing trigger against the config. It does not compare the Eventarc trigger's own `region`: triggers are listed and created in that location, so changing `region` itself leaves the old triggers behind. Delete them by hand, or run `deploy` with the old config once more before switching to the new one.
+
+In `verify`, the CLI prints each mismatch's actual and expected values to stdout, so they end up in CI logs; the underlying library log line (`doc-sync verify: mismatch`) carries only the document path and field, since the values may hold personal data.
 
 ### Cost estimate
 
@@ -241,7 +254,7 @@ Two warnings call out shapes that are expensive by construction: a `refField` vi
 
 ## How a change is processed
 
-For an event on `collection/docId`, every connection whose `source` or `target` is that collection runs independently.
+For an event on `collection/docId`, every rule (connection, aggregate, view) whose `source` or `target` is that collection runs; source-side work for different rules runs in parallel, target-side work on the event's own document runs one rule after another.
 
 **As a source** (`category/c1` changed)
 
@@ -254,31 +267,49 @@ For an event on `collection/docId`, every connection whose `source` or `target` 
 
 1. Skip if the document was deleted or `idField` did not change.
 2. `get()` the current target. If `idField` is empty, delete `targetField` (when present).
-3. Otherwise `get()` the referenced source and build the value. If the source does not exist, do nothing.
+3. Otherwise `get()` the referenced source and build the value. If the source does not exist, follow `onSourceDelete` — the same treatment `rebuild` gives a missing source — instead of leaving the target alone.
 4. Write only if the value differs, conditional on the `updateTime` from step 2.
+
+An application write that removed `targetField` directly (for example `set()` without merge) is recomputed on the next event for that document, even if the source value itself did not change.
 
 **Counts and sums** (`post/p1/like/u1` created or deleted, or a watched field changed)
 
 1. Skip if it is an update and neither `idField` nor the summed field changed.
 2. For each target the document belonged to before and after (at most two), `get()` the target, run the aggregation query, and write the number if it differs, conditional on the target's `updateTime`. A newly created target gets its initial value the same way.
 
-**Views.** On a source change (skipped when `watch` fields, or the whole document when `watch` is unset, did not change), every target it belongs to is read, then `patch` (if defined, given a fresh read of the changed document; returning `undefined` falls back) or `build` over fresh reads of every source computes the value, written conditionally if it differs. Targets are recomputed on create and when a `refField` changes. `rebuild` / `verify` always use `build`.
+The same recomputation-on-removal rule applies here: if `targetField` was removed by an application write, the next event for that target recomputes it.
+
+**Views.** On a source change (skipped when `watch` fields, or the whole document when `watch` is unset, did not change), every target it belongs to is read, then `patch` (if defined, given a fresh read of the changed document; returning `undefined` falls back) or `build` over fresh reads of every source computes the value, written conditionally if it differs. That fresh read is also where membership is re-checked: if the changed document no longer belongs to this target (for example it moved to another parent), `patch` sees `change.after` as `undefined`, the same as a delete. Targets are recomputed on create and when a `refField` changes, and also when an application write removed `targetField` directly. `rebuild` / `verify` always use `build`.
 
 **Conflicts.** If a conditional write fails because someone else wrote the target in between, that target is redone from step 2 (up to `maxRetries` times, then the request fails with 500 and Eventarc redelivers it). If the source changed after it was read, the event for that change takes care of it. Values are compared deeply (`Timestamp`, `GeoPoint`, `DocumentReference` and bytes included), so the handler's own writes come back as no-ops and multi-step chains such as `area -> shop.area -> post.shop.area` terminate.
 
-**Responses.** `204` for done or nothing to do, and also for unrecoverable input (undecodable payload, unknown collection, other database) which is logged at `error`/`warn` level and not retried. `500` for transient failures, which Eventarc retries with backoff for up to 24 hours. Processing is idempotent.
+**Responses.** `204` for done or nothing to do. Unrecoverable input also gets `204`: an undecodable payload or an unknown collection are logged at `warn`/`error` and not retried; an event for another database is logged at `info` and ignored; a `ce-type` that is not a Firestore document event, a request body over 16 MiB, and a value nested deeper than 20 levels are dropped the same way. `500` for transient failures, which Eventarc retries with backoff for up to 24 hours. Processing is idempotent.
 
-**Logs.** One structured line per rule per event: `rule`, `kind`, `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs`. The read counters follow Firestore billing: one per document read (missing documents included), one per document a query returned (at least one per query), and aggregations counted separately. Reads a view's `build` / `patch` makes through the `firestore` in its context are included; reads through a Firestore instance obtained elsewhere are not. Summing `reads` by `rule` in Cloud Logging shows which rule costs what.
+**Logs.** One structured line per rule per event: `eventId`, `rule`, `kind`, `source` (the matched view source key; views only), `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs`. `durationMs` is the time for the whole event, the same on every line it produces, not just that one rule. The read counters follow Firestore billing: one per document read (missing documents included), one per document a query returned (at least one per query), and aggregations counted separately. Reads a view's `build` / `patch` makes through the `firestore` in its context are included; reads through a Firestore instance obtained elsewhere are not. Summing `reads` by `rule` in Cloud Logging shows which rule costs what. A rule that fails instead logs `doc-sync: failed, will be retried by Eventarc` with `eventId`, `document`, `rule`, `error` and `durationMs`.
 
 ## Known limitations
 
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
-- If an application writes `targetField` directly, the value stays until the source changes again (or until `rebuild`).
+- If an application overwrites `targetField` with another value, it stays until the source changes again (or `rebuild` / `verify --fix`); removing the field is repaired on the next event for that document.
 - The target query needs the default single-field index on `idField`. Rules that need a collection-group query (`validate` lists them) need a collection-group scope index on that field; Firestore prints the creation link on first use.
-- Counts and sums cost one aggregation read per affected target per event. A view costs one read (or query) per source per affected target, unless `patch` handles the event.
+- A view source with `idField` plus `orderBy` on another field needs a composite index (`validate` lists collection-group indexes only; Firestore prints the link for composite ones on first use).
+- Counts and sums cost one aggregation read per affected target per event. A view costs one target read plus, per source, one read per document returned (up to `limit`, else all M) per affected target, unless `patch` handles the event (then 2 reads).
+- Permanent failures inside user code (`build` / `patch` throwing) or a missing index return 500, which Eventarc redelivers with backoff for up to 24 hours; watch the `doc-sync: failed` log line and consider a dead-letter topic on the trigger.
 - Latency is Eventarc's delivery latency (typically under a second to a few seconds).
 
-See [ROADMAP.md](./ROADMAP.md) for what is planned, including typed config and cost estimates.
+See [ROADMAP.md](./ROADMAP.md) for what is not planned.
+
+## Security
+
+- The handler does not authenticate requests on its own. Restricting invocation to the trigger service account is required, not optional: pass `invoker: '<trigger-sa>@<project>.iam.gserviceaccount.com'` to `onRequest` (step 2), or on a plain Cloud Run deploy use `--no-allow-unauthenticated` plus `roles/run.invoker` for that account. Without it the function is public.
+- What a forged or replayed request can do if it gets through anyway: force recomputation, which costs reads, but it can never make the handler write attacker-supplied data. Every value is re-read from its real sources, and a view's `patch` receives a fresh, membership-checked read of the changed document rather than anything from the request body.
+- The handler also limits what any request can do: the `ce-type` must identify a Firestore document event, the body is capped at 16 MiB, and values nested deeper than 20 levels are rejected; anything else is dropped with `204` before it reaches your rules.
+- `doc-sync setup` grants the trigger service account exactly `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the one Cloud Run service — nothing else.
+- The function's own runtime service account (what `onRequest` / Cloud Run runs as, separate from the trigger SA) needs Firestore read/write, typically `roles/datastore.user`, and executes your `build` / `patch` code. Use a dedicated service account rather than the default compute one.
+- Fan-out has no per-event cap: a single rule can touch an unbounded number of targets. `validate`'s warnings, `maxInstances` and `timeoutSeconds` are the controls; size them for the worst case one event can cause.
+- `deploy` only manages triggers labelled `doc-sync-instance=<name>` in `region`; two configs with the same `name` deployed to the same project and region will fight over the same triggers.
+- The CLI runs `gcloud` and `firebase` as argument arrays, never through a shell on POSIX (quoted for the shell only on Windows), and loads the config file with `jiti`. The config is your own code and runs with your own credentials, like any other local script.
+- `verify` output — on stdout and in the `Mismatch` objects passed to `onMismatch` — contains the actual document field values, which may be personal data; treat it accordingly in CI logs.
 
 ## Recommended function settings
 
@@ -290,6 +321,7 @@ See [ROADMAP.md](./ROADMAP.md) for what is planned, including typed config and c
 | `minInstances` | 1 | Avoids cold starts (optional) |
 | `maxInstances` | 10 | Caps write bursts against Firestore |
 | `timeoutSeconds` | 300 | Room for large fan-outs; below Eventarc's 600s ack deadline |
+| `invoker` | the trigger SA email | Required; without it the function is public |
 
 Tune after watching Cloud Run CPU, memory, latency and instance count.
 

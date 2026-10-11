@@ -190,6 +190,16 @@ describe('views: idParam source (latest N)', () => {
     expect(processed(logs, 'post-latest-comments')).toMatchObject({ role: 'target', action: 'skip', reason: 'target deleted' })
   })
 
+  it('drops undefined values from the built value instead of failing the write', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'x' })
+    const { handler, logs } = handlerFor()
+    const c1 = db.doc('post/p1/comment/c1')
+    expect(await invoke(handler, await change(c1, () => c1.set({ createdAt: 1 })))).toBe(204) // no `body`
+    expect((await post.get()).get('latestComments')).toEqual([{ id: 'c1' }])
+    expect(processed(logs, 'post-latest-comments')).toMatchObject({ action: 'write' })
+  })
+
   it('does nothing when the target does not exist', async () => {
     const c1 = db.doc('post/ghost/comment/c1')
     const { handler, logs } = handlerFor()
@@ -251,6 +261,23 @@ describe('views: idField source with patch', () => {
     expect((await user.get()).get('badges')).toEqual({ b1: { name: 'Gold again' } })
   })
 
+  it('does not let a stale create re-add a document that moved to another target', async () => {
+    await db.doc('user/u1').set({ name: 'A', badges: {} })
+    await db.doc('user/u2').set({ name: 'B', badges: {} })
+    const b1 = db.doc('badge/b1')
+    const { handler } = handlerFor()
+    const created = await change(b1, () => b1.set({ userId: 'u1', name: 'Gold' }))
+    await invoke(handler, created)
+    await invoke(handler, await change(b1, () => b1.update({ userId: 'u2' })))
+    expect((await db.doc('user/u1').get()).get('badges')).toEqual({})
+    expect((await db.doc('user/u2').get()).get('badges')).toEqual({ b1: { name: 'Gold' } })
+
+    // the original create is redelivered: for u1, the fresh document no longer belongs, so patch sees `after: undefined`
+    expect(await invoke(handler, created)).toBe(204)
+    expect((await db.doc('user/u1').get()).get('badges')).toEqual({})
+    expect((await db.doc('user/u2').get()).get('badges')).toEqual({ b1: { name: 'Gold' } })
+  })
+
   it('recomputes both the old and the new target when idField changes', async () => {
     await db.doc('user/u1').set({ name: 'A', badges: { b1: { name: 'Gold' } } })
     await db.doc('user/u2').set({ name: 'B' })
@@ -304,6 +331,26 @@ describe('views: latest N maintained by patch with one extra read', () => {
     expect(builds).toBe(0)
     // target + the deleted message (missing, still billed) + the limit(1) refill query made inside patch
     expect(processed(logs, 'thread-latest')).toMatchObject({ reads: 3, queries: 1, aggregations: 0 })
+  })
+})
+
+describe('views: refField fan-out with patch reads the changed document once per page', () => {
+  const summaryPatch = defineView({
+    name: 'post-author-name',
+    target: 'post',
+    targetField: 'authorName',
+    sources: { author: { collection: 'user', refField: 'authorId' } },
+    build: ({ sources }) => sources.author[0]?.get('name') ?? null,
+    patch: (_current, change) => (change.after ? (change.after.name as string) : null),
+  })
+  it('counts N target reads plus one read per page', async () => {
+    await db.doc('user/u1').set({ name: 'Ann' })
+    for (let i = 0; i < 5; i++) await db.doc(`post/p${i}`).set({ authorId: 'u1' })
+    const { handler, logs } = handlerFor(defineConfig({ ...config, views: [summaryPatch] })) // pageSize 2 -> pages 2, 2, 1
+    const user = db.doc('user/u1')
+    expect(await invoke(handler, await change(user, () => user.update({ name: 'Anne' })))).toBe(204)
+    for (let i = 0; i < 5; i++) expect((await db.doc(`post/p${i}`).get()).get('authorName')).toBe('Anne')
+    expect(processed(logs, 'post-author-name')).toMatchObject({ targets: 5, writes: 5, reads: 5 + 3, queries: 3 })
   })
 })
 

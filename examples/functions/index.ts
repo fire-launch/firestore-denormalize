@@ -2,7 +2,8 @@ import { initializeApp } from 'firebase-admin/app'
 import { getFirestore } from 'firebase-admin/firestore'
 import { onRequest } from 'firebase-functions/v2/https'
 import { createDocSyncHandler } from 'firestore-denormalize'
-import config from '../doc-sync.config'
+// doc-sync.config.ts sits next to this file, inside functions/src, so it ships with `firebase deploy`.
+import config from './doc-sync.config'
 
 initializeApp()
 

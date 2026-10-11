@@ -6,7 +6,7 @@
  */
 import type { DocumentData, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { fieldPathsOverlap, isValidFieldPath } from './fields.js'
-import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug } from './paths.js'
+import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug, patternsIntersect } from './paths.js'
 
 /** What to write into `targetField` when the source document no longer exists. */
 export type OnSourceDelete = 'setNull' | 'deleteField' | 'nothing'
@@ -156,7 +156,7 @@ export interface DocSyncConfig {
   database?: string
   /** Name of the Cloud Run service (the deployed function) that receives events. */
   service: string
-  /** Region of the Cloud Run service. Defaults to `region`. */
+  /** Region of the Cloud Run service. Defaults to `region`; required when `region` is a multi-region (`nam5`, `eur3`, ...), which Cloud Run does not have. */
   serviceRegion?: string
   /** Service account used by the triggers. A bare ID is expanded to `<id>@<project>.iam.gserviceaccount.com`. */
   serviceAccount: string
@@ -247,7 +247,10 @@ export class ConfigError extends Error {
 }
 
 const INSTANCE_NAME = /^[a-z][a-z0-9-]*$/
-const TRIGGER_NAME = /^[a-z][a-z0-9-]*$/
+const TRIGGER_NAME = /^[a-z]([a-z0-9-]*[a-z0-9])?$/
+const SERVICE_NAME = /^[a-z]([a-z0-9-]*[a-z0-9])?$/
+/** Firestore multi-region locations (`nam5`, `eur3`, `nam7`, ...), which are not Cloud Run regions. */
+const MULTI_REGION = /^(nam|eur|asia)\d+$/
 const TRIGGER_NAME_MAX = 63
 
 const str = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
@@ -268,6 +271,10 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   }
   if (!str(config.region)) problems.push('`region` is required')
   if (!str(config.service)) problems.push('`service` is required')
+  else if (!SERVICE_NAME.test(config.service)) problems.push(`\`service\` must be a Cloud Run service name matching ${SERVICE_NAME} (got "${config.service}")`)
+  if (str(config.region) && MULTI_REGION.test(config.region) && config.serviceRegion === undefined) {
+    problems.push(`\`serviceRegion\` is required when \`region\` is a multi-region ("${config.region}"): Cloud Run needs a regular region such as us-central1`)
+  }
   if (!str(config.serviceAccount)) problems.push('`serviceAccount` is required')
   if (config.database !== undefined && !str(config.database)) problems.push('`database` must be a non-empty string')
   if (config.serviceRegion !== undefined && !str(config.serviceRegion)) {
@@ -284,7 +291,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   const aggList = Array.isArray(aggregates) ? aggregates : []
   const viewList = Array.isArray(views) ? views : []
   if (connList.length + aggList.length + viewList.length === 0) {
-    problems.push('at least one entry in `connections` or `aggregates` is required')
+    problems.push('at least one entry in `connections`, `aggregates` or `views` is required')
   }
 
   const names = new Map<string, string>()
@@ -402,6 +409,12 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
       if (!isResolvable(target, source.params)) {
         const missing = target.params.filter((p) => !source.params.includes(p))
         problems.push(`${label}: placeholder(s) {${missing.join('}, {')}} of \`target\` must also appear in \`source\``)
+      } else if (hasIdField && target.params.length && !isResolvable(source, target.params)) {
+        // A collection-group aggregation cannot be filtered by path, so documents under other parents would be counted.
+        const extra = source.params.filter((p) => !target.params.includes(p))
+        problems.push(
+          `${label}: \`source\` has placeholder(s) {${extra.join('}, {')}} that \`target\` lacks; a collection-group aggregation would also count documents of other \`target\` parents. Use \`idParam\`, or a \`target\` without placeholders`,
+        )
       }
     }
     if (target && okTarget) writtenFields.push({ rule: label, target, field: a.targetField })
@@ -587,9 +600,19 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   const cycle = findCycle([...resolvedConnections, ...resolvedAggregates, ...resolvedViews])
   if (cycle) problems.push(`rules form a loop (each one's write triggers the next): ${cycle.join(' -> ')}`)
 
+  // Two different patterns must not match the same documents: events would be processed twice and the overlap checks above would miss them.
+  const patterns = collectionsOf({ connections: resolvedConnections, aggregates: resolvedAggregates, views: resolvedViews })
+  for (let i = 0; i < patterns.length; i++) {
+    for (let j = i + 1; j < patterns.length; j++) {
+      if (patternsIntersect(patterns[i]!, patterns[j]!)) {
+        problems.push(`collections "${patterns[i]!.raw}" and "${patterns[j]!.raw}" can match the same documents; use one pattern for them`)
+      }
+    }
+  }
+
   if (str(config.name)) {
     const seen = new Map<string, string>()
-    for (const p of collectionsOf({ connections: resolvedConnections, aggregates: resolvedAggregates, views: resolvedViews })) {
+    for (const p of patterns) {
       const trigger = triggerName(config.name, p)
       if (!TRIGGER_NAME.test(trigger) || trigger.length > TRIGGER_NAME_MAX) {
         problems.push(

@@ -36,6 +36,12 @@ describe('validateConfig', () => {
     expect(r.serviceRegion).toBe('asia-northeast1')
   })
 
+  it('requires serviceRegion for a multi-region database and a valid service name', () => {
+    expect(problemsOf({ ...base, region: 'nam5' })).toContainEqual(expect.stringContaining('`serviceRegion` is required when `region` is a multi-region'))
+    expect(() => validateConfig({ ...base, region: 'nam5', serviceRegion: 'us-central1' })).not.toThrow()
+    expect(problemsOf({ ...base, service: 'Doc Sync' })).toContainEqual(expect.stringContaining('`service` must be a Cloud Run service name'))
+  })
+
   it('rejects a bad instance name', () => {
     expect(problemsOf({ ...base, name: 'Doc_Sync' })).toContainEqual(expect.stringContaining('`name` must match'))
   })
@@ -157,6 +163,37 @@ describe('validateConfig', () => {
         connections: [c, { ...c, name: 'a', source: 'post', target: 'thread', idField: 'postId', targetField: 'post' }],
       }),
     ).not.toThrow()
+  })
+
+  it('lower-cases camelCase collection ids in trigger names', () => {
+    const c = base.connections![0]!
+    const r = validateConfig({ ...base, connections: [{ ...c, source: 'chatRooms', target: 'users/{uid}/userPosts', idField: 'roomId', targetField: 'room' }] })
+    expect(collectionsOf(r).map((p) => triggerName('doc-sync', p))).toEqual(['doc-sync-chatrooms', 'doc-sync-users-userposts'])
+    // a trigger name may not end with a hyphen
+    expect(problemsOf({ ...base, connections: [{ ...c, source: 'category_' }] })).toContainEqual(expect.stringContaining('trigger name "doc-sync-category-"'))
+  })
+
+  it('rejects patterns that can match the same documents', () => {
+    const c = base.connections![0]!
+    const problems = problemsOf({
+      ...base,
+      connections: [c, { ...c, name: 'x', source: 'category', target: 'users/admin/posts', idField: 'categoryId' }, { ...c, name: 'y', source: 'category', target: 'users/{uid}/posts', idField: 'categoryId' }],
+    })
+    expect(problems).toEqual([expect.stringContaining('"users/admin/posts" and "users/{uid}/posts" can match the same documents')])
+  })
+
+  it('rejects reserved ids and field names', () => {
+    const c = base.connections![0]!
+    expect(problemsOf({ ...base, connections: [{ ...c, source: '__meta__' }] })).toContainEqual(expect.stringContaining('not a valid collection ID'))
+    expect(problemsOf({ ...base, connections: [{ ...c, target: 'users/../posts' }] })).toContainEqual(expect.stringContaining('not a valid document ID'))
+    expect(problemsOf({ ...base, connections: [{ ...c, fields: ['__name__'] }] })).toContainEqual(expect.stringContaining('not a valid field path'))
+  })
+
+  it('rejects an idField aggregate whose collection group would count documents of other target parents', () => {
+    const agg = { name: 'post-likes', source: 'shops/{shopId}/users/{uid}/likes', target: 'shops/{shopId}/posts', idField: 'postId', aggregate: 'count' as const, targetField: 'likeCount' }
+    expect(problemsOf({ ...base, connections: [], aggregates: [agg] })).toContainEqual(expect.stringContaining('{uid} that `target` lacks'))
+    // without placeholders on the target, the collection group is unambiguous
+    expect(() => validateConfig({ ...base, connections: [], aggregates: [{ ...agg, source: 'users/{uid}/likes', target: 'post' }] })).not.toThrow()
   })
 
   it('rejects colliding trigger names', () => {

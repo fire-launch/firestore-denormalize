@@ -22,6 +22,15 @@ export interface CollectionPattern {
 
 const SEGMENT = /^[^/]+$/
 const PARAM = /^\{([A-Za-z_][A-Za-z0-9_]*)\}$/
+const RESERVED_ID = /^__.*__$/
+
+/**
+ * Whether `id` can be a Firestore document or collection ID: non-empty, at most 1500 bytes,
+ * no `/`, not `.` or `..`, and not of the form `__name__`.
+ */
+export function isValidDocumentId(id: string): boolean {
+  return id.length > 0 && !id.includes('/') && id !== '.' && id !== '..' && !RESERVED_ID.test(id) && Buffer.byteLength(id, 'utf8') <= 1500
+}
 
 /** Parses a pattern. Throws with a readable message when the shape is wrong. */
 export function parseCollectionPattern(raw: string): CollectionPattern {
@@ -35,6 +44,7 @@ export function parseCollectionPattern(raw: string): CollectionPattern {
     if (!SEGMENT.test(part)) throw new Error(`"${raw}" contains an empty segment`)
     if (i % 2 === 0) {
       if (PARAM.test(part)) throw new Error(`"${raw}": collection ID "${part}" cannot be a placeholder`)
+      if (!isValidDocumentId(part)) throw new Error(`"${raw}": "${part}" is not a valid collection ID`)
       segments.push({ kind: 'collection', id: part })
       return
     }
@@ -47,6 +57,7 @@ export function parseCollectionPattern(raw: string): CollectionPattern {
     } else if (part.includes('{') || part.includes('}')) {
       throw new Error(`"${raw}": "${part}" is not a valid placeholder (use {name})`)
     } else {
+      if (!isValidDocumentId(part)) throw new Error(`"${raw}": "${part}" is not a valid document ID`)
       segments.push({ kind: 'literal', id: part })
     }
   })
@@ -103,18 +114,34 @@ export function isResolvable(pattern: CollectionPattern, params: Record<string, 
 
 /** Eventarc path pattern for documents of this collection, e.g. `users/{uid}/payments/{docId}`. */
 export function eventarcPathPattern(pattern: CollectionPattern): string {
-  const docName = pattern.params.includes('docId') ? 'doc' : 'docId'
+  let docName = 'docId'
+  for (let i = 2; pattern.params.includes(docName); i++) docName = `docId${i}`
   const parts = pattern.segments.map((s) => (s.kind === 'param' ? `{${s.name}}` : s.id))
   return `${parts.join('/')}/{${docName}}`
 }
 
-/** Short identifier for trigger names: literal segments joined by `-`, `_` replaced by `-`. */
+/** Short identifier for trigger names: literal segments joined by `-`, lower-cased, `_` replaced by `-`. */
 export function patternSlug(pattern: CollectionPattern): string {
   return pattern.segments
     .filter((s) => s.kind !== 'param')
     .map((s) => (s as { id: string }).id)
     .join('-')
+    .toLowerCase()
     .replace(/_/g, '-')
+}
+
+/**
+ * Whether two patterns can match the same document: same shape, same collection IDs, and no
+ * document segment where both are different literals (`users/admin/posts` vs `users/{uid}/posts`).
+ */
+export function patternsIntersect(a: CollectionPattern, b: CollectionPattern): boolean {
+  if (a.segments.length !== b.segments.length) return false
+  return a.segments.every((sa, i) => {
+    const sb = b.segments[i]!
+    if (sa.kind === 'collection' || sb.kind === 'collection') return sa.kind === 'collection' && sb.kind === 'collection' && sa.id === sb.id
+    if (sa.kind === 'literal' && sb.kind === 'literal') return sa.id === sb.id
+    return true
+  })
 }
 
 /** Normalizes an Eventarc path pattern for comparison: placeholder names are irrelevant. */

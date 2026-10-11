@@ -109,7 +109,8 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
           mismatched++
           if (m.fixed) fixed++
           mismatches.push(m)
-          logger.info('doc-sync verify: mismatch', { rule: m.rule, document: m.document, field: m.field, actual: m.actual, expected: m.expected, fixed: m.fixed })
+          // Values are not logged (they may hold personal data); they are in the returned `Mismatch` and in `onMismatch`.
+          logger.info('doc-sync verify: mismatch', { rule: m.rule, document: m.document, field: m.field, fixed: m.fixed })
           options.onMismatch?.(m)
         }
         pending = []

@@ -1,6 +1,6 @@
 {
   "name": "firestore-denormalize",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Keep denormalized Firestore documents in sync with one Cloud Run function and per-collection Eventarc triggers.",
   "keywords": [
     "firestore",
@@ -43,6 +43,7 @@
     "dist",
     "README.md",
     "README.ja.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "scripts": {

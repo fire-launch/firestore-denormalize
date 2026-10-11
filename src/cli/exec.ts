@@ -36,11 +36,17 @@ function spawnError(cmd: string, err: NodeJS.ErrnoException): Error {
   return err
 }
 
+/** With a shell, Node joins the arguments unquoted; quote the ones that need it so spaces and metacharacters survive. */
+function shellArgs(args: string[]): string[] {
+  if (!SHELL) return args
+  return args.map((a) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `"${a.replace(/(["%])/g, '^$1')}"`))
+}
+
 export function createRunner(opts: { dryRun: boolean; log: (line: string) => void }): Runner {
   return {
     dryRun: opts.dryRun,
     read(cmd, args) {
-      const r = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: SHELL })
+      const r = spawnSync(cmd, shellArgs(args), { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], shell: SHELL })
       if (r.error) throw spawnError(cmd, r.error)
       if (r.status !== 0) throw new CommandError(formatCommand(cmd, args), r.status, r.stderr)
       return r.stdout
@@ -48,7 +54,7 @@ export function createRunner(opts: { dryRun: boolean; log: (line: string) => voi
     mutate(cmd, args) {
       opts.log(`${opts.dryRun ? '[dry-run] ' : '$ '}${formatCommand(cmd, args)}`)
       if (opts.dryRun) return
-      const r = spawnSync(cmd, args, { stdio: 'inherit', shell: SHELL })
+      const r = spawnSync(cmd, shellArgs(args), { stdio: 'inherit', shell: SHELL })
       if (r.error) throw spawnError(cmd, r.error)
       if (r.status !== 0) throw new CommandError(formatCommand(cmd, args), r.status, '')
     },

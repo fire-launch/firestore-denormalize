@@ -286,14 +286,44 @@ describe('target events (5.3)', () => {
     expect((await post.get()).data()).toEqual({ categoryId: '' })
   })
 
-  it('leaves targetField alone when the new source does not exist', async () => {
+  it('applies onSourceDelete when idField now points at a source that does not exist', async () => {
+    await db.doc('category/c1').set({ name: 'A' })
+    await db.doc('user/u1').set({ name: 'U' })
+    await db.doc('tag/t1').set({ label: 'L' })
+    const post = db.doc('post/p1')
+    await post.set({ categoryId: 'c1', category: { name: 'A' }, authorId: 'u1', author: { name: 'U' }, tagId: 't1', tag: { label: 'L' } })
+    const { handler } = handlerFor()
+    const ev = await change(post, () => post.update({ categoryId: 'missing', authorId: 'missing', tagId: 'missing' }))
+    expect(await invoke(handler, ev)).toBe(204)
+    const data = (await post.get()).data()!
+    expect(data.category).toBeNull() // setNull
+    expect(data.author).toBeUndefined() // deleteField
+    expect(data.tag).toEqual({ label: 'L' }) // nothing
+  })
+
+  it('restores targetField when an application write dropped it', async () => {
     await db.doc('category/c1').set({ name: 'A' })
     const post = db.doc('post/p1')
     await post.set({ categoryId: 'c1', category: { name: 'A' } })
-    const { handler } = handlerFor()
-    const ev = await change(post, () => post.update({ categoryId: 'missing' }))
+    const { handler, logs } = handlerFor()
+    // set() without merge keeps categoryId but loses the copy
+    const ev = await change(post, () => post.set({ categoryId: 'c1', title: 'rewritten' }))
     expect(await invoke(handler, ev)).toBe(204)
-    expect((await post.get()).get('category')).toEqual({ name: 'A' })
+    expect((await post.get()).data()).toEqual({ categoryId: 'c1', title: 'rewritten', category: { name: 'A' } })
+    expect(processed(logs, 'post-category')).toMatchObject({ role: 'target', action: 'write' })
+  })
+
+  it('treats ids that are not valid document ids as unset', async () => {
+    await db.doc('category/c1').set({ name: 'A' })
+    const post = db.doc('post/p1')
+    await post.set({ categoryId: 'c1', category: { name: 'A' } })
+    const { handler, logs } = handlerFor()
+    for (const bad of ['..', '__x__', 'a'.repeat(1501)]) {
+      const ev = await change(post, () => post.update({ categoryId: bad }))
+      expect(await invoke(handler, ev)).toBe(204)
+      expect(processed(logs, 'post-category')).toMatchObject({ action: 'skip' })
+    }
+    expect(logs.filter((l) => l.level === 'warn' && l.message.includes('cannot locate source'))).toHaveLength(3)
   })
 
   it('ignores target deletion', async () => {
@@ -440,6 +470,17 @@ describe('chains (5.5)', () => {
 })
 
 describe('request handling (5.1 / 6)', () => {
+  it('ignores non-Firestore event types and oversized bodies without retrying', async () => {
+    const cat = db.doc('category/c1')
+    await cat.set({ name: 'A' })
+    const { handler, logs } = handlerFor()
+    const ev = await change(cat, () => cat.update({ name: 'B' }))
+    expect(await invoke(handler, { ...ev, headers: { 'ce-type': 'google.cloud.pubsub.topic.v1.messagePublished' } })).toBe(204)
+    expect(logs.at(-1)).toMatchObject({ level: 'warn', message: expect.stringContaining('not a Firestore document event') })
+    expect(await invoke(handler, { ...ev, body: new Uint8Array(17 * 1024 * 1024) })).toBe(204)
+    expect(logs.at(-1)).toMatchObject({ level: 'error', message: expect.stringContaining('failed to decode') })
+  })
+
   it('ignores events for another database', async () => {
     const cat = db.doc('category/c1')
     await db.doc('post/p1').set({ categoryId: 'c1' })

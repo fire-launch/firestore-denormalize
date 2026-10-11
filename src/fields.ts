@@ -37,7 +37,7 @@ export function fieldPathsOverlap(a: string, b: string): boolean {
   return a === b || a.startsWith(`${b}.`) || b.startsWith(`${a}.`)
 }
 
-/** Field path segments may not be empty or contain Firestore's reserved characters. */
+/** Field path segments may not be empty, contain Firestore's reserved characters, or be of the reserved form `__name__`. */
 export function isValidFieldPath(path: string): boolean {
-  return splitFieldPath(path).every((s) => s.length > 0 && !/[~*/[\]]/.test(s))
+  return splitFieldPath(path).every((s) => s.length > 0 && !/[~*/[\]]/.test(s) && !/^__.*__$/.test(s))
 }

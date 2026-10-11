@@ -12,7 +12,7 @@ Usage:
   doc-sync validate [--config <path>] [--strict]
   doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
   doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
-  doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>]
+  doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 
@@ -32,10 +32,10 @@ Options:
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
   --fix                     verify: repair mismatches with conditional writes
   --rule <name>             rebuild/verify: limit to this rule (repeatable)
-  --start-after <path>      rebuild/verify: resume after this target document path
+  --start-after <path>      rebuild/verify: resume after this target document path (use with --rule)
   --page-size <n>           rebuild/verify: documents per page (default 500)
   --url <url>               dev: handler URL, e.g. http://127.0.0.1:5001/<project>/<region>/docSync
-  --emulator-host <h:p>     dev: Firestore emulator (default: $FIRESTORE_EMULATOR_HOST)
+  --emulator-host <h:p>     rebuild/verify/dev: Firestore emulator (default: $FIRESTORE_EMULATOR_HOST)
   -h, --help                Show this help
   -v, --version             Show the version
 
@@ -82,7 +82,9 @@ async function main(argv: string[]): Promise<number> {
   }
 
   const { path, config } = await loadConfig(values.config)
-  const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST || values['emulator-host'])
+  // The flag must take effect for every command that talks to Firestore, or rebuild/verify would use ADC against a real project.
+  if (values['emulator-host']) process.env.FIRESTORE_EMULATOR_HOST = values['emulator-host']
+  const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST)
   const project =
     command === 'validate' || ((command === 'rebuild' || command === 'verify' || command === 'dev') && emulator)
       ? (values.project ?? resolveProject(false) ?? 'demo-doc-sync')

@@ -1,7 +1,6 @@
 export {
   defineConfig,
   validateConfig,
-  resolveConfig,
   collectionsOf,
   triggerName,
   needsCollectionGroupQuery,
@@ -30,21 +29,15 @@ export {
 } from './config.js'
 export {
   createDocSyncHandler,
-  Processor,
   RetriesExhaustedError,
   type DocSyncHandler,
   type DocSyncHandlerOptions,
   type DocSyncRequest,
   type DocSyncResponse,
   type RuleResult,
-  type ConnectionResult,
-  type SyncOptions,
-  type DeletedSource,
-  type CheckResult,
-  type CheckOptions,
 } from './handler.js'
 export { decodeDocumentEventData, DecodeError, type DecodedEvent, type DecodedDocument } from './decode.js'
-export { encodeDocumentEventData, type EncodableDocument } from './encode.js'
+export { encodeDocumentEventData, type EncodableDocument, type EncodeOptions } from './encode.js'
 export { isEqual } from './equal.js'
 export { jsonLogger, type Logger } from './logger.js'
 export {
