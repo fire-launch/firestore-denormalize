@@ -97,7 +97,7 @@ flowchart LR
   H -- "1. read target, note updateTime" --> T
   H -- "2. re-read sources / count() / build()" --> S
   H -- "3. update if changed, conditional on updateTime" --> T
-  C[/doc-sync.config.ts/] -.-> H
+  C[/"config file (e.g. doc-sync.config.ts)"/] -.-> H
   C -.-> CLI["doc-sync CLI<br/>validate · setup · deploy · rebuild · verify · dev"]
   CLI -- triggers, IAM --> E
   CLI -- rebuild / verify --> T
@@ -113,7 +113,7 @@ Requires Node.js 20+, `firebase-admin` 12+, the `gcloud` and `firebase` CLIs, an
 npm install firestore-denormalize
 ```
 
-**1. Config.** Put `doc-sync.config.ts` in `functions/src/` (so `firebase deploy` ships it). A complete example: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts).
+**1. Config.** Put the config file (e.g. `doc-sync.config.ts`; any name works, pass it with `--config`) in `functions/src/` so `firebase deploy` ships it. A complete example: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts).
 
 **2. Function.** Expose the handler as an HTTP function. `invoker` is required; without it the function is public.
 

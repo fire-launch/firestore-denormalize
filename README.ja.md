@@ -87,7 +87,7 @@ post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { 
 
 ```mermaid
 flowchart LR
-  C[/"doc-sync.config.ts"/]
+  C[/"設定ファイル (e.g. doc-sync.config.ts)"/]
   CLI["doc-sync CLI<br/>validate · setup · deploy<br/>rebuild · verify · dev"]
   S[("Firestore<br/>ソースのコレクション")]
   T[("Firestore<br/>ターゲットのコレクション")]
@@ -126,7 +126,7 @@ Node.js 20 以上、`firebase-admin` 12 以上、`gcloud` と `firebase` の CLI
 npm install firestore-denormalize
 ```
 
-**1. 設定。** `doc-sync.config.ts` を `functions/src/` に置きます（`firebase deploy` がそこをデプロイするため）。完全な例: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts)。
+**1. 設定。** 設定ファイル（例: `doc-sync.config.ts`。名前は自由で、`--config` で渡します）を `functions/src/` に置きます（`firebase deploy` がそこをデプロイするため）。完全な例: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts)。
 
 **2. 関数。** ハンドラを HTTP 関数として公開します。`invoker` は必須です。指定しないと関数が公開状態になります。
 

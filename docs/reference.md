@@ -4,7 +4,7 @@
 
 ## Config
 
-`functions/src/doc-sync.config.ts` exports `defineConfig({ ... })`. TypeScript or JavaScript, ESM or CJS. Complete example: [examples/functions/src/doc-sync.config.ts](../examples/functions/src/doc-sync.config.ts).
+The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with `--config`) exports `defineConfig({ ... })`. TypeScript or JavaScript, ESM or CJS. Complete example: [examples/functions/src/doc-sync.config.ts](../examples/functions/src/doc-sync.config.ts).
 
 | Key | Meaning |
 |---|---|
