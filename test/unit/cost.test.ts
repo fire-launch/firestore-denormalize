@@ -95,6 +95,26 @@ describe('estimateCost', () => {
       warnings: [],
     })
   })
+
+  it('adds the base read and a base trigger line for a view with base', () => {
+    const cfg = validateConfig({
+      ...base,
+      rules: [
+        defineView({
+          name: 'post-public',
+          target: 'postPublic',
+          base: 'post',
+          targetFields: ['title'],
+          sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', limit: 3 } },
+          build: ({ base }) => ({ title: base!.get('title') }),
+        }),
+      ],
+    })
+    const cost = estimateCost(cfg.views[0]!)
+    expect(cost.lines[0]).toEqual({ trigger: 'post/{id} changed', reads: '1 target + 1 base + ≤ 3 comments (+ reads inside build)', writes: '≤ 1 (create / update / remove the target)' })
+    expect(cost.lines[1]).toEqual({ trigger: 'post/{postId}/comment/{id} changed', reads: '1 target + 1 base + ≤ 3 comments (+ reads inside build)', writes: '≤ 1' })
+    expect(cost.lines[2]!.trigger).toBe('postPublic/{id} created or deleted')
+  })
 })
 
 describe('writeTriggers / formatChains', () => {

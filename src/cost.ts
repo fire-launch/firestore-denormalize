@@ -60,18 +60,23 @@ function estimateViewCost(rule: ResolvedView): RuleCost {
     if (s.limit !== undefined) return ` + ≤ ${s.limit} ${s.key}`
     return ` + M ${s.key}`
   })
-  const perTarget = `1 target${segments.join('')} (+ reads inside build)`
+  const baseRead = rule.base ? ' + 1 base' : ''
+  const perTarget = `1 target${baseRead}${segments.join('')} (+ reads inside build)`
+  /** Reads of a patch attempt: the target, the base (if any) and the changed document. */
+  const direct = rule.base ? 3 : 2
 
   const lines: CostLine[] = []
   const warnings: string[] = []
   const refFieldNames: string[] = []
+
+  if (rule.base) lines.push({ trigger: `${rule.base}/{id} changed`, reads: perTarget, writes: '≤ 1 (create / update / remove the target)' })
 
   for (const s of rule.sources) {
     const trigger = `${s.collection}/{id} changed`
     if (s.refField !== undefined) {
       refFieldNames.push(s.refField)
       const reads = rule.patch
-        ? `N + N × 2 (+ reads inside patch); if patch returns undefined: N + N × (${perTarget})`
+        ? `N + N × ${direct} (+ reads inside patch); if patch returns undefined: N + N × (${perTarget})`
         : `N + N × (${perTarget})`
       lines.push({ trigger, reads, writes: '≤ N' })
       warnings.push(
@@ -83,10 +88,10 @@ function estimateViewCost(rule: ResolvedView): RuleCost {
     const isIdField = s.idField !== undefined
     const reads = isIdField
       ? rule.patch
-        ? `≤ 2 × 2 (+ reads inside patch); if patch returns undefined: ≤ 2 × (${perTarget})`
+        ? `≤ 2 × ${direct} (+ reads inside patch); if patch returns undefined: ≤ 2 × (${perTarget})`
         : `≤ 2 × (${perTarget})`
       : rule.patch
-        ? `2 (+ reads inside patch); if patch returns undefined: ${perTarget}`
+        ? `${direct} (+ reads inside patch); if patch returns undefined: ${perTarget}`
         : perTarget
     lines.push({ trigger, reads, writes: isIdField ? '≤ 2' : '≤ 1' })
     if (s.limit === undefined && !rule.patch) {
@@ -95,9 +100,10 @@ function estimateViewCost(rule: ResolvedView): RuleCost {
   }
 
   const suffix = refFieldNames.length ? ` or ${refFieldNames.join('/')} changed` : ''
-  lines.push({ trigger: `${rule.target}/{id} created${suffix}`, reads: perTarget, writes: '≤ 1' })
+  const targetEvents = rule.base ? 'created or deleted' : 'created'
+  lines.push({ trigger: `${rule.target}/{id} ${targetEvents}${suffix}`, reads: perTarget, writes: '≤ 1' })
 
-  return { rule: rule.name, kind: 'view', lines, warnings }
+  return { rule: rule.name, kind: rule.kind, lines, warnings }
 }
 
 /** Maximal chains `a -> b -> c` through the write-trigger edges (acyclic: validated configs have no loops). */

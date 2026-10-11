@@ -55,7 +55,9 @@ export function printSummary(ctx: Context): void {
   if (config.views.length) {
     log(`Views (${config.views.length}):`)
     for (const v of config.views) {
-      log(`  ${v.name}: build(${v.sources.map((s) => s.key).join(', ')}) -> ${v.target}.{${[...v.targetFields, ...(v.rest ? ['rest'] : [])].join(',')}}`)
+      const shape = `${v.target}.{${[...v.targetFields, ...(v.rest ? ['rest'] : [])].join(',')}}`
+      const via = v.projection ? `projection of ${v.base}` : `build(${[...(v.base ? ['base'] : []), ...v.sources.map((s) => s.key)].join(', ')})`
+      log(`  ${v.name}: ${via} -> ${shape}${v.base && !v.projection ? ` (base ${v.base}: target exists iff base exists)` : ''}`)
       for (const s of v.sources) {
         const by = s.idField ? `by ${s.idField}` : s.idParam !== undefined ? `by {${s.idParam}}` : `via target.${s.refField}`
         const order = s.orderBy.length ? `, order by ${s.orderBy.map((o) => `${o.field} ${o.direction}`).join(', ')}` : ''
@@ -314,7 +316,8 @@ export async function verify(
     onMismatch: (m) => {
       const actual = m.actual === undefined ? '(absent)' : JSON.stringify(m.actual)
       const expected = m.expected === undefined ? '(absent)' : JSON.stringify(m.expected)
-      log(`  ${m.rule}: ${m.document}.${m.field}  actual=${actual}  expected=${expected}${m.fixed ? '  fixed' : ''}`)
+      const detail = m.issue === 'value' ? `${m.document}.${m.field}  actual=${actual}  expected=${expected}` : `${m.document}  ${m.issue}`
+      log(`  ${m.rule}: ${detail}${m.fixed ? '  fixed' : ''}`)
     },
     onProgress: (p) => log(`  ${p.rule}: scanned ${p.scanned}, mismatched ${p.mismatched}, fixed ${p.fixed}, last ${p.lastPath}`),
   })
