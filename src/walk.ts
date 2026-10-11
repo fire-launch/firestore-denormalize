@@ -1,8 +1,10 @@
 /**
- * Paging loop shared by `rebuild` and `verify`: visits every target document of a rule's
- * target collection(s), in document-name order, `concurrency` at a time within a page.
+ * Paging loop shared by `rebuild` and `verify`: visits every document of a collection
+ * pattern (a rule's target collection(s), or a view's base collection), in document-id
+ * order, `concurrency` at a time within a page.
  */
-import type { DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import type { DocumentReference, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import { FieldPath } from 'firebase-admin/firestore'
 import { type ResolvedConfig, type ResolvedRule, rulesOf } from './config.js'
 import type { ReadCounter } from './counter.js'
 import { type CollectionPattern, matchDocumentPath } from './paths.js'
@@ -12,9 +14,9 @@ export interface WalkOptions {
   pageSize: number
   /** Targets processed in parallel within a page. */
   concurrency: number
-  /** Resume after this target document path. */
+  /** Resume after this document path (a base or a target path; it need not still exist). */
   startAfter?: string
-  /** Receives the page queries (and the `startAfter` lookup). */
+  /** Receives the page queries. */
   counter?: ReadCounter
 }
 
@@ -24,9 +26,11 @@ export interface WalkPage {
 }
 
 /**
- * Visits every document of a collection pattern in document-name order, `concurrency` at a
+ * Visits every document of a collection pattern in document-id order, `concurrency` at a
  * time within a page. Returns the number of documents visited and the path of the last one
- * (pass it back as `startAfter` to resume).
+ * (pass it back as `startAfter` to resume). `startAfter` resumes by reference, not by
+ * reading the cursor document first, so it still works when that document was since
+ * deleted (e.g. an orphan target a previous pass removed).
  */
 export async function walkCollection(
   firestore: Firestore,
@@ -36,13 +40,11 @@ export async function walkCollection(
   onPage?: (progress: { scanned: number; lastPath: string }) => void,
 ): Promise<{ scanned: number; lastPath: string | undefined }> {
   const { pageSize, concurrency } = opts
-  const base = pattern.params.length ? firestore.collectionGroup(pattern.collectionId) : firestore.collection(pattern.raw)
-  let cursor: DocumentSnapshot | undefined
-  if (opts.startAfter) {
-    opts.counter?.doc()
-    cursor = await firestore.doc(opts.startAfter).get()
-    if (!cursor.exists) throw new Error(`cannot resume: ${opts.startAfter} does not exist`)
+  const base = (pattern.params.length ? firestore.collectionGroup(pattern.collectionId) : firestore.collection(pattern.raw)).orderBy(FieldPath.documentId())
+  if (opts.startAfter !== undefined && opts.startAfter.split('/').length % 2 !== 0) {
+    throw new Error(`cannot resume: ${opts.startAfter} is not a document path`)
   }
+  let cursor: DocumentSnapshot | DocumentReference | undefined = opts.startAfter ? firestore.doc(opts.startAfter) : undefined
 
   let scanned = 0
   let lastPath: string | undefined

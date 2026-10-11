@@ -707,4 +707,17 @@ describe('views: rebuild and verify with base', () => {
     expect((await target.get()).exists).toBe(false)
     expect(processed(logs, 'post-public')).toMatchObject({ source: 'comments', action: 'remove', writes: 1 })
   })
+
+  it('resumes after a path that pass 2 itself deleted, without erroring', async () => {
+    await db.doc('postPublic/orphan1').set({ title: 'x' }) // no base for either: pass 2 removes both
+    await db.doc('postPublic/orphan2').set({ title: 'y' })
+    const [r] = await rebuild(cfg, { firestore: db, logger: silentLogger(), pageSize: 1 })
+    expect((await db.doc('postPublic/orphan1').get()).exists).toBe(false)
+    expect((await db.doc('postPublic/orphan2').get()).exists).toBe(false)
+    const lastPath = r!.lastPath!
+    expect(lastPath).toBe('postPublic/orphan2')
+    expect((await db.doc(lastPath).get()).exists).toBe(false) // the last document rebuild visited no longer exists
+    const [resumed] = await rebuild(cfg, { firestore: db, logger: silentLogger(), startAfter: lastPath })
+    expect(resumed).toMatchObject({ scanned: 0, written: 0 })
+  })
 })

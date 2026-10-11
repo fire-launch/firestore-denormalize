@@ -22,7 +22,11 @@ export interface VerifyOptions {
   concurrency?: number
   /** Repair mismatches (conditional writes, same as the handler). Default false. */
   fix?: boolean
-  /** Resume after this target document path (applies to the first rule processed). */
+  /**
+   * Resume after this document path (applies to the first rule processed). For a view with
+   * `base`, this may be a base path (resumes pass 1, then runs pass 2 in full) or a target
+   * path (skips pass 1, resumes pass 2); it need not still exist.
+   */
   startAfter?: string
   maxRetries?: number
   /** Called for every mismatch as soon as it is found (after the fix attempt when `fix` is set). */
@@ -49,13 +53,13 @@ export interface Mismatch {
 
 export interface VerifyProgress extends ReadCounts {
   rule: string
-  /** Targets inspected so far. */
+  /** Documents inspected so far: targets, plus base documents for a view with `base`. */
   scanned: number
-  /** Targets whose value differed. */
+  /** Mismatches found so far: one per differing field, plus one per missing or orphan target. */
   mismatched: number
   /** Mismatches repaired (only with `fix`). */
   fixed: number
-  /** Path of the last target processed; pass it to `startAfter` to resume. */
+  /** Path of the last document processed (a base or a target path); pass it to `startAfter` to resume. */
   lastPath: string | undefined
 }
 

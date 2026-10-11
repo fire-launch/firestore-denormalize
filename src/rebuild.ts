@@ -22,7 +22,11 @@ export interface RebuildOptions {
   concurrency?: number
   /** Report what would change without writing. */
   dryRun?: boolean
-  /** Resume after this target document path (applies to the first rule processed). */
+  /**
+   * Resume after this document path (applies to the first rule processed). For a view with
+   * `base`, this may be a base path (resumes pass 1, then runs pass 2 in full) or a target
+   * path (skips pass 1, resumes pass 2); it need not still exist.
+   */
   startAfter?: string
   maxRetries?: number
   /** Called after every page. */
@@ -31,11 +35,11 @@ export interface RebuildOptions {
 
 export interface RebuildProgress extends ReadCounts {
   rule: string
-  /** Targets inspected so far. */
+  /** Documents inspected so far: targets, plus base documents for a view with `base`. */
   scanned: number
   /** Targets written (or that would be written with `dryRun`). */
   written: number
-  /** Path of the last target processed; pass it to `startAfter` to resume. */
+  /** Path of the last document processed (a base or a target path); pass it to `startAfter` to resume. */
   lastPath: string | undefined
 }
 
