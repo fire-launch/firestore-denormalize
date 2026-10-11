@@ -6,6 +6,15 @@ Keep derived Firestore data correct with **one Cloud Run function and one Eventa
 
 You describe rules in one TypeScript file. The function re-reads the source documents on every change and writes the derived value only if it differs, conditional on the target's `updateTime`. Duplicate, late or reordered events cannot corrupt the result.
 
+**Why this instead of Extensions or your own triggers**
+
+- One function and one trigger per collection for any number of rules, instead of two functions per `firestore-connect-*` extension or one trigger per rule.
+- Correct under Eventarc's at-least-once, unordered delivery: values are re-read, never taken from the event, and never `increment()`ed.
+- `rebuild` backfills existing data and `verify` proves it is correct, with the same code the live handler runs.
+- `validate` prints the reads and writes one event causes before anything is deployed.
+
+**Status**: 0.x. The API is stable in shape but may still change before 1.0, and the package has not yet been validated in a production project.
+
 ## Three kinds of rules
 
 **Copy** (`connections`): fields of one document, copied into every document that points at it.
@@ -104,15 +113,18 @@ Requires Node.js 20+, `firebase-admin` 12+, the `gcloud` and `firebase` CLIs, an
 npm install firestore-denormalize
 ```
 
-**1. Config.** Put `doc-sync.config.ts` in `functions/src/` (so `firebase deploy` ships it). A complete example: [examples/functions/doc-sync.config.ts](./examples/functions/doc-sync.config.ts).
+**1. Config.** Put `doc-sync.config.ts` in `functions/src/` (so `firebase deploy` ships it). A complete example: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts).
 
 **2. Function.** Expose the handler as an HTTP function. `invoker` is required; without it the function is public.
 
 ```ts
 // functions/src/index.ts
+import { initializeApp } from 'firebase-admin/app'
 import { onRequest } from 'firebase-functions/v2/https'
 import { createDocSyncHandler } from 'firestore-denormalize'
 import config from './doc-sync.config'
+
+initializeApp()
 
 export const docSync = onRequest(
   { region: 'asia-northeast1', invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com' },
@@ -146,7 +158,7 @@ doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... 
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
-`rebuild`, `verify` and `dev` use Application Default Credentials, or the Firestore emulator when `FIRESTORE_EMULATOR_HOST` / `--emulator-host` is set. Flag details: [reference](./docs/reference.md#cli).
+`validate` also prints, per rule, the reads and writes one event causes (as formulas over the number of matching targets) and warns about expensive shapes, so cost is visible before deploy. `rebuild`, `verify` and `dev` use Application Default Credentials, or the Firestore emulator when `FIRESTORE_EMULATOR_HOST` / `--emulator-host` is set. Flag details: [reference](./docs/reference.md#cli).
 
 ## Local development
 

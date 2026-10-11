@@ -6,6 +6,15 @@ Firestore の派生データを、**Cloud Run 関数 1 つ ＋ コレクショ�
 
 ルールは 1 つの TypeScript ファイルに記述します。関数は変更のたびにソースドキュメントを読み直し、ターゲットの `updateTime` を条件に、値が異なる場合だけ派生値を書き込みます。重複・遅延・順序が入れ替わったイベントが結果を壊すことはありません。
 
+**Extensions や自前のトリガーではなく、これを選ぶ理由**
+
+- ルールが何個あっても関数は 1 つ、トリガーはコレクションごとに 1 本です。`firestore-connect-*` 系 Extension の「ルール 1 つに関数 2 つ」や、ルールごとのトリガーは要りません。
+- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。値はイベントから取らずに読み直し、`increment()` も使いません。
+- `rebuild` が既存データをバックフィルし、`verify` が正しさを検証します。どちらも本番のハンドラと同じコードで動きます。
+- `validate` が、デプロイ前に 1 イベントあたりの読み書き量を式で示します。
+
+**ステータス**: 0.x です。API の形は固まっていますが 1.0 までに変わる可能性があり、本番プロジェクトでの検証はまだです。
+
 ## 3 つのルール
 
 **コピー**（`connections`）: 1 文書のフィールドを、それを指すすべての文書にコピーします。
@@ -117,15 +126,18 @@ Node.js 20 以上、`firebase-admin` 12 以上、`gcloud` と `firebase` の CLI
 npm install firestore-denormalize
 ```
 
-**1. 設定。** `doc-sync.config.ts` を `functions/src/` に置きます（`firebase deploy` がそこをデプロイするため）。完全な例: [examples/functions/doc-sync.config.ts](./examples/functions/doc-sync.config.ts)。
+**1. 設定。** `doc-sync.config.ts` を `functions/src/` に置きます（`firebase deploy` がそこをデプロイするため）。完全な例: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts)。
 
 **2. 関数。** ハンドラを HTTP 関数として公開します。`invoker` は必須です。指定しないと関数が公開状態になります。
 
 ```ts
 // functions/src/index.ts
+import { initializeApp } from 'firebase-admin/app'
 import { onRequest } from 'firebase-functions/v2/https'
 import { createDocSyncHandler } from 'firestore-denormalize'
 import config from './doc-sync.config'
+
+initializeApp()
 
 export const docSync = onRequest(
   { region: 'asia-northeast1', invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com' },
@@ -159,7 +171,7 @@ doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... 
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
-`rebuild`、`verify`、`dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` / `--emulator-host` を設定すると Firestore エミュレータを使います。フラグの詳細: [リファレンス](./docs/reference.ja.md#cli)。
+`validate` はルールごとに 1 イベントが引き起こす読み書き量を（該当ターゲット数の式で）表示し、コストの高い形を警告するので、デプロイ前にコストが見えます。`rebuild`、`verify`、`dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` / `--emulator-host` を設定すると Firestore エミュレータを使います。フラグの詳細: [リファレンス](./docs/reference.ja.md#cli)。
 
 ## ローカル開発
 

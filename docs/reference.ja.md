@@ -4,7 +4,7 @@
 
 ## 設定
 
-`functions/src/doc-sync.config.ts` は `defineConfig({ ... })` をエクスポートします。TypeScript でも JavaScript でも、ESM でも CJS でも構いません。完全な例: [examples/functions/doc-sync.config.ts](../examples/functions/doc-sync.config.ts)。
+`functions/src/doc-sync.config.ts` は `defineConfig({ ... })` をエクスポートします。TypeScript でも JavaScript でも、ESM でも CJS でも構いません。完全な例: [examples/functions/src/doc-sync.config.ts](../examples/functions/src/doc-sync.config.ts)。
 
 | キー | 意味 |
 |---|---|
