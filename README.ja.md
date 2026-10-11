@@ -1,23 +1,24 @@
 # firestore-denormalize
 
-Firestore の派生データを、**Cloud Run 関数 1 つ ＋ コレクションごとの Eventarc トリガー**で正しく保ちます。
+Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 つ ＋ コレクションごとの Eventarc トリガー**で正しく処理します。
 
 [English README](./README.md) · [リファレンス](./docs/reference.ja.md) · [Changelog](./CHANGELOG.md)
 
-ルールは 1 つの TypeScript ファイルに記述します。関数は変更のたびにソースドキュメントを読み直し、ターゲットの `updateTime` を条件に、値が異なる場合だけ派生値を書き込みます。重複・遅延・順序が入れ替わったイベントが結果を壊すことはありません。
+## ステータス
+0.x ベータ版です。破壊的変更が起こる可能性があります。
 
-**Extensions や自前のトリガーではなく、これを選ぶ理由**
+## 特徴
 
-- ルールが何個あっても関数は 1 つ、トリガーはコレクションごとに 1 本です。`firestore-connect-*` 系 Extension の「ルール 1 つに関数 2 つ」や、ルールごとのトリガーは要りません。
-- Eventarc の at-least-once・順序保証なしの配信でも正しく収束します。値はイベントから取らずに読み直し、`increment()` も使いません。
-- `rebuild` が既存データをバックフィルし、`verify` が正しさを検証します。どちらも本番のハンドラと同じコードで動きます。
-- `validate` が、デプロイ前に 1 イベントあたりの読み書き量を式で示します。
+- 👍 一つの関数で全てのコレクションのデータ同期を行います。関数の見通しが良くなるだけでなく、一つのインスタンスを起動しつづけるだけで、コールドスタートがなく迅速な同期を処理できます。
+- 👍 functionsでデータ同期を行うことで、クライアントの書き込みルールをシンプルに保てます。
+- 👍 Eventarc の 配信条件「最低1回・順序保証なし」を正しく処理し意図通りのデータを同期します。値はイベントから取らずに読み直し、`increment()` も使いません。
+- 👍 `rebuild` により既存データをバックフィル可能です
+- 👍 `verify` により保存データに同期漏れがないかの確認も可能です。
+- 👍 `validate` により、デプロイ前に 1 イベントあたりの読み書き量を見積もれます
 
-**ステータス**: 0.x です。API の形は固まっていますが 1.0 までに変わる可能性があり、本番プロジェクトでの検証はまだです。
+## 本ライブラリでできること
 
-## 3 つのルール
-
-**コピー**（`connections`）: 1 文書のフィールドを、それを指すすべての文書にコピーします。
+**コピー**（`connections`）: ドキュメントのフィールドを、関連ドキュメントにコピーします。
 
 ```ts
 {
@@ -37,7 +38,7 @@ post/p1       { title: 'Hello', categoryId: 'c1' }
 post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
 ```
 
-**件数・合計**（`aggregates`）: ターゲットに属する文書についての数値を、常に `count()` / `sum()` で再計算します。
+**件数・合計**（`aggregates`）: コレクション内のドキュメント数や特定フィールドの合計値を同期します
 
 ```ts
 {
@@ -56,7 +57,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**ビュー**（`views`）: 自前の `build` が 1 つ以上のソースから計算する値です。最新 N 件のリスト、ID をキーにしたマップ、サマリーなどに使います。
+**ビュー**（`views`）: 同期先/同期元の変更を検知し、任意のフィールドを組み立てます。最新 N 件のリスト、ID をキーにしたマップ、サマリーなどに使います。
 
 ```ts
 defineView({
@@ -142,7 +143,7 @@ initializeApp()
 export const docSync = onRequest(
   {
     region: 'asia-northeast1',
-    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com'
   },
   createDocSyncHandler(config),
 )
@@ -185,7 +186,9 @@ doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... 
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
-`validate` はルールごとに 1 イベントが引き起こす読み書き量を（該当ターゲット数の式で）表示し、コストの高い形を警告するので、デプロイ前にコストが見えます。`rebuild`、`verify`、`dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` / `--emulator-host` を設定すると Firestore エミュレータを使います。フラグの詳細: [リファレンス](./docs/reference.ja.md#cli)。
+`validate` はルールごとに 1 イベントが引き起こす読み書き量を（該当ターゲット数の式で）表示し、コストの高い形を警告するので、デプロイ前にコストが確認できます。
+
+`rebuild`、`verify`、`dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` / `--emulator-host` を設定すると Firestore エミュレータを使います。フラグの詳細は[リファレンス](./docs/reference.ja.md#cli)を確認してください。
 
 ## ローカル開発
 

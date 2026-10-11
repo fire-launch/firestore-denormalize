@@ -1,23 +1,25 @@
 # firestore-denormalize
 
-Keep derived Firestore data correct with **one Cloud Run function and one Eventarc trigger per collection**.
+Keep data in sync between Firestore documents with **one Cloud Run function and one Eventarc trigger per collection**.
 
 [日本語版 README](./README.ja.md) · [Reference](./docs/reference.md) · [Changelog](./CHANGELOG.md)
 
-You describe rules in one TypeScript file. The function re-reads the source documents on every change and writes the derived value only if it differs, conditional on the target's `updateTime`. Duplicate, late or reordered events cannot corrupt the result.
+## Status
 
-**Why this instead of Extensions or your own triggers**
+0.x beta. Breaking changes may still happen.
 
-- One function and one trigger per collection for any number of rules, instead of two functions per `firestore-connect-*` extension or one trigger per rule.
-- Correct under Eventarc's at-least-once, unordered delivery: values are re-read, never taken from the event, and never `increment()`ed.
-- `rebuild` backfills existing data and `verify` proves it is correct, with the same code the live handler runs.
-- `validate` prints the reads and writes one event causes before anything is deployed.
+## Features
 
-**Status**: 0.x. The API is stable in shape but may still change before 1.0, and the package has not yet been validated in a production project.
+- 👍 One function syncs every collection. The code stays easy to follow, and a single always-on instance handles the sync quickly with no cold starts.
+- 👍 Syncing in Cloud Functions keeps the client-side write rules simple.
+- 👍 Handles Eventarc's delivery guarantees (at least once, no ordering) correctly and syncs exactly the intended data. Values are re-read rather than taken from the event, and `increment()` is never used.
+- 👍 `rebuild` backfills existing data.
+- 👍 `verify` checks stored data for anything the sync missed.
+- 👍 `validate` estimates the reads and writes per event before you deploy.
 
-## Three kinds of rules
+## What this library does
 
-**Copy** (`connections`): fields of one document, copied into every document that points at it.
+**Copy** (`connections`): copies fields of a document into related documents.
 
 ```ts
 {
@@ -37,7 +39,7 @@ post/p1       { title: 'Hello', categoryId: 'c1' }
 post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
 ```
 
-**Count / sum** (`aggregates`): a number over the documents that belong to the target, always recomputed with `count()` / `sum()`.
+**Count / sum** (`aggregates`): keeps the number of documents in a collection, or the sum of a field, in sync.
 
 ```ts
 {
@@ -56,7 +58,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**View** (`views`): a value your own `build` computes from one or more sources. For latest-N lists, maps keyed by id, summaries.
+**View** (`views`): reacts to changes on the target or its sources and assembles any field you like. For latest-N lists, maps keyed by id, summaries.
 
 ```ts
 defineView({
@@ -142,7 +144,7 @@ initializeApp()
 export const docSync = onRequest(
   {
     region: 'asia-northeast1',
-    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com'
   },
   createDocSyncHandler(config),
 )
@@ -185,7 +187,9 @@ doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... 
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
-`validate` also prints, per rule, the reads and writes one event causes (as formulas over the number of matching targets) and warns about expensive shapes, so cost is visible before deploy. `rebuild`, `verify` and `dev` use Application Default Credentials, or the Firestore emulator when `FIRESTORE_EMULATOR_HOST` / `--emulator-host` is set. Flag details: [reference](./docs/reference.md#cli).
+`validate` prints, per rule, the reads and writes one event causes (as formulas over the number of matching targets) and warns about expensive shapes, so cost is visible before deploy.
+
+`rebuild`, `verify` and `dev` use Application Default Credentials, or the Firestore emulator when `FIRESTORE_EMULATOR_HOST` / `--emulator-host` is set. See the [reference](./docs/reference.md#cli) for flag details.
 
 ## Local development
 
