@@ -54,13 +54,13 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 
 - `orderBy`: `['createdAt', ['score', 'desc']]`. `limit`: max documents read. `watch`: source fields that trigger a recompute (default: any change); `idField` and `orderBy` fields are always watched.
 - `build` / `patch` results: `undefined` map entries are dropped, `undefined` array elements become `null`.
-- `change.after` is a fresh read of the changed document, `undefined` if it was deleted or no longer belongs to this target. `change.before` is the event's previous state. `patch` must be idempotent and key items by document ID; `firestore` is for a small extra read (e.g. `limit(1)` to refill a latest-N list).
+- `change.after` is a fresh read of the changed document (`undefined` if it was deleted or no longer belongs to this target). `patch` must be idempotent and key items by document ID.
 - Target side: recomputed on create, when a `refField` changes, and when `targetField` was removed. Other target fields `build` reads are not watched.
 - `rebuild` / `verify` always use `build`.
 
 ### Validation
 
-`validateConfig` (and every CLI command) rejects: duplicate rule names; two rules writing overlapping fields of one collection; a written field used as `idField` / `refField`; unresolvable placeholders; a collection-group aggregate whose target has placeholders; malformed or reserved IDs and field names (`__x__`, `.`, `..`); two patterns matching the same documents (`users/admin/posts` and `users/{uid}/posts`); loops where one rule's write triggers the next back around; colliding trigger names (collection IDs lower-cased, `_` → `-`).
+`validateConfig` (run by every CLI command) rejects duplicate names, overlapping writes to one collection, unresolvable placeholders, patterns that match the same documents, and rule loops.
 
 ### Typed config
 
@@ -69,7 +69,7 @@ type Collections = { post: Post; category: Category; 'post/{postId}/comment': Co
 const { defineConfig, defineView } = typed<Collections>()
 ```
 
-Checked at compile time: `source` / `target` / `collection` are keys of `Collections`; `fields`, `watch`, `orderBy` are field paths of that document (dotted, up to 5 levels); `idField` / `refField` are string fields; `sum` and aggregate `targetField` are numeric; `idParam` is a placeholder of the source path; a view's `targetField` exists on the target and `build` / `patch` return its type; `sources.<key>` is `QueryDocumentSnapshot<Doc>[]`. Both functions are identities at runtime.
+Collection names, field paths, `idParam` and the `build` return type are checked against your document types at compile time. Both functions are identities at runtime.
 
 ## Handler
 
@@ -84,7 +84,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | `maxRetries` | 5 | Redos of a target whose conditional write failed |
 | `pageSize` | 500 | Target query page size |
 
-The handler is `(req, res) => Promise<void>`: works with `onRequest`, Express or Node's `http`. It does not depend on `firebase-functions`.
+The handler is `(req, res) => Promise<void>` and also works with Express or Node's `http`.
 
 ## CLI
 
@@ -100,9 +100,7 @@ The handler is `(req, res) => Promise<void>`: works with `onRequest`, Express or
 - `--config` defaults to `./doc-sync.config.ts`; `--project` to `$GOOGLE_CLOUD_PROJECT`, then gcloud's active project.
 - `rebuild` / `verify` / `dev` use Application Default Credentials, or the emulator when `FIRESTORE_EMULATOR_HOST` or `--emulator-host` is set.
 - `--start-after` applies to the first rule processed: use it with `--rule`.
-- `--dry-run`: `setup` / `deploy` print the `gcloud` commands; `rebuild` reports without writing.
 - Changing `region` leaves the old triggers in place; delete them by hand or run `deploy` with the old config first.
-- `verify` prints document values to stdout; the library log line carries only path and field.
 
 ## How a change is processed
 
@@ -118,7 +116,6 @@ Every rule whose `source` or `target` is the event's collection runs. Source-sid
 | View target changed | not a create, no `refField` changed, `targetField` still present | `build` |
 
 - Every write is `update(..., { lastUpdateTime })` with the `updateTime` read before the sources. A failed precondition redoes that target from the read, up to `maxRetries`, then the request fails with 500.
-- Values are compared deeply (`Timestamp`, `GeoPoint`, `DocumentReference`, bytes), so the handler's own writes are no-ops and chains like `area → shop.area → post.shop.area` terminate.
 
 | Response | When |
 |---|---|
@@ -129,33 +126,24 @@ Every rule whose `source` or `target` is the event's collection runs. Source-sid
 
 One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view source key), `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs` (whole event). A failed rule logs `doc-sync: failed, will be retried by Eventarc` with `error`.
 
-Read counters follow Firestore billing: 1 per document read (missing included), 1 per document a query returned (min 1 per query), aggregations separately. Reads inside `build` / `patch` count when made through the `firestore` in the context.
-
 ## Cost estimate
 
-`validate` prints per rule the reads and writes one event causes as formulas over `N` (targets matching the changed source) and `M` (source documents of one target), e.g. `reads N + 1, writes ≤ N`. Reads inside `build` / `patch` show as `(+ reads inside build)`; the handler logs the real counts.
-
-Warnings: a `refField` view source fans out (one change rebuilds every target pointing at it); a many-to-one view source without `limit` and without `patch` reads all `M` documents per event. `--strict` turns warnings into exit code 1.
+`validate` prints per rule the reads and writes one event causes, as formulas over `N` (matching targets) and `M` (source documents per target), and warns about `refField` view sources (fan-out) and many-to-one view sources with neither `limit` nor `patch`. `--strict` turns warnings into exit code 1.
 
 ## Known limitations
 
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
 - A `targetField` overwritten by the application keeps the wrong value until the source changes or `rebuild` / `verify --fix`; a removed one is repaired on the next event.
 - Target queries need the single-field index on `idField`; collection-group queries (`validate` lists them) need a collection-group index; `idField` + `orderBy` in a view needs a composite index. Firestore prints the creation link on first use.
-- Cost per event: connections `N + 1` reads; aggregates one aggregation per affected target; views one target read plus one read per source document returned (≤ `limit`, else `M`), or 2 reads with `patch`.
 - Permanent failures in `build` / `patch` or a missing index return 500 and are redelivered for up to 24 hours; watch the `doc-sync: failed` log line.
-- Latency is Eventarc's (typically under a few seconds).
 
 ## Security
 
 - The handler does not authenticate. Restrict invocation to the trigger SA: `invoker:` in `onRequest`, or `--no-allow-unauthenticated` + `roles/run.invoker` on Cloud Run. Without it the function is public.
 - A forged or replayed request can only force recomputation (reads). Values are re-read from the real sources; `patch` gets a fresh, membership-checked read, never request data.
-- Requests must carry a Firestore `ce-type`, stay under 16 MiB and 20 nesting levels; anything else is dropped with 204.
 - `setup` grants the trigger SA exactly `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the service.
 - The function's runtime SA needs Firestore read/write (`roles/datastore.user`) and runs your `build` / `patch`; use a dedicated SA, not the default compute one.
 - Fan-out has no per-event cap; control it with `validate` warnings, `maxInstances`, `timeoutSeconds`.
-- Two configs with the same `name` in one project and region fight over the same triggers.
-- The CLI runs `gcloud` / `firebase` with argument arrays (no shell on POSIX; quoted on Windows) and loads the config with `jiti`, with your credentials.
 - `verify` output and `Mismatch` objects contain document values.
 
 ## Recommended function settings

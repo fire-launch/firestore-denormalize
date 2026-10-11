@@ -54,13 +54,13 @@
 
 - `orderBy`: `['createdAt', ['score', 'desc']]`。`limit`: 読み取るドキュメントの最大数。`watch`: 再計算のきっかけになるソースのフィールド（既定: どのフィールドの変更でも再計算）。`idField` と `orderBy` のフィールドは常に監視されます。
 - `build` / `patch` の戻り値: マップのエントリが `undefined` なら取り除かれ、配列の要素が `undefined` なら `null` になります。
-- `change.after` は変更されたドキュメントを読み直した現在の状態で、削除された場合やこのターゲットに属さなくなった場合は `undefined` になります。`change.before` はイベント発生時点の以前の状態です。`patch` は冪等で、項目をドキュメント ID でキーにしなければなりません。`firestore` は少量の追加読み取り（例: 「最新 N 件」リストを `limit(1)` で補充する）のためのものです。
+- `change.after` は変更されたドキュメントを読み直した現在の状態です（削除された場合や、このターゲットに属さなくなった場合は `undefined`）。`patch` は冪等で、ドキュメント ID をキーにしてください。
 - ターゲット側: 作成時、`refField` が変わったとき、`targetField` が削除されたときに再計算されます。`build` が読む他のターゲットフィールドは監視されません。
 - `rebuild` / `verify` は常に `build` を使います。
 
 ### バリデーション
 
-`validateConfig`（および全 CLI コマンド）は次を拒否します: ルール名の重複、1 つのコレクションの重なるフィールドへの 2 つのルールによる書き込み、`idField` / `refField` として使われているフィールドへの書き込み、解決できないプレースホルダ、ターゲットにプレースホルダを持つコレクショングループ集計、不正または予約された ID・フィールド名（`__x__`、`.`、`..`）、同じドキュメントにマッチする 2 つのパターン（`users/admin/posts` と `users/{uid}/posts`）、あるルールの書き込みが次のルールを起動して一周して戻ってくるループ、衝突するトリガー名（コレクション ID を小文字化し `_` を `-` にしたもの）。
+`validateConfig`（全 CLI コマンドが実行します）は、ルール名の重複、同じコレクションへの重なる書き込み、解決できないプレースホルダ、同じドキュメントにマッチするパターン、ルールのループを拒否します。
 
 ### 型付きの設定
 
@@ -69,7 +69,7 @@ type Collections = { post: Post; category: Category; 'post/{postId}/comment': Co
 const { defineConfig, defineView } = typed<Collections>()
 ```
 
-コンパイル時に検査されるのは: `source` / `target` / `collection` が `Collections` のキーであること、`fields`、`watch`、`orderBy` がそのドキュメントのフィールドパスであること（ドット区切りで最大 5 階層）、`idField` / `refField` が string のフィールドであること、`sum` と集計の `targetField` が数値であること、`idParam` がソースパスのプレースホルダであること、ビューの `targetField` がターゲットに存在し `build` / `patch` がその型を返すこと、`sources.<key>` が `QueryDocumentSnapshot<Doc>[]` であることです。どちらの関数も実行時には恒等関数です。
+コレクション名、フィールドパス、`idParam`、`build` の戻り値の型が、ドキュメントの型に対してコンパイル時に検査されます。どちらの関数も実行時には何もしません。
 
 ## ハンドラ
 
@@ -84,7 +84,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | `maxRetries` | 5 | 条件付き書き込みが失敗したターゲットのやり直し回数 |
 | `pageSize` | 500 | ターゲット検索のページサイズ |
 
-ハンドラは `(req, res) => Promise<void>` です。`onRequest`、Express、Node の `http` のいずれでも動きます。`firebase-functions` には依存しません。
+ハンドラは `(req, res) => Promise<void>` で、Express や Node の `http` でも使えます。
 
 ## CLI
 
@@ -100,9 +100,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 - `--config` の既定は `./doc-sync.config.ts`、`--project` の既定は `$GOOGLE_CLOUD_PROJECT`、次いで gcloud のアクティブなプロジェクトです。
 - `rebuild` / `verify` / `dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` または `--emulator-host` が設定されていればエミュレータを使います。
 - `--start-after` は最初に処理するルールにしか効きません。`--rule` と組み合わせて使ってください。
-- `--dry-run`: `setup` / `deploy` では `gcloud` コマンドを表示するだけになり、`rebuild` では書き込まずに結果を報告します。
 - `region` を変更すると古いトリガーがそのまま残ります。手動で削除するか、新しい設定に切り替える前に古い設定で `deploy` を実行してください。
-- `verify` はドキュメントの値を標準出力に表示しますが、ライブラリのログ行にはパスとフィールドしか含まれません。
 
 ## 変更はこう処理される
 
@@ -118,7 +116,6 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | view のターゲットが変わった | 作成イベントではなく、`refField` も変わらず、`targetField` が残っている | `build` を実行します |
 
 - すべての書き込みは `update(..., { lastUpdateTime })` で、`updateTime` はソースを読む前に読み取ったものです。前提条件が失敗すると、そのターゲットを読み直しからやり直します。これを `maxRetries` 回まで繰り返し、それでも失敗すればリクエストは 500 で失敗します。
-- 値は深く比較されます（`Timestamp`、`GeoPoint`、`DocumentReference`、バイト列を含む）。そのためハンドラ自身の書き込みは no-op になり、`area → shop.area → post.shop.area` のような連鎖も必ず停止します。
 
 | レスポンス | 条件 |
 |---|---|
@@ -129,33 +126,24 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 
 1 イベント・1 ルールにつき 1 行の JSON ログを出力します: `eventId`、`rule`、`kind`、`source`（ビューのソースキー）、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`reads`、`queries`、`aggregations`、`durationMs`（イベント全体の時間）。失敗したルールは `error` 付きで `doc-sync: failed, will be retried by Eventarc` をログに出します。
 
-読み取りのカウンタは Firestore の課金に合わせています: ドキュメント読み取り 1 件につき 1（存在しないドキュメントも含む）、クエリが返したドキュメント 1 件につき 1（クエリ 1 回につき最低 1）、集計は別枠です。`build` / `patch` の中での読み取りは、コンテキストの `firestore` を通して行った場合にカウントされます。
-
 ## コストの見積もり
 
-`validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（変更されたソースにマッチするターゲットの数）と `M`（1 つのターゲットに属するソースドキュメントの数）の式として表示します（例: `reads N + 1, writes ≤ N`）。`build` / `patch` の中での読み取りは `(+ reads inside build)` のように表示され、ハンドラは実際の件数をログに出します。
-
-警告: `refField` のビューのソースはファンアウトします（1 件の変更が、それを指す全ターゲットを再計算させます）。`limit` も `patch` も指定していない多対一のビューのソースは、イベントごとに `M` 件のドキュメントをすべて読みます。`--strict` を付けると、警告があれば終了コード 1 になります。
+`validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（マッチするターゲット数）と `M`（ターゲット 1 件あたりのソース文書数）の式で表示し、`refField` のビューのソース（ファンアウト）と、`limit` も `patch` も無い多対一のビューのソースを警告します。`--strict` で警告を終了コード 1 にできます。
 
 ## 既知の制約
 
 - ソースが削除されたときにターゲットは削除されません。`setNull` または `deleteField` を使ってください。
 - アプリが上書きした `targetField` は、ソースが次に変わるか `rebuild` / `verify --fix` を実行するまで誤った値のままです。フィールドが削除された場合は、次のイベントで直ります。
 - ターゲット検索には `idField` の単一フィールドインデックスが必要です。コレクショングループクエリ（`validate` が一覧します）にはコレクショングループインデックスが必要です。ビューで `idField` と `orderBy` を併用する場合は複合インデックスが必要です。初回実行時に Firestore が作成用のリンクを表示します。
-- 1 イベントあたりのコスト: connection は `N + 1` 回の読み取り、aggregate は影響を受けるターゲット 1 つにつき集計 1 回、view はターゲット読み取り 1 回に加えて返ってきたソースドキュメント 1 件につき 1 回の読み取り（`limit` があればその上限、なければ `M` 件）、`patch` が使えた場合は読み取り 2 回です。
 - `build` / `patch` での恒久的な失敗やインデックス不足は 500 を返し、最大 24 時間再送されます。`doc-sync: failed` のログ行を監視してください。
-- 遅延は Eventarc 側のものです（通常は数秒未満）。
 
 ## セキュリティ
 
 - ハンドラはリクエストを認証しません。トリガー用サービスアカウントだけが呼べるように制限してください: `onRequest` の `invoker:`、または Cloud Run での `--no-allow-unauthenticated` + `roles/run.invoker` です。これがないと関数は公開状態になります。
 - 偽造・再送されたリクエストができるのは、再計算(読み取り)を強制することだけです。値は常に本物のソースから読み直され、`patch` が受け取るのもリクエストのデータではなく、メンバーシップを確認した上での読み直しです。
-- リクエストは Firestore の `ce-type` を持ち、16 MiB・20 階層のネスト以内でなければなりません。それ以外は 204 で捨てられます。
 - `setup` がトリガー用サービスアカウントに付与するのは、プロジェクトへの `roles/eventarc.eventReceiver` とサービスへの `roles/run.invoker` だけです。
 - 関数のランタイム用サービスアカウントには Firestore の読み書き権限（`roles/datastore.user`）が必要で、あなたの `build` / `patch` を実行します。既定のコンピュート用サービスアカウントではなく専用のものを使ってください。
 - ファンアウトにはイベント単位の上限がありません。`validate` の警告、`maxInstances`、`timeoutSeconds` で制御してください。
-- 同じプロジェクト・リージョンに同じ `name` の設定が 2 つあると、同じトリガーを取り合います。
-- CLI は `gcloud` / `firebase` を引数配列として実行します（POSIX ではシェルを経由せず、Windows ではクォートします）。設定の読み込みには `jiti` を使い、あなた自身の権限で実行されます。
 - `verify` の出力と `Mismatch` オブジェクトにはドキュメントの値が含まれます。
 
 ## 推奨する関数の設定
