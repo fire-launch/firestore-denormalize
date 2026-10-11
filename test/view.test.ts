@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
-import { createDocSyncHandler, defineConfig, defineView, rebuild, verify, type DocSyncConfig } from '../src/index.js'
+import { createDocSyncHandler, defineAggregate, defineConfig, defineView, rebuild, verify, type DocSyncConfig } from '../src/index.js'
 import { change, clearFirestore, firestore, invoke, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -719,5 +719,50 @@ describe('views: rebuild and verify with base', () => {
     expect((await db.doc(lastPath).get()).exists).toBe(false) // the last document rebuild visited no longer exists
     const [resumed] = await rebuild(cfg, { firestore: db, logger: silentLogger(), startAfter: lastPath })
     expect(resumed).toMatchObject({ scanned: 0, written: 0 })
+  })
+})
+
+describe('views: rest', () => {
+  const mirror = defineView({
+    name: 'post-mirror',
+    target: 'postPublic',
+    base: 'post',
+    targetFields: ['rest', 'stats.commentCount'],
+    sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+    build: ({ base, sources }) => {
+      const { secret: _secret, ...rest } = base!.data() as Record<string, unknown>
+      return { ...rest, stats: { commentCount: sources.comments.length }, likeCount: 999 }
+    },
+  })
+  const likes = defineAggregate({ name: 'post-mirror-likes', source: 'postPublic/{postId}/like', target: 'postPublic', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' })
+  const cfg = defineConfig({ ...config, rules: [mirror, likes] })
+
+  it('writes the undeclared root keys, deletes the ones that disappeared and never touches reserved keys', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'a', tags: ['x'], secret: 's' })
+    await db.doc('postPublic/p1').set({ title: 'old', stale: true, likeCount: 3, stats: { likeAvg: 1 } })
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, await change(post, () => post.update({ tags: ['y'] })))
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', tags: ['y'], likeCount: 3, stats: { likeAvg: 1, commentCount: 0 } })
+    const ignored = logs.filter((l) => l.message === 'doc-sync: build returned a field the view does not declare, ignored').map((l) => l.fields?.field)
+    expect(ignored).toEqual(['likeCount'])
+  })
+
+  it('gives patch the rest keys too', async () => {
+    const patched = defineView({
+      name: 'post-mirror-patched',
+      target: 'postPublic',
+      base: 'post',
+      targetFields: ['rest', 'stats.commentCount'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: ({ base, sources }) => ({ ...(base!.data() as Record<string, unknown>), stats: { commentCount: sources.comments.length } }),
+      patch: (current, change) => (change.after && !change.before ? { ...current, stats: { commentCount: ((current.stats as { commentCount?: number } | undefined)?.commentCount ?? 0) + 1 } } : undefined),
+    })
+    await db.doc('post/p1').set({ title: 'a' })
+    await db.doc('postPublic/p1').set({ title: 'a', stats: { commentCount: 2 } })
+    const { handler } = handlerFor(defineConfig({ ...config, rules: [patched] }))
+    const c = db.doc('post/p1/comment/c3')
+    await invoke(handler, await change(c, () => c.set({ body: 'x' })))
+    expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', stats: { commentCount: 3 } })
   })
 })

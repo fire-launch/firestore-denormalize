@@ -232,6 +232,16 @@ describe('validateConfig', () => {
     })
     const only = (v: Partial<ViewRule>) => ({ ...base, rules: [{ ...view, ...v }] })
 
+    it('computes the root keys a rest view must never touch', () => {
+      const restView = defineView({ name: 'post-public', target: 'postPublic', base: 'post', targetFields: ['rest', 'stats.commentCount'], build: ({ base }) => ({ ...base!.data() }) })
+      const likes = defineAggregate({ name: 'post-public-likes', source: 'postPublic/{postId}/like', target: 'postPublic', idParam: 'postId', aggregate: 'count', targetField: 'stats.likeCount' })
+      const author = defineConnection({ name: 'post-public-author', source: 'user', target: 'postPublic', idField: 'authorId', fields: ['name'], targetField: 'author', onSourceDelete: 'setNull' })
+      const r = validateConfig({ ...base, rules: [restView, likes, author] })
+      expect(r.views[0]).toMatchObject({ rest: true, reservedRootKeys: ['author', 'authorId', 'stats'] })
+      const second = defineView({ name: 'post-public-2', target: 'postPublic', base: 'post', targetFields: ['rest'], build: () => ({}) })
+      expect(problemsOf({ ...base, rules: [restView, second] })).toContainEqual(expect.stringContaining(`view "post-public-2": only one view per target may declare 'rest' (view "post-public" already does)`))
+    })
+
     it('resolves sources, patterns and ordering', () => {
       const r = validateConfig({
         ...base,

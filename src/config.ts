@@ -679,6 +679,23 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
   })
 
+  // Two `rest` views on one target would each delete what the other wrote.
+  const restOwner = new Map<string, string>()
+  for (const view of resolvedViews) {
+    if (!view.rest) continue
+    const prev = restOwner.get(view.targetPattern.key)
+    if (prev) problems.push(`view "${view.name}": only one view per target may declare 'rest' (view "${prev}" already does)`)
+    else restOwner.set(view.targetPattern.key, view.name)
+  }
+  // `rest` owns every root key no rule declares: collect the declared roots per target collection.
+  for (const view of resolvedViews) {
+    if (!view.rest) continue
+    const roots = new Set<string>()
+    for (const w of writtenFields) if (w.target.key === view.targetPattern.key) roots.add(splitFieldPath(w.field)[0]!)
+    for (const id of idFields) if (id.target.key === view.targetPattern.key) roots.add(splitFieldPath(id.field)[0]!)
+    view.reservedRootKeys = [...roots].sort()
+  }
+
   // Two rules must not write overlapping fields of the same collection
   for (let i = 0; i < writtenFields.length; i++) {
     for (let j = i + 1; j < writtenFields.length; j++) {

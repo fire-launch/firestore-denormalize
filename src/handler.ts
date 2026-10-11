@@ -23,7 +23,7 @@ import {
 } from './config.js'
 import { DecodeError, decodeDocumentEventData, type DecodedDocument } from './decode.js'
 import { isEqual } from './equal.js'
-import { getField, setField } from './fields.js'
+import { getField, isValidFieldPath, setField } from './fields.js'
 import { countingFirestore, ReadCounter, type ReadCounts } from './counter.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
@@ -853,22 +853,50 @@ export class Processor {
     return { plan: this.planOf(view, target, built === undefined ? undefined : stripUndefined(built)) }
   }
 
-  /** The declared paths of `view` as they are on `target`, as a nested object (what `patch` receives). */
+  /** The declared paths of `view` as they are on `target` (plus every unreserved root key for `rest`), as a nested object: what `patch` receives. */
   private currentValues(view: ResolvedView, target: DocumentSnapshot): DocumentData {
     const out: DocumentData = {}
     for (const path of view.targetFields) {
       const v: unknown = target.get(path)
       if (v !== undefined) setField(out, path, v)
     }
+    if (view.rest) {
+      const reserved = new Set(view.reservedRootKeys)
+      for (const [key, value] of Object.entries(target.data() ?? {})) if (!reserved.has(key) && !(key in out)) out[key] = value
+    }
     return out
   }
 
-  /** Reads the declared paths out of a build/patch result; a missing path becomes a deletion. Paths the view does not declare are warned about once and ignored. */
+  /**
+   * Reads the declared paths out of a build/patch result; a missing path becomes a deletion.
+   * With `rest`, every root key of the result that no rule reserves is written too, and every
+   * such key on the target that the result lacks is deleted. Undeclared paths are warned about once and ignored.
+   */
   private planOf(view: ResolvedView, target: DocumentSnapshot, built: DocumentData | undefined): FieldPlan {
     const plan: FieldPlan = new Map()
     for (const path of view.targetFields) {
       const v = getField(built, path)
       plan.set(path, v === undefined ? DELETE : v)
+    }
+    if (view.rest) {
+      const reserved = new Set(view.reservedRootKeys)
+      for (const [key, value] of Object.entries(built ?? {})) {
+        if (reserved.has(key)) continue
+        if (key.includes('.') || !isValidFieldPath(key)) {
+          this.logger.warn('doc-sync: build returned a root key that is not a valid field name, ignored', { rule: view.name, field: key })
+          continue
+        }
+        plan.set(key, value)
+      }
+      for (const key of Object.keys(target.exists ? (target.data() ?? {}) : {})) {
+        if (reserved.has(key) || plan.has(key)) continue
+        if (key.includes('.') || !isValidFieldPath(key)) {
+          // `update()` would read a dotted key as a path (and reject reserved characters): leave such keys alone rather than fail every event.
+          this.logger.warn('doc-sync: target has a root key that is not a valid field name, left in place', { rule: view.name, document: target.ref.path, field: key })
+          continue
+        }
+        plan.set(key, DELETE)
+      }
     }
     this.warnUndeclared(view, built)
     return plan
