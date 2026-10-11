@@ -14,7 +14,7 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 | `service` | Cloud Run service name of the function (for `onRequest`: the function name, lower-cased) |
 | `serviceRegion` | Cloud Run region. Default `region`; required when `region` is a multi-region (`nam5`, `eur3`) |
 | `serviceAccount` | Trigger service account; a bare ID becomes `<id>@<project>.iam.gserviceaccount.com` |
-| `rules[]` | The rules, in any order: `defineConnection(...)`, `defineAggregate(...)`, `defineView(...)` (or objects with a `kind`) |
+| `rules[]` | The rules, in any order: `defineConnection(...)`, `defineAggregate(...)`, `defineView(...)`, `defineProjection(...)` (or objects with a `kind`) |
 
 ```ts
 export default defineConfig({
@@ -46,14 +46,18 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `aggregate` | `'count'` or `{ sum: '<numeric field>' }` |
 | `targetField` | Numeric target field |
 
-### `defineView`: keep `target.targetField` = `build(...)`
+### `defineView`: keep the declared `targetFields` of `target` = the matching paths of `build(...)`
+
+The general form. `defineConnection`, `defineAggregate` and `defineProjection` are shorthands for views of a fixed shape.
 
 | Key | Meaning |
 |---|---|
-| `target`, `targetField` | Collection and field receiving the value |
-| `sources` | Object keyed by the names `build` sees, each a source below |
-| `build({ target, sources, firestore })` | Returns the value, or `undefined` to delete the field. Must be deterministic. `sources.<key>` is `QueryDocumentSnapshot[]` |
-| `patch?(current, change, { target, firestore })` | Optional fast path from the current value and one changed document; return `undefined` to fall back to `build` |
+| `target` | Collection holding the derived fields |
+| `targetFields` | Field paths this view writes, e.g. `['title', 'stats.commentCount', 'profile']`. Only these paths are taken from the `build` result; a path whose value is `undefined` is deleted. `'rest'` (needs `base`) adds every root key no rule declares |
+| `base?` | Collection whose document with the same ID decides whether the target exists (below). Same placeholders as `target` |
+| `sources` | Object keyed by the names `build` sees, each a source below. Optional when `base` is set |
+| `build({ target, base, sources, firestore })` | Returns an object holding the declared paths, nested (`{ stats: { commentCount: 3 } }`), or `undefined` to delete them all. Must be deterministic. `sources.<key>` is `QueryDocumentSnapshot[]`; `base` is the base document (always exists when `build` runs) |
+| `patch?(current, change, { target, base, firestore })` | Optional fast path: derive the new values from the current ones (same shape as the `build` result, plus the `rest` keys) and one changed source document (one fresh read) instead of reading every source; return `undefined` to fall back to `build`. Events can be delivered more than once and out of order, so `patch` must be idempotent and must only use `change.after` to decide what the item looks like, keyed by document id |
 
 | Source key | Relation to the target | Extras |
 |---|---|---|
@@ -61,11 +65,25 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `idParam: 'postId'` | Many-to-one: sources under the target path | `orderBy`, `limit`, `watch` |
 | `refField: 'authorId'` | One-to-one: target field holds the source ID (0 or 1 document) | `watch` |
 
-- `orderBy`: `['createdAt', ['score', 'desc']]`. `limit`: max documents read. `watch`: source fields that trigger a recompute (default: any change); `idField` and `orderBy` fields are always watched.
+- `orderBy`: `['createdAt', ['score', 'desc']]`. `limit`: max documents read. `watch`: source fields that trigger a recompute (default: any change); `idField` and `orderBy` fields are always watched. Every change of the `base` document triggers a recompute.
+- Writes: one `update()` of the declared paths whose value differs, conditional on the target's `updateTime`. Fields outside `targetFields` are never touched. Paths in the result that are not declared are logged once (`warn`) and ignored.
+- `base`: `target/{id}` exists exactly when `base/{id}` exists, judged by a fresh read on every event of the base, of a source or of the target. A missing target is created with `create()`; a target whose base is gone is deleted with `delete({ lastUpdateTime })`. Subcollections of a deleted target are not deleted (Firestore semantics). Several views may share one `base` for a target; `validate` requires them to agree. Other rules on that target skip while it does not exist and catch up on the create event.
+- `'rest'`: owns every root key of the target that no rule writes or uses as an id. Such keys in the `build` result are written; such keys on the target that the result lacks are deleted. Only on a view with `base`.
 - `build` / `patch` results: `undefined` map entries are dropped, `undefined` array elements become `null`.
 - `change.after` is a fresh read of the changed document (`undefined` if it was deleted or no longer belongs to this target). `patch` must be idempotent and key items by document ID.
-- Target side: recomputed on create, when a `refField` changes, and when `targetField` was removed. Other target fields `build` reads are not watched.
-- `rebuild` / `verify` always use `build`.
+- Target side: recomputed on create, when a `refField` changes, when a declared path was removed, and, with `base`, when the target was deleted (it is recreated while the base exists). Other target fields `build` reads are not watched.
+- `rebuild` / `verify` always use `build`. For a view with `base` they walk the base collection first (creating / checking targets), then the target collection (removing / reporting targets whose base is gone). `verify` reports each finding with `issue: 'value' | 'missing' | 'orphan'`.
+- The typed config cannot express that `'rest'` requires `base`, or that a view needs `base` or at least one source; `validate` reports both at runtime.
+
+### `defineProjection`: a view with `base` and no `build`
+
+| Key | Meaning |
+|---|---|
+| `base` | Collection to mirror |
+| `target` | Collection receiving `target/{id}` for every `base/{id}`. Same placeholders as `base` |
+| `targetFields` | Paths copied from the base as they are. `'rest'` is not supported |
+
+Lifecycle as a view with `base`: the target is created when the base exists, deleted when it is gone, and a path missing on the base is deleted on the target. Put aggregates or views on `target` for derived fields. Logged as `kind: 'projection'`.
 
 ### Validation
 
@@ -121,10 +139,11 @@ Every rule whose `source` or `target` is the event's collection runs. Source-sid
 | Connection target changed | deleted, or `idField` unchanged and `targetField` still present | re-read target, then its source; empty `idField` deletes `targetField`; missing source follows `onSourceDelete` |
 | Aggregate source changed | neither `idField` nor the summed field changed | for the old and new target: re-read, run the aggregation, write if different |
 | Aggregate target changed | not a create and `targetField` still present | run the aggregation, write if different |
-| View source changed | `watch` fields (or the whole document) unchanged | for each target: re-read it, then `patch` with a fresh read of the changed document, or `build` over fresh reads of all sources |
-| View target changed | not a create, no `refField` changed, `targetField` still present | `build` |
+| View base changed | document unchanged | re-read the target, then the base. Base gone: delete the target. Target missing: `build` and `create()`. Otherwise `build` and write the differing paths |
+| View source changed | `watch` fields (or the whole document) unchanged | for each target: re-read it (and its base; a missing base deletes the target, a missing target is created), then `patch` with a fresh read of the changed document, or `build` over fresh reads of all sources |
+| View target changed | not a create, no `refField` changed, every declared path still present; with `base`: also skipped unless deleted | `build`; with `base`, a deleted target is recreated while the base exists |
 
-- Every write is `update(..., { lastUpdateTime })` with the `updateTime` read before the sources. A failed precondition redoes that target from the read, up to `maxRetries`, then the request fails with 500.
+- Every field write is `update(..., { lastUpdateTime })` with the `updateTime` read before the sources; targets of base views are created with `create()` and removed with `delete({ lastUpdateTime })`. A failed precondition (or `ALREADY_EXISTS`) redoes that target from a fresh read, up to `maxRetries`, then the request fails with 500.
 
 | Response | When |
 |---|---|

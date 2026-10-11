@@ -58,13 +58,13 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**View** (`defineView`): reacts to changes on the target or its sources and assembles any field you like. For latest-N lists, maps keyed by id, summaries.
+**View** (`defineView`): the general form. Reacts to changes on the target, its sources or its `base`, and writes the field paths you declare in `targetFields`, nested or at the root. For latest-N lists, maps keyed by id, summaries, read models. With `base`, the target document itself is created and deleted along with the same-id base document.
 
 ```ts
 defineView({
   name: 'post-latest-comments',
   target: 'post',
-  targetField: 'latestComments',
+  targetFields: ['latestComments'],
   sources: {
     comments: {
       collection: 'post/{postId}/comment',
@@ -73,7 +73,7 @@ defineView({
       limit: 2,
     },
   },
-  build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+  build: ({ sources }) => ({ latestComments: sources.comments.map((c) => ({ id: c.id, body: c.get('body') })) }),
 })
 ```
 ```
@@ -82,6 +82,24 @@ post/p1       { title: 'Hello' }
                                    ▼
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
+
+**Projection** (`defineProjection`): a read model in another collection. `userPublicView/{id}` exists exactly when `user/{id}` does and carries the declared paths; add aggregates or views on `userPublicView` for derived fields.
+
+```ts
+defineProjection({
+  name: 'user-public',
+  base: 'user',
+  target: 'userPublicView',
+  targetFields: ['displayName', 'avatarUrl'],
+})
+```
+```
+user/u1             { displayName: 'Ann', avatarUrl: '…', email: 'ann@…', phone: '…' }
+                                   ▼
+userPublicView/u1   { displayName: 'Ann', avatarUrl: '…' }
+```
+
+Targets are never created by connections, aggregates or views without `base`: they fill fields of documents that already exist. A view with `base` (and a projection) is the one exception and owns its target's existence.
 
 These go into the config's `rules` array, in any order, so rules can be grouped by domain and split across files.
 

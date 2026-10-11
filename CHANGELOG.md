@@ -4,6 +4,22 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.8.0] - 2026-10-12
+
+### Changed
+
+- **Breaking:** a view declares `targetFields: string[]` instead of `targetField`. `build` returns an object holding the declared paths (nested); a declared path whose value is `undefined` is deleted; undeclared paths are logged once and ignored. `patch` receives and returns the same object shape.
+- `verify` mismatches carry `issue: 'value' | 'missing' | 'orphan'`; `field` is set for `value` only.
+- Handler results (`RuleResult.action`) may now be `create` or `remove` (target document created / removed).
+
+### Added
+
+- `base` on a view: the target `target/{id}` exists exactly when `base/{id}` exists, judged by a fresh read on every event. The base document is passed to `build` / `patch` as `base`. `sources` may be omitted when `base` is set.
+- `'rest'` in `targetFields` (views with `base`): write and prune every root key no rule declares.
+- `defineProjection`: a view with `base` and no `build` that mirrors the declared paths into another collection.
+- `rebuild` / `verify` walk the base collection first for base views (creating / reporting missing targets), then the target collection (removing / reporting orphans).
+- `validate` prints a base trigger line and counts the base read.
+
 ## [0.7.0] - 2026-10-12
 
 ### Changed

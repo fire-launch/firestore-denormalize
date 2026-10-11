@@ -57,13 +57,13 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**ビュー**（`defineView`）: 同期先/同期元の変更を検知し、任意のフィールドを組み立てます。最新 N 件のリスト、ID をキーにしたマップ、サマリーなどに使います。
+**ビュー**（`defineView`）: 一般形です。ターゲット・ソース・`base` の変更を検知し、`targetFields` で宣言したフィールドパス（ルート直下でもネストでも）を書きます。最新 N 件のリスト、ID をキーにしたマップ、サマリー、読み取りモデルに使います。`base` を付けると、同じ ID の base ドキュメントに合わせてターゲットのドキュメント自体を作成・削除します。
 
 ```ts
 defineView({
   name: 'post-latest-comments',
   target: 'post',
-  targetField: 'latestComments',
+  targetFields: ['latestComments'],
   sources: {
     comments: {
       collection: 'post/{postId}/comment',
@@ -72,7 +72,7 @@ defineView({
       limit: 2,
     },
   },
-  build: ({ sources }) => sources.comments.map((c) => ({ id: c.id, body: c.get('body') })),
+  build: ({ sources }) => ({ latestComments: sources.comments.map((c) => ({ id: c.id, body: c.get('body') })) }),
 })
 ```
 ```
@@ -81,6 +81,24 @@ post/p1       { title: 'Hello' }
                                    ▼
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
+
+**プロジェクション**（`defineProjection`）: 別コレクションの読み取りモデルです。`user/{id}` があるときだけ `userPublicView/{id}` が存在し、宣言したパスを持ちます。派生フィールドは `userPublicView` に対する aggregate や view で足します。
+
+```ts
+defineProjection({
+  name: 'user-public',
+  base: 'user',
+  target: 'userPublicView',
+  targetFields: ['displayName', 'avatarUrl'],
+})
+```
+```
+user/u1             { displayName: 'Ann', avatarUrl: '…', email: 'ann@…', phone: '…' }
+                                   ▼
+userPublicView/u1   { displayName: 'Ann', avatarUrl: '…' }
+```
+
+connection・aggregate・`base` の無い view はターゲットを作りません。既存ドキュメントのフィールドを埋めるだけです。`base` 付きの view（と projection）だけが例外で、ターゲットの存在を所有します。
 
 これらは設定の `rules` 配列に入れます。順序は自由なので、ドメインごとにまとめてファイルを分けられます。
 

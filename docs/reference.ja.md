@@ -14,7 +14,7 @@
 | `service` | 関数の Cloud Run サービス名（`onRequest` の場合は関数名を小文字化したもの） |
 | `serviceRegion` | Cloud Run のリージョン。既定は `region`。`region` がマルチリージョン（`nam5`、`eur3` など）のときは必須 |
 | `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完される |
-| `rules[]` | ルール。順序は自由: `defineConnection(...)`、`defineAggregate(...)`、`defineView(...)`（または `kind` を持つオブジェクト） |
+| `rules[]` | ルール。順序は自由: `defineConnection(...)`、`defineAggregate(...)`、`defineView(...)`、`defineProjection(...)`（または `kind` を持つオブジェクト） |
 
 ```ts
 export default defineConfig({
@@ -46,26 +46,44 @@ export default defineConfig({
 | `aggregate` | `'count'` または `{ sum: '<numeric field>' }` |
 | `targetField` | 数値のターゲットフィールド |
 
-### defineView: `target.targetField` を `build(...)` の結果に保つ
+### `defineView`: `target` の宣言した `targetFields` = `build(...)` の該当パス、を保つ
+
+一般形です。`defineConnection`・`defineAggregate`・`defineProjection` は、形の決まった view の簡易設定です。
 
 | キー | 意味 |
 |---|---|
-| `target`、`targetField` | 値を受け取るコレクションとフィールド |
-| `sources` | `build` から見える名前をキーにしたオブジェクト。各値は後述するソース |
-| `build({ target, sources, firestore })` | 値を返します。`undefined` を返すとフィールドを削除します。決定的でなければなりません。`sources.<key>` は `QueryDocumentSnapshot[]` です |
-| `patch?(current, change, { target, firestore })` | 現在値と変更された 1 件のドキュメントから計算する任意の高速パス。`undefined` を返すと `build` にフォールバックします |
+| `target` | 派生フィールドを持つコレクション |
+| `targetFields` | この view が書くフィールドパス。例 `['title', 'stats.commentCount', 'profile']`。`build` の戻り値からはこのパスだけを取り出し、値が `undefined` のパスは削除します。`'rest'`（`base` が必要）は、どのルールも宣言していないルート直下のキー全部を加えます |
+| `base?` | 同じ ID のドキュメントがターゲットの存在を決めるコレクション（後述）。`target` と同じプレースホルダを持つこと |
+| `sources` | `build` が見る名前をキーにしたオブジェクト。各要素は下表のソース。`base` があれば省略可 |
+| `build({ target, base, sources, firestore })` | 宣言したパスを持つオブジェクトをネストした形で返す（`{ stats: { commentCount: 3 } }`）。`undefined` を返すと全宣言パスを削除。決定的であること。`sources.<key>` は `QueryDocumentSnapshot[]`、`base` は base ドキュメント（`build` が呼ばれる時点で必ず存在） |
+| `patch?(current, change, { target, base, firestore })` | 現在の値（`build` の戻り値と同じ形、`rest` のキーも含む）と変更された 1 件のソースドキュメント（1 回だけの読み直し）から、全ソースを読み直す代わりに求める任意の高速路。`undefined` を返すと `build` に戻る。イベントは複数回・順序が入れ替わって届くことがあるため、`patch` は冪等でなければならず、要素がどう見えるかの判断には `change.after` だけを使い、ドキュメント ID で管理すること |
 
-| ソースのキー | ターゲットとの関係 | 追加オプション |
+| ソースのキー | ターゲットとの関係 | 追加指定 |
 |---|---|---|
-| `idField: 'postId'` | 多対一: ソースのフィールドがターゲット ID を保持 | `orderBy`、`limit`、`watch` |
-| `idParam: 'postId'` | 多対一: ターゲットのパス配下にあるソース | `orderBy`、`limit`、`watch` |
-| `refField: 'authorId'` | 一対一: ターゲットのフィールドがソース ID を保持（0 件か 1 件） | `watch` |
+| `idField: 'postId'` | 多対一: ソースのフィールドがターゲット ID を持つ | `orderBy`、`limit`、`watch` |
+| `idParam: 'postId'` | 多対一: ターゲットのパス配下のソース | `orderBy`、`limit`、`watch` |
+| `refField: 'authorId'` | 一対一: ターゲットのフィールドがソース ID を持つ（0 または 1 件） | `watch` |
 
-- `orderBy`: `['createdAt', ['score', 'desc']]`。`limit`: 読み取るドキュメントの最大数。`watch`: 再計算のきっかけになるソースのフィールド（既定: どのフィールドの変更でも再計算）。`idField` と `orderBy` のフィールドは常に監視されます。
-- `build` / `patch` の戻り値: マップのエントリが `undefined` なら取り除かれ、配列の要素が `undefined` なら `null` になります。
-- `change.after` は変更されたドキュメントを読み直した現在の状態です（削除された場合や、このターゲットに属さなくなった場合は `undefined`）。`patch` は冪等で、ドキュメント ID をキーにしてください。
-- ターゲット側: 作成時、`refField` が変わったとき、`targetField` が削除されたときに再計算されます。`build` が読む他のターゲットフィールドは監視されません。
-- `rebuild` / `verify` は常に `build` を使います。
+- `orderBy`: `['createdAt', ['score', 'desc']]`。`limit`: 読む最大件数。`watch`: 再計算のきっかけになるソースのフィールド（既定は何でも）。`idField` と `orderBy` のフィールドは常に監視されます。`base` ドキュメントの変更は常に再計算のきっかけになります。
+- 書き込み: 値が違う宣言パスだけを 1 回の `update()` にまとめ、ターゲットの `updateTime` を条件にします。`targetFields` 外のフィールドには触れません。戻り値にある宣言外のパスは 1 回だけ `warn` ログを出して無視します。
+- `base`: `target/{id}` は `base/{id}` が存在するときだけ存在します。base・ソース・ターゲットのどのイベントでも、読み直した時点の base で判定します。ターゲットが無ければ `create()` で作り、base が消えていれば `delete({ lastUpdateTime })` で消します。消したターゲット配下のサブコレクションは残ります（Firestore の仕様）。同じターゲットに対して複数の view が同じ `base` を宣言でき、`validate` は一致を確認します。そのターゲットの他のルールは、ターゲットが無い間は skip し、作成イベントで追いつきます。
+- `'rest'`: どのルールも書かず id にも使っていないルート直下のキー全部をこの view が所有します。戻り値にあるそのようなキーは書き、ターゲットにあって戻り値に無いものは削除します。`base` 付きの view でのみ使えます。
+- `build` / `patch` の戻り値: `undefined` のマップ要素は落とし、配列の `undefined` 要素は `null` になります。
+- `change.after` は変更ドキュメントの読み直しです（削除済み、またはこのターゲットに属さなくなった場合は `undefined`）。`patch` は冪等で、要素をドキュメント ID で管理すること。
+- ターゲット側: 作成時、`refField` の変更時、宣言パスが消えた時、そして `base` 付きなら削除時（base があれば作り直す）に再計算します。`build` が読む他のターゲットフィールドは監視しません。
+- `rebuild` / `verify` は常に `build` を使います。`base` 付き view では先に base コレクションを歩いて（ターゲットの作成・検査）、次にターゲットコレクションを歩きます（base を失ったターゲットの削除・報告）。`verify` は各件を `issue: 'value' | 'missing' | 'orphan'` で報告します。
+- 型付き設定では「`'rest'` には `base` が必要」「view には `base` か最低 1 つのソースが必要」を表現できません。どちらも `validate` が実行時に検出します。
+
+### `defineProjection`: `build` の無い `base` 付き view
+
+| キー | 意味 |
+|---|---|
+| `base` | 写す元のコレクション |
+| `target` | `base/{id}` ごとに `target/{id}` を持つコレクション。`base` と同じプレースホルダ |
+| `targetFields` | base からそのまま写すパス。`'rest'` は使えません |
+
+寿命は `base` 付き view と同じです。base があればターゲットを作り、無くなれば消し、base に無いパスはターゲットからも削除します。派生フィールドは `target` に対する aggregate や view で足します。ログでは `kind: 'projection'` になります。
 
 ### バリデーション
 
@@ -121,10 +139,11 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | connection のターゲットが変わった | 削除された場合、または `idField` が変わらずかつ `targetField` が残っている場合 | ターゲットを読み直し、続けてそのソースを読み直します。`idField` が空なら `targetField` を削除し、ソースが存在しなければ `onSourceDelete` に従います |
 | aggregate のソースが変わった | `idField` も合計対象のフィールドも変わっていない | 変更前・変更後のターゲットそれぞれについて、読み直して集計を実行し、値が異なれば書き込みます |
 | aggregate のターゲットが変わった | 作成イベントではなく、かつ `targetField` が残っている | 集計を実行し、値が異なれば書き込みます |
-| view のソースが変わった | `watch` のフィールド（指定がなければドキュメント全体）が変わっていない | 各ターゲットについて、ターゲットを読み直し、変更されたドキュメントを読み直した上で `patch` するか、全ソースを読み直して `build` します |
-| view のターゲットが変わった | 作成イベントではなく、`refField` も変わらず、`targetField` が残っている | `build` を実行します |
+| view の base が変わった | ドキュメントに変化なし | ターゲットを読み直し、続けて base を読む。base が無ければターゲットを削除。ターゲットが無ければ `build` して `create()`。それ以外は `build` して差分のパスを書く |
+| view のソースが変わった | `watch` のフィールド（または全体）に変化なし | ターゲットごとに読み直し（`base` も。base が無ければターゲット削除、ターゲットが無ければ作成）、変更ドキュメントの読み直しで `patch`、または全ソースの読み直しで `build` |
+| view のターゲットが変わった | 作成でなく、`refField` に変化がなく、宣言パスが全部残っている。`base` 付きでは削除以外も同様に skip | `build`。`base` 付きでは base があれば削除されたターゲットを作り直す |
 
-- すべての書き込みは `update(..., { lastUpdateTime })` で、`updateTime` はソースを読む前に読み取ったものです。前提条件が失敗すると、そのターゲットを読み直しからやり直します。これを `maxRetries` 回まで繰り返し、それでも失敗すればリクエストは 500 で失敗します。
+- フィールドの書き込みはすべて、ソースより前に読んだ `updateTime` を条件にした `update(..., { lastUpdateTime })` です。`base` 付き view のターゲットは `create()` で作り、`delete({ lastUpdateTime })` で消します。事前条件の失敗（および `ALREADY_EXISTS`）はそのターゲットを読み直しからやり直し、`maxRetries` 回を超えるとリクエストは 500 で失敗します。
 
 | レスポンス | 条件 |
 |---|---|

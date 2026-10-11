@@ -157,8 +157,11 @@ export interface ViewRule<S extends Record<string, ViewSource> = Record<string, 
   build(ctx: BuildContext<S>): T | undefined | Promise<T | undefined>
   /**
    * Optional fast path: derive the new values from the current ones (`current` holds the
-   * declared paths as they are on the target) and one changed source document. Return
-   * `undefined` to fall back to `build`.
+   * declared paths as they are on the target, plus the `rest` keys) and one changed source
+   * document (one fresh read) instead of reading every source. Return `undefined` to fall back
+   * to `build`. Events can be delivered more than once and out of order, so `patch` must be
+   * idempotent and must only use `change.after` (the current state) to decide what the item
+   * looks like, keyed by document id. `rebuild` and `verify` never use it.
    */
   patch?(current: T, change: ViewChange, ctx: PatchContext): T | undefined | Promise<T | undefined>
 }

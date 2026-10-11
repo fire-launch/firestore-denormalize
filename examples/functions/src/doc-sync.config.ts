@@ -1,4 +1,4 @@
-import { defineAggregate, defineConfig, defineConnection, defineView } from "firestore-denormalize";
+import { defineAggregate, defineConfig, defineConnection, defineProjection, defineView } from "firestore-denormalize";
 
 /** order.summary shape, computed the same way by build and patch. */
 function summarize(items: Record<string, { sku: string; amount: number }>) {
@@ -172,5 +172,23 @@ export default defineConfig({
     // category) always makes validate warn about fan-out: one change of the referenced document rebuilds every
     // post that points at it. Prefer a connection for one-to-one copies; use refField only when the referenced
     // document changes rarely and the number of targets is small.
+
+    defineProjection({
+      // userPublicView/{uid} = user/{uid} without the private fields; created and deleted with it
+      name: "user-public",
+      base: "user",
+      target: "userPublicView",
+      targetFields: ["displayName", "avatarUrl"],
+    }),
+
+    defineView({
+      // userPublicView.stats.postCount next to the projected fields: another rule may own other paths of the same document
+      name: "user-public-posts",
+      target: "userPublicView",
+      base: "user",
+      targetFields: ["stats.postCount"],
+      sources: { posts: { collection: "post", idField: "authorId", watch: ["authorId"] } },
+      build: ({ sources }) => ({ stats: { postCount: sources.posts.length } }),
+    }),
   ],
 });
