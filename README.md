@@ -87,20 +87,33 @@ All options, including `patch` for views and typed configs, are in the [referenc
 
 ```mermaid
 flowchart LR
-  subgraph fs[Firestore]
-    S[(source collections)]
-    T[(target collections)]
-  end
-  S -- document written --> E[Eventarc<br/>one trigger per collection]
-  T -- document written --> E
-  E -- CloudEvent --> H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
-  H -- "1. read target, note updateTime" --> T
+  C[/"config file (e.g. doc-sync.config.ts)"/]
+  CLI["doc-sync CLI<br/>validate · setup · deploy<br/>rebuild · verify · dev"]
+  S[("Firestore<br/>source collections")]
+  T[("Firestore<br/>target collections")]
+  E["Eventarc<br/>one trigger<br/>per collection"]
+  H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
+
+  S -- "document written" --> E
+  T -- "document written" --> E
+  E -- "CloudEvent" --> H
+  H -- "1. read target, note updateTime<br/>3. update if changed, conditional on updateTime" --> T
   H -- "2. re-read sources / count() / build()" --> S
-  H -- "3. update if changed, conditional on updateTime" --> T
-  C[/"config file (e.g. doc-sync.config.ts)"/] -.-> H
-  C -.-> CLI["doc-sync CLI<br/>validate · setup · deploy · rebuild · verify · dev"]
-  CLI -- triggers, IAM --> E
-  CLI -- rebuild / verify --> T
+  C -. "reads" .-> H
+  C -. "reads" .-> CLI
+  CLI -- "triggers, IAM" --> E
+  CLI -- "rebuild / verify" --> T
+
+  classDef store fill:#FFF1D6,stroke:#E09A2D,stroke-width:1.5px,color:#3B2A06
+  classDef event fill:#E4ECFF,stroke:#4F7BE8,stroke-width:1.5px,color:#14275E
+  classDef fn fill:#DDF4E7,stroke:#2F9E62,stroke-width:1.5px,color:#0F3D25
+  classDef conf fill:#F1E8FF,stroke:#8B5CF6,stroke-width:1.5px,color:#2E1065
+  classDef cli fill:#EEF1F5,stroke:#6B7280,stroke-width:1.5px,color:#1F2937
+  class S,T store
+  class E event
+  class H fn
+  class C conf
+  class CLI cli
 ```
 
 Step 1 happens before step 2, so a value computed from a stale read can never pass the precondition in step 3. Details: [how a change is processed](./docs/reference.md#how-a-change-is-processed).
