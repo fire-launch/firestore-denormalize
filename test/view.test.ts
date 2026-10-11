@@ -466,3 +466,75 @@ describe('views: rebuild and verify always use build', () => {
     expect(await verify(config, { firestore: db, logger, rules: ['user-badges'] })).toEqual([expect.objectContaining({ mismatched: 0 })])
   })
 })
+
+describe('views: several declared paths', () => {
+  const stats = defineView({
+    name: 'post-stats',
+    target: 'post',
+    targetFields: ['commentCount', 'stats.latest', 'firstBody'],
+    sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: ['createdAt'] } },
+    build: ({ sources }) => ({
+      commentCount: sources.comments.length,
+      stats: { latest: sources.comments[sources.comments.length - 1]?.id, ignored: 'x' },
+      firstBody: sources.comments[0]?.get('body'),
+      extra: 1,
+    }),
+  })
+  const cfg = defineConfig({ ...config, rules: [stats] })
+
+  it('writes every declared path in one update, deletes undefined ones and leaves other fields alone', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ title: 'keep', stats: { likes: 7 } })
+    const { handler, logs } = handlerFor(cfg)
+    const c1 = db.doc('post/p1/comment/c1')
+    await invoke(handler, await change(c1, () => c1.set({ body: 'one', createdAt: 1 })))
+    expect((await post.get()).data()).toEqual({ title: 'keep', stats: { likes: 7, latest: 'c1' }, commentCount: 1, firstBody: 'one' })
+    expect(processed(logs, 'post-stats')).toMatchObject({ action: 'write', writes: 1 })
+
+    await invoke(handler, await change(c1, () => c1.delete()))
+    expect((await post.get()).data()).toEqual({ title: 'keep', stats: { likes: 7 }, commentCount: 0 })
+    expect(processed(logs, 'post-stats')).toMatchObject({ action: 'write', writes: 1 })
+  })
+
+  it('warns once per undeclared path and never writes it', async () => {
+    const post = db.doc('post/p1')
+    await post.set({})
+    const { handler, logs } = handlerFor(cfg)
+    const c1 = db.doc('post/p1/comment/c1')
+    await invoke(handler, await change(c1, () => c1.set({ body: 'one', createdAt: 1 })))
+    await invoke(handler, await change(c1, () => c1.update({ body: 'two' })))
+    const warnings = logs.filter((l) => l.message === 'doc-sync: build returned a field the view does not declare, ignored')
+    expect(warnings.map((w) => w.fields?.field).sort()).toEqual(['extra', 'stats.ignored'])
+    expect((await post.get()).get('extra')).toBeUndefined()
+  })
+
+  it('skips when every declared path already holds its value', async () => {
+    const post = db.doc('post/p1')
+    await post.set({ commentCount: 1, stats: { latest: 'c1' }, firstBody: 'one' })
+    const { handler, logs } = handlerFor(cfg)
+    const c1 = db.doc('post/p1/comment/c1')
+    await c1.set({ body: 'one', createdAt: 1 })
+    await invoke(handler, await change(c1, () => c1.update({ createdAt: 2 }))) // changes the document, not the built values
+    expect(processed(logs, 'post-stats')).toMatchObject({ action: 'skip', reason: 'targets up to date' })
+  })
+
+  it('gives patch the declared paths as an object and writes what it returns', async () => {
+    const counted = defineView({
+      name: 'post-counted',
+      target: 'post',
+      targetFields: ['commentCount', 'lastBody'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: ({ sources }) => ({ commentCount: sources.comments.length, lastBody: sources.comments[sources.comments.length - 1]?.get('body') }),
+      patch: (current, change) => {
+        if (!change.after || change.before) return undefined
+        return { commentCount: ((current.commentCount as number | undefined) ?? 0) + 1, lastBody: change.after.body }
+      },
+    })
+    const post = db.doc('post/p1')
+    await post.set({ commentCount: 4, lastBody: 'd' })
+    const { handler } = handlerFor(defineConfig({ ...config, rules: [counted] }))
+    const c5 = db.doc('post/p1/comment/c5')
+    await invoke(handler, await change(c5, () => c5.set({ body: 'e' })))
+    expect((await post.get()).data()).toEqual({ commentCount: 5, lastBody: 'e' })
+  })
+})
