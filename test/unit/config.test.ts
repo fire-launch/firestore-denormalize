@@ -1,13 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { collectionGroupQueries, collectionsOf, ConfigError, defineConfig, defineView, needsCollectionGroupQuery, triggerName, validateConfig, type ViewRule } from '../../src/index.js'
+import {
+  collectionGroupQueries,
+  collectionsOf,
+  ConfigError,
+  defineAggregate,
+  defineConfig,
+  defineConnection,
+  defineView,
+  needsCollectionGroupQuery,
+  rulesOf,
+  triggerName,
+  validateConfig,
+  type Connection,
+  type ViewRule,
+} from '../../src/index.js'
 
 const base = defineConfig({
   name: 'doc-sync',
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    {
+  rules: [
+    defineConnection({
       name: 'post-category',
       source: 'category',
       target: 'post',
@@ -15,7 +29,7 @@ const base = defineConfig({
       fields: ['name', 'color'],
       targetField: 'category',
       onSourceDelete: 'setNull',
-    },
+    }),
   ],
 })
 
@@ -47,82 +61,82 @@ describe('validateConfig', () => {
   })
 
   it('rejects duplicate connection names', () => {
-    const c = base.connections![0]!
-    const problems = problemsOf({ ...base, connections: [c, { ...c, target: 'comment' }] })
+    const c = base.rules[0] as Connection
+    const problems = problemsOf({ ...base, rules: [c, { ...c, target: 'comment' }] })
     expect(problems).toEqual([expect.stringContaining('duplicate name')])
   })
 
   it('rejects the same (target, targetField) twice', () => {
-    const c = base.connections![0]!
-    const problems = problemsOf({ ...base, connections: [c, { ...c, name: 'other', source: 'tag', idField: 'tagId' }] })
+    const c = base.rules[0] as Connection
+    const problems = problemsOf({ ...base, rules: [c, { ...c, name: 'other', source: 'tag', idField: 'tagId' }] })
     expect(problems).toEqual([expect.stringContaining('overlaps "category" written by connection "post-category"')])
   })
 
   it('rejects idField === targetField', () => {
-    const c = base.connections![0]!
-    expect(problemsOf({ ...base, connections: [{ ...c, targetField: 'categoryId' }] })).toContainEqual(
+    const c = base.rules[0] as Connection
+    expect(problemsOf({ ...base, rules: [{ ...c, targetField: 'categoryId' }] })).toContainEqual(
       expect.stringContaining('`idField` and `targetField` must not overlap'),
     )
   })
 
   it('rejects a targetField that is another connection idField on the same target', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const problems = problemsOf({
       ...base,
-      connections: [c, { ...c, name: 'x', source: 'tag', idField: 'category', targetField: 'tag' }],
+      rules: [c, { ...c, name: 'x', source: 'tag', idField: 'category', targetField: 'tag' }],
     })
     expect(problems).toEqual([expect.stringContaining('used as an `idField`')])
   })
 
   it('rejects subcollections', () => {
-    const c = base.connections![0]!
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'shop/category' }] })).toContainEqual(
+    const c = base.rules[0] as Connection
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'shop/category' }] })).toContainEqual(
       expect.stringContaining('not a collection path'),
     )
   })
 
   it('accepts dotted field paths but rejects reserved characters and overlaps', () => {
-    const c = base.connections![0]!
-    expect(() => validateConfig({ ...base, connections: [{ ...c, idField: 'meta.categoryId', fields: ['name', 'address.city'] }] })).not.toThrow()
-    expect(problemsOf({ ...base, connections: [{ ...c, idField: 'meta.*' }] })).toContainEqual(expect.stringContaining('`idField` must be a field path'))
-    expect(problemsOf({ ...base, connections: [{ ...c, fields: ['name', 'a..b'] }] })).toContainEqual(expect.stringContaining('not a valid field path'))
-    expect(problemsOf({ ...base, connections: [{ ...c, fields: ['address', 'address.city'] }] })).toContainEqual(expect.stringContaining('already covered'))
-    expect(problemsOf({ ...base, connections: [{ ...c, idField: 'category.id' }] })).toContainEqual(expect.stringContaining('must not overlap'))
+    const c = base.rules[0] as Connection
+    expect(() => validateConfig({ ...base, rules: [{ ...c, idField: 'meta.categoryId', fields: ['name', 'address.city'] }] })).not.toThrow()
+    expect(problemsOf({ ...base, rules: [{ ...c, idField: 'meta.*' }] })).toContainEqual(expect.stringContaining('`idField` must be a field path'))
+    expect(problemsOf({ ...base, rules: [{ ...c, fields: ['name', 'a..b'] }] })).toContainEqual(expect.stringContaining('not a valid field path'))
+    expect(problemsOf({ ...base, rules: [{ ...c, fields: ['address', 'address.city'] }] })).toContainEqual(expect.stringContaining('already covered'))
+    expect(problemsOf({ ...base, rules: [{ ...c, idField: 'category.id' }] })).toContainEqual(expect.stringContaining('must not overlap'))
   })
 
   it('validates collection patterns', () => {
-    const c = base.connections![0]!
-    expect(() => validateConfig({ ...base, connections: [{ ...c, source: 'users/{uid}/categories', target: 'users/{uid}/posts' }] })).not.toThrow()
-    expect(() => validateConfig({ ...base, connections: [{ ...c, target: 'users/{uid}/posts' }] })).not.toThrow()
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'users/{uid}/categories' }] })).toContainEqual(
+    const c = base.rules[0] as Connection
+    expect(() => validateConfig({ ...base, rules: [{ ...c, source: 'users/{uid}/categories', target: 'users/{uid}/posts' }] })).not.toThrow()
+    expect(() => validateConfig({ ...base, rules: [{ ...c, target: 'users/{uid}/posts' }] })).not.toThrow()
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'users/{uid}/categories' }] })).toContainEqual(
       expect.stringContaining('{uid} of `source` must also appear in `target`'),
     )
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'users/{uid}' }] })).toContainEqual(expect.stringContaining('not a collection path'))
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'users/uid}/x' }] })).toContainEqual(expect.stringContaining('not a valid placeholder'))
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'users/{a}/x/{a}/y' }] })).toContainEqual(expect.stringContaining('appears twice'))
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'users/{uid}' }] })).toContainEqual(expect.stringContaining('not a collection path'))
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'users/uid}/x' }] })).toContainEqual(expect.stringContaining('not a valid placeholder'))
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'users/{a}/x/{a}/y' }] })).toContainEqual(expect.stringContaining('appears twice'))
   })
 
   it('validates aggregates', () => {
-    const agg = { name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count' as const, targetField: 'likeCount' }
-    expect(() => validateConfig({ ...base, connections: [], aggregates: [agg] })).not.toThrow()
-    expect(() => validateConfig({ ...base, connections: [], aggregates: [{ ...agg, source: 'like', idParam: undefined, idField: 'postId', aggregate: { sum: 'weight' } }] })).not.toThrow()
-    expect(problemsOf({ ...base, connections: [], aggregates: [{ ...agg, idField: 'postId' }] })).toContainEqual(expect.stringContaining('exactly one of'))
-    expect(problemsOf({ ...base, connections: [], aggregates: [{ ...agg, idParam: 'nope' }] })).toContainEqual(expect.stringContaining('not a placeholder of `source`'))
-    expect(problemsOf({ ...base, connections: [], aggregates: [{ ...agg, aggregate: 'avg' as never }] })).toContainEqual(expect.stringContaining("'count' or { sum"))
-    expect(problemsOf({ ...base, connections: [], aggregates: [{ ...agg, target: 'users/{uid}/post' }] })).toContainEqual(
+    const agg = defineAggregate({ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count' as const, targetField: 'likeCount' })
+    expect(() => validateConfig({ ...base, rules: [agg] })).not.toThrow()
+    expect(() => validateConfig({ ...base, rules: [{ ...agg, source: 'like', idParam: undefined, idField: 'postId', aggregate: { sum: 'weight' } }] })).not.toThrow()
+    expect(problemsOf({ ...base, rules: [{ ...agg, idField: 'postId' }] })).toContainEqual(expect.stringContaining('exactly one of'))
+    expect(problemsOf({ ...base, rules: [{ ...agg, idParam: 'nope' }] })).toContainEqual(expect.stringContaining('not a placeholder of `source`'))
+    expect(problemsOf({ ...base, rules: [{ ...agg, aggregate: 'avg' as never }] })).toContainEqual(expect.stringContaining("'count' or { sum"))
+    expect(problemsOf({ ...base, rules: [{ ...agg, target: 'users/{uid}/post' }] })).toContainEqual(
       expect.stringContaining('{uid} of `target` must also appear in `source`'),
     )
-    const c = base.connections![0]!
-    expect(problemsOf({ ...base, connections: [{ ...c, targetField: 'likeCount' }], aggregates: [{ ...agg }] })).toContainEqual(
+    const c = base.rules[0] as Connection
+    expect(problemsOf({ ...base, rules: [{ ...c, targetField: 'likeCount' }, agg] })).toContainEqual(
       expect.stringContaining('overlaps "likeCount"'),
     )
   })
 
   it('rejects loops where each write triggers the next rule', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const problems = problemsOf({
       ...base,
-      connections: [
+      rules: [
         { ...c, fields: ['name', 'thread'] },
         { ...c, name: 'a', source: 'post', target: 'thread', idField: 'postId', targetField: 'post', fields: ['category'] },
         { ...c, name: 'b', source: 'thread', target: 'category', idField: 'threadId', targetField: 'thread', fields: ['post'] },
@@ -133,11 +147,11 @@ describe('validateConfig', () => {
 
   it('allows collection cycles whose writes do not feed the next rule', () => {
     // thread -> message.thread and message -> thread.lastMessage: neither watches the other's written field
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     expect(() =>
       validateConfig({
         ...base,
-        connections: [
+        rules: [
           { ...c, name: 'message-thread', source: 'thread', target: 'message', idField: 'threadId', fields: ['title'], targetField: 'thread' },
           { ...c, name: 'thread-last', source: 'message', target: 'thread', idField: 'threadId', fields: ['text'], targetField: 'lastMessage' },
         ],
@@ -146,79 +160,82 @@ describe('validateConfig', () => {
   })
 
   it('rejects a count whose write feeds a copy that feeds the count', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const problems = problemsOf({
       ...base,
-      connections: [{ ...c, name: 'like-post', source: 'post', target: 'like', idField: 'postId', fields: ['likeCount'], targetField: 'weight' }],
-      aggregates: [{ name: 'post-likes', source: 'like', target: 'post', idField: 'postId', aggregate: { sum: 'weight' }, targetField: 'likeCount' }],
+      rules: [
+        { ...c, name: 'like-post', source: 'post', target: 'like', idField: 'postId', fields: ['likeCount'], targetField: 'weight' },
+        defineAggregate({ name: 'post-likes', source: 'like', target: 'post', idField: 'postId', aggregate: { sum: 'weight' }, targetField: 'likeCount' }),
+      ],
     })
     expect(problems).toEqual([expect.stringContaining('form a loop')])
   })
 
   it('allows chains without cycles', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     expect(() =>
       validateConfig({
         ...base,
-        connections: [c, { ...c, name: 'a', source: 'post', target: 'thread', idField: 'postId', targetField: 'post' }],
+        rules: [c, { ...c, name: 'a', source: 'post', target: 'thread', idField: 'postId', targetField: 'post' }],
       }),
     ).not.toThrow()
   })
 
   it('lower-cases camelCase collection ids in trigger names', () => {
-    const c = base.connections![0]!
-    const r = validateConfig({ ...base, connections: [{ ...c, source: 'chatRooms', target: 'users/{uid}/userPosts', idField: 'roomId', targetField: 'room' }] })
+    const c = base.rules[0] as Connection
+    const r = validateConfig({ ...base, rules: [{ ...c, source: 'chatRooms', target: 'users/{uid}/userPosts', idField: 'roomId', targetField: 'room' }] })
     expect(collectionsOf(r).map((p) => triggerName('doc-sync', p))).toEqual(['doc-sync-chatrooms', 'doc-sync-users-userposts'])
     // a trigger name may not end with a hyphen
-    expect(problemsOf({ ...base, connections: [{ ...c, source: 'category_' }] })).toContainEqual(expect.stringContaining('trigger name "doc-sync-category-"'))
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'category_' }] })).toContainEqual(expect.stringContaining('trigger name "doc-sync-category-"'))
   })
 
   it('rejects patterns that can match the same documents', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const problems = problemsOf({
       ...base,
-      connections: [c, { ...c, name: 'x', source: 'category', target: 'users/admin/posts', idField: 'categoryId' }, { ...c, name: 'y', source: 'category', target: 'users/{uid}/posts', idField: 'categoryId' }],
+      rules: [c, { ...c, name: 'x', source: 'category', target: 'users/admin/posts', idField: 'categoryId' }, { ...c, name: 'y', source: 'category', target: 'users/{uid}/posts', idField: 'categoryId' }],
     })
     expect(problems).toEqual([expect.stringContaining('"users/admin/posts" and "users/{uid}/posts" can match the same documents')])
   })
 
   it('rejects reserved ids and field names', () => {
-    const c = base.connections![0]!
-    expect(problemsOf({ ...base, connections: [{ ...c, source: '__meta__' }] })).toContainEqual(expect.stringContaining('not a valid collection ID'))
-    expect(problemsOf({ ...base, connections: [{ ...c, target: 'users/../posts' }] })).toContainEqual(expect.stringContaining('not a valid document ID'))
-    expect(problemsOf({ ...base, connections: [{ ...c, fields: ['__name__'] }] })).toContainEqual(expect.stringContaining('not a valid field path'))
+    const c = base.rules[0] as Connection
+    expect(problemsOf({ ...base, rules: [{ ...c, source: '__meta__' }] })).toContainEqual(expect.stringContaining('not a valid collection ID'))
+    expect(problemsOf({ ...base, rules: [{ ...c, target: 'users/../posts' }] })).toContainEqual(expect.stringContaining('not a valid document ID'))
+    expect(problemsOf({ ...base, rules: [{ ...c, fields: ['__name__'] }] })).toContainEqual(expect.stringContaining('not a valid field path'))
   })
 
   it('rejects an idField aggregate whose collection group would count documents of other target parents', () => {
-    const agg = { name: 'post-likes', source: 'shops/{shopId}/users/{uid}/likes', target: 'shops/{shopId}/posts', idField: 'postId', aggregate: 'count' as const, targetField: 'likeCount' }
-    expect(problemsOf({ ...base, connections: [], aggregates: [agg] })).toContainEqual(expect.stringContaining('{uid} that `target` lacks'))
+    const agg = defineAggregate({ name: 'post-likes', source: 'shops/{shopId}/users/{uid}/likes', target: 'shops/{shopId}/posts', idField: 'postId', aggregate: 'count' as const, targetField: 'likeCount' })
+    expect(problemsOf({ ...base, rules: [agg] })).toContainEqual(expect.stringContaining('{uid} that `target` lacks'))
     // without placeholders on the target, the collection group is unambiguous
-    expect(() => validateConfig({ ...base, connections: [], aggregates: [{ ...agg, source: 'users/{uid}/likes', target: 'post' }] })).not.toThrow()
+    expect(() => validateConfig({ ...base, rules: [{ ...agg, source: 'users/{uid}/likes', target: 'post' }] })).not.toThrow()
   })
 
   it('rejects colliding trigger names', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const problems = problemsOf({
       ...base,
-      connections: [c, { ...c, name: 'x', source: 'user_room', target: 'user-room', idField: 'roomId', targetField: 'room' }],
+      rules: [c, { ...c, name: 'x', source: 'user_room', target: 'user-room', idField: 'roomId', targetField: 'room' }],
     })
     expect(problems).toEqual([expect.stringContaining('both map to trigger "doc-sync-user-room"')])
   })
 
   describe('views', () => {
-    const view: ViewRule = {
+    const view: ViewRule = defineView({
       name: 'post-latest-comments',
       target: 'post',
       targetField: 'latestComments',
       sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId', orderBy: [['createdAt', 'desc']], limit: 3 } },
       build: ({ sources }) => sources.comments!.map((c) => c.id),
-    }
-    const only = (v: Partial<ViewRule>) => ({ ...base, connections: [], views: [{ ...view, ...v }] })
+    })
+    const only = (v: Partial<ViewRule>) => ({ ...base, rules: [{ ...view, ...v }] })
 
     it('resolves sources, patterns and ordering', () => {
       const r = validateConfig({
         ...base,
-        views: [
+        rules: [
+          ...base.rules,
           {
             ...view,
             sources: {
@@ -257,7 +274,7 @@ describe('validateConfig', () => {
     })
 
     it('rejects a view name shared with a connection or aggregate', () => {
-      expect(problemsOf({ ...base, views: [{ ...view, name: 'post-category' }] })).toContainEqual(expect.stringContaining('duplicate name'))
+      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, name: 'post-category' }] })).toContainEqual(expect.stringContaining('duplicate name'))
     })
 
     it('requires exactly one of idField, idParam, refField per source', () => {
@@ -308,14 +325,13 @@ describe('validateConfig', () => {
     })
 
     it('keeps targetField apart from other rules and from refFields', () => {
-      const c = base.connections![0]!
-      expect(problemsOf({ ...base, views: [{ ...view, targetField: 'category' }] })).toContainEqual(expect.stringContaining('overlaps "category"'))
-      expect(problemsOf({ ...base, views: [{ ...view, targetField: 'categoryId' }] })).toContainEqual(expect.stringContaining('used as an `idField`'))
+      const c = base.rules[0] as Connection
+      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetField: 'category' }] })).toContainEqual(expect.stringContaining('overlaps "category"'))
+      expect(problemsOf({ ...base, rules: [...base.rules, { ...view, targetField: 'categoryId' }] })).toContainEqual(expect.stringContaining('used as an `idField`'))
       expect(
         problemsOf({
           ...base,
-          connections: [{ ...c, targetField: 'authorId' }],
-          views: [{ ...view, sources: { author: { collection: 'user', refField: 'authorId' } } }],
+          rules: [{ ...c, targetField: 'authorId' }, { ...view, sources: { author: { collection: 'user', refField: 'authorId' } } }],
         }),
       ).toContainEqual(expect.stringContaining('used as an `idField`'))
       expect(
@@ -324,20 +340,22 @@ describe('validateConfig', () => {
     })
 
     it('treats a view without `watch` as watching every field in loop detection', () => {
-      const c = base.connections![0]!
+      const c = base.rules[0] as Connection
       // post-category writes post.category; the view reads post (any field) and writes category.summary, which post-category copies
       const problems = problemsOf({
         ...base,
-        connections: [{ ...c, fields: ['summary'] }],
-        views: [{ ...view, name: 'category-summary', target: 'category', targetField: 'summary', sources: { posts: { collection: 'post', idField: 'categoryId' } } }],
+        rules: [
+          { ...c, fields: ['summary'] },
+          { ...view, name: 'category-summary', target: 'category', targetField: 'summary', sources: { posts: { collection: 'post', idField: 'categoryId' } } },
+        ],
       })
       expect(problems).toEqual([expect.stringMatching(/form a loop.*post-category -> category-summary -> post-category/)])
       // with `watch` restricted to a field post-category does not write, there is no loop
       expect(() =>
         validateConfig({
           ...base,
-          connections: [{ ...c, fields: ['summary'] }],
-          views: [
+          rules: [
+            { ...c, fields: ['summary'] },
             { ...view, name: 'category-summary', target: 'category', targetField: 'summary', sources: { posts: { collection: 'post', idField: 'categoryId', watch: ['title'] } } },
           ],
         }),
@@ -345,14 +363,13 @@ describe('validateConfig', () => {
     })
 
     it('accepts a config with only views', () => {
-      expect(() => validateConfig({ ...base, connections: undefined, views: [view] })).not.toThrow()
+      expect(() => validateConfig({ ...base, rules: [view] })).not.toThrow()
     })
 
     it('reports collection-group queries per source', () => {
       const r = validateConfig({
         ...base,
-        connections: [],
-        views: [
+        rules: [
           {
             ...view,
             target: 'users/{uid}/post',
@@ -367,14 +384,12 @@ describe('validateConfig', () => {
       expect(needsCollectionGroupQuery(r.views[0]!)).toBe(false)
       const r2 = validateConfig({
         ...base,
-        connections: [],
-        views: [{ ...view, target: 'post', sources: { c: { collection: 'users/{uid}/comment', idField: 'postId' }, a: { collection: 'user', refField: 'authorId' } } }],
+        rules: [{ ...view, target: 'post', sources: { c: { collection: 'users/{uid}/comment', idField: 'postId' }, a: { collection: 'user', refField: 'authorId' } } }],
       })
       expect(collectionGroupQueries(r2.views[0]!)).toEqual([{ collection: 'users/{uid}/comment', field: 'postId' }])
       const r3 = validateConfig({
         ...base,
-        connections: [],
-        views: [{ ...view, target: 'users/{uid}/post', sources: { a: { collection: 'user', refField: 'authorId' } } }],
+        rules: [{ ...view, target: 'users/{uid}/post', sources: { a: { collection: 'user', refField: 'authorId' } } }],
       })
       expect(collectionGroupQueries(r3.views[0]!)).toEqual([{ collection: 'users/{uid}/post', field: 'authorId' }])
     })
@@ -388,19 +403,53 @@ describe('validateConfig', () => {
         build: ({ sources }) => sources.comments.length,
         patch: (current, change) => (change.after ? (current ?? 0) + 1 : undefined),
       })
-      expect(() => validateConfig({ ...base, views: [v] })).not.toThrow()
+      expect(() => validateConfig({ ...base, rules: [...base.rules, v] })).not.toThrow()
     })
   })
 
   it('reports several problems at once', () => {
-    const problems = problemsOf({ ...base, region: '', connections: [], aggregates: [] })
+    const problems = problemsOf({ ...base, region: '', rules: [] })
     expect(problems.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('requires rules with a kind', () => {
+    expect(problemsOf({ ...base, rules: [] })).toContainEqual(expect.stringContaining('`rules` must have at least one entry'))
+    expect(problemsOf({ ...base, rules: [{ name: 'x' } as never] })).toContainEqual(expect.stringContaining('rules[0]: `kind` must be'))
+    expect(problemsOf({ ...base, rules: [{ kind: 'connection', source: 'a', target: 'b' } as never] })).toContainEqual(
+      expect.stringContaining('rules[0]: `name` is required'),
+    )
+  })
+
+  it('accepts plain objects with a kind and groups rules by kind in config order', () => {
+    const agg = defineAggregate({ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count' as const, targetField: 'likeCount' })
+    const conn = {
+      kind: 'connection' as const,
+      name: 'post-category',
+      source: 'category',
+      target: 'post',
+      idField: 'categoryId',
+      fields: ['name', 'color'],
+      targetField: 'category',
+      onSourceDelete: 'setNull' as const,
+    }
+    const view = defineView({
+      name: 'post-latest-comments',
+      target: 'post',
+      targetField: 'latestComments',
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: () => [] as string[],
+    })
+    const resolved = validateConfig({ ...base, rules: [agg, conn, view] })
+    expect(resolved.connections).toHaveLength(1)
+    expect(resolved.aggregates).toHaveLength(1)
+    expect(resolved.views).toHaveLength(1)
+    expect(rulesOf(resolved).map((r) => r.name)).toEqual(['post-category', 'post-likes', 'post-latest-comments'])
   })
 })
 
 describe('collectionsOf / triggerName', () => {
   it('lists sorted unique collections, ignoring placeholder names', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const list = collectionsOf({
       connections: [c, { ...c, name: 'x', source: 'area', target: 'category' }, { ...c, name: 'y', source: 'users/{uid}/a', target: 'users/{u}/a' }],
     })
@@ -413,8 +462,7 @@ describe('collectionsOf / triggerName', () => {
     expect(list.map((p) => p.raw)).toEqual(['post', 'post/{postId}/comment', 'user'])
     const resolved = validateConfig({
       ...base,
-      connections: [],
-      views: [{ name: 'v', target: 'post', targetField: 'v', sources: { a: { collection: 'user', refField: 'authorId' } }, build: () => 1 }],
+      rules: [defineView({ name: 'v', target: 'post', targetField: 'v', sources: { a: { collection: 'user', refField: 'authorId' } }, build: () => 1 })],
     })
     expect(collectionsOf(resolved).map((p) => p.raw)).toEqual(['post', 'user'])
   })

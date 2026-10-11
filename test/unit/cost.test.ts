@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineConfig, defineView, validateConfig, writeTriggers } from '../../src/index.js'
+import { defineAggregate, defineConfig, defineConnection, defineView, validateConfig, writeTriggers, type Connection } from '../../src/index.js'
 import { estimateCost, formatChains } from '../../src/cost.js'
 
 const base = defineConfig({
@@ -7,15 +7,11 @@ const base = defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
-    { name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'nothing' },
-  ],
-  aggregates: [
-    { name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' },
-    { name: 'customer-total', source: 'order', target: 'customer', idField: 'customerId', aggregate: { sum: 'amount' }, targetField: 'total' },
-  ],
-  views: [
+  rules: [
+    defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
+    defineConnection({ name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'nothing' }),
+    defineAggregate({ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' }),
+    defineAggregate({ name: 'customer-total', source: 'order', target: 'customer', idField: 'customerId', aggregate: { sum: 'amount' }, targetField: 'total' }),
     defineView({
       name: 'post-summary',
       target: 'post',
@@ -103,12 +99,10 @@ describe('estimateCost', () => {
 
 describe('writeTriggers / formatChains', () => {
   it('lists which rule each write triggers and prints maximal chains', () => {
-    const c = base.connections![0]!
+    const c = base.rules[0] as Connection
     const chained = validateConfig({
       ...base,
-      aggregates: [],
-      views: [],
-      connections: [
+      rules: [
         { ...c, fields: ['name', 'parent'] }, // category -> post.category
         { ...c, name: 'thread-post', source: 'post', target: 'thread', idField: 'postId', fields: ['category'], targetField: 'post' }, // post.category -> thread.post
         { ...c, name: 'msg-thread', source: 'thread', target: 'message', idField: 'threadId', fields: ['post'], targetField: 'thread' },

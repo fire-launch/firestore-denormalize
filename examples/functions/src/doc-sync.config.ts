@@ -1,4 +1,4 @@
-import { defineConfig, defineView } from "firestore-denormalize";
+import { defineAggregate, defineConfig, defineConnection, defineView } from "firestore-denormalize";
 
 /** order.summary shape, computed the same way by build and patch. */
 function summarize(items: Record<string, { sku: string; amount: number }>) {
@@ -12,8 +12,8 @@ export default defineConfig({
   service: "docsync",
   serviceAccount: "doc-sync-trigger",
 
-  connections: [
-    {
+  rules: [
+    defineConnection({
       name: "post-category",
       source: "category",
       target: "post",
@@ -21,8 +21,8 @@ export default defineConfig({
       fields: ["name", "color"],
       targetField: "category",
       onSourceDelete: "setNull",
-    },
-    {
+    }),
+    defineConnection({
       name: "post-author",
       source: "user",
       target: "post",
@@ -30,8 +30,8 @@ export default defineConfig({
       fields: ["displayName", "photoUrl"],
       targetField: "author",
       onSourceDelete: "deleteField",
-    },
-    {
+    }),
+    defineConnection({
       // Subcollections: every placeholder of `source` must also appear in `target`.
       name: "user-post-tag",
       source: "users/{uid}/tags",
@@ -40,11 +40,9 @@ export default defineConfig({
       fields: ["label"],
       targetField: "tag",
       onSourceDelete: "setNull",
-    },
-  ],
+    }),
 
-  aggregates: [
-    {
+    defineAggregate({
       // post.likeCount = number of documents in post/{postId}/like
       name: "post-likes",
       source: "post/{postId}/like",
@@ -52,8 +50,8 @@ export default defineConfig({
       idParam: "postId",
       aggregate: "count",
       targetField: "likeCount",
-    },
-    {
+    }),
+    defineAggregate({
       // customer.total = sum of order.amount where order.customerId == customer id
       name: "customer-total",
       source: "order",
@@ -61,10 +59,8 @@ export default defineConfig({
       idField: "customerId",
       aggregate: { sum: "amount" },
       targetField: "total",
-    },
-  ],
+    }),
 
-  views: [
     defineView({
       // post.latestComments = the 2 newest comments of post/{postId}/comment, as [{ id, body }]
       name: "post-latest-comments",

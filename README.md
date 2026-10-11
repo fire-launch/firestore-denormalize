@@ -19,10 +19,10 @@ Keep data in sync between Firestore documents with **one Cloud Run function and 
 
 ## What this library does
 
-**Copy** (`connections`): copies fields of a document into related documents.
+**Copy** (`defineConnection`): copies fields of a document into related documents.
 
 ```ts
-{
+defineConnection({
   name: 'post-category',
   source: 'category',
   target: 'post',
@@ -30,7 +30,7 @@ Keep data in sync between Firestore documents with **one Cloud Run function and 
   fields: ['name', 'color'],
   targetField: 'category',
   onSourceDelete: 'setNull',
-}
+})
 ```
 ```
 category/c1   { name: 'News', color: 'red', slug: 'news' }
@@ -39,17 +39,17 @@ post/p1       { title: 'Hello', categoryId: 'c1' }
 post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
 ```
 
-**Count / sum** (`aggregates`): keeps the number of documents in a collection, or the sum of a field, in sync.
+**Count / sum** (`defineAggregate`): keeps the number of documents in a collection, or the sum of a field, in sync.
 
 ```ts
-{
+defineAggregate({
   name: 'post-likes',
   source: 'post/{postId}/like',
   target: 'post',
   idParam: 'postId',
   aggregate: 'count', // or { sum: 'amount' }
   targetField: 'likeCount',
-}
+})
 ```
 ```
 post/p1/like/u1, post/p1/like/u2
@@ -58,7 +58,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**View** (`views`): reacts to changes on the target or its sources and assembles any field you like. For latest-N lists, maps keyed by id, summaries.
+**View** (`defineView`): reacts to changes on the target or its sources and assembles any field you like. For latest-N lists, maps keyed by id, summaries.
 
 ```ts
 defineView({
@@ -82,6 +82,8 @@ post/p1       { title: 'Hello' }
                                    ▼
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
+
+These go into the config's `rules` array, in any order, so rules can be grouped by domain and split across files.
 
 All options, including `patch` for views and typed configs, are in the [reference](./docs/reference.md#config).
 

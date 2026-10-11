@@ -14,11 +14,20 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 | `service` | Cloud Run service name of the function (for `onRequest`: the function name, lower-cased) |
 | `serviceRegion` | Cloud Run region. Default `region`; required when `region` is a multi-region (`nam5`, `eur3`) |
 | `serviceAccount` | Trigger service account; a bare ID becomes `<id>@<project>.iam.gserviceaccount.com` |
-| `connections[]` `aggregates[]` `views[]` | Rules, see below |
+| `rules[]` | The rules, in any order: `defineConnection(...)`, `defineAggregate(...)`, `defineView(...)` (or objects with a `kind`) |
+
+```ts
+export default defineConfig({
+  name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger',
+  rules: [defineConnection({ ... }), defineAggregate({ ... }), defineView({ ... })],
+})
+```
+
+Rules may live in other files and be spread into `rules` (`rules: [...postRules, ...userRules]`).
 
 Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fields may be dotted: `address.city`.
 
-### `connections[]`: copy `fields` of `source/{id}` into `target.targetField` where `target.idField == id`
+### `defineConnection`: copy `fields` of `source/{id}` into `target.targetField` where `target.idField == id`
 
 | Key | Meaning |
 |---|---|
@@ -28,7 +37,7 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `targetField` | Target field that receives `{ ...fields }` |
 | `onSourceDelete` | When the source is missing: `'setNull'`, `'deleteField'` or `'nothing'` |
 
-### `aggregates[]`: keep `target.targetField` = `count()` or `sum(field)` over the sources that belong to the target
+### `defineAggregate`: keep `target.targetField` = `count()` or `sum(field)` over the sources that belong to the target
 
 | Key | Meaning |
 |---|---|
@@ -37,7 +46,7 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `aggregate` | `'count'` or `{ sum: '<numeric field>' }` |
 | `targetField` | Numeric target field |
 
-### `views[]`: keep `target.targetField` = `build(...)`
+### `defineView`: keep `target.targetField` = `build(...)`
 
 | Key | Meaning |
 |---|---|
@@ -66,7 +75,7 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 
 ```ts
 type Collections = { post: Post; category: Category; 'post/{postId}/comment': Comment }  // type alias, not interface
-const { defineConfig, defineView } = typed<Collections>()
+const { defineConfig, defineConnection, defineAggregate, defineView } = typed<Collections>()
 ```
 
 Collection names, field paths, `idParam` and the `build` return type are checked against your document types at compile time. Both functions are identities at runtime.

@@ -1,7 +1,7 @@
 import { createServer, type Server } from 'node:http'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore } from 'firebase-admin/firestore'
-import { createDocSyncHandler, defineConfig, startDevBridge } from '../src/index.js'
+import { createDocSyncHandler, defineConfig, defineConnection, startDevBridge } from '../src/index.js'
 import { clearFirestore, firestore, PROJECT, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -13,9 +13,9 @@ const config = defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
-    { name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'setNull' },
+  rules: [
+    defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
+    defineConnection({ name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'setNull' }),
   ],
 })
 

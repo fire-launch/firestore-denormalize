@@ -106,7 +106,7 @@ const config = defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  views: [latestComments, badges, summary, nested, mentions, latestMessages],
+  rules: [latestComments, badges, summary, nested, mentions, latestMessages],
 })
 
 function handlerFor(cfg: DocSyncConfig = config, opts: Parameters<typeof createDocSyncHandler>[1] = {}) {
@@ -346,7 +346,7 @@ describe('views: refField fan-out with patch reads the changed document once per
   it('counts N target reads plus one read per page', async () => {
     await db.doc('user/u1').set({ name: 'Ann' })
     for (let i = 0; i < 5; i++) await db.doc(`post/p${i}`).set({ authorId: 'u1' })
-    const { handler, logs } = handlerFor(defineConfig({ ...config, views: [summaryPatch] })) // pageSize 2 -> pages 2, 2, 1
+    const { handler, logs } = handlerFor(defineConfig({ ...config, rules: [summaryPatch] })) // pageSize 2 -> pages 2, 2, 1
     const user = db.doc('user/u1')
     expect(await invoke(handler, await change(user, () => user.update({ name: 'Anne' })))).toBe(204)
     for (let i = 0; i < 5; i++) expect((await db.doc(`post/p${i}`).get()).get('authorName')).toBe('Anne')

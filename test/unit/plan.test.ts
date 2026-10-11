@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateConfig } from '../../src/config.js'
+import { defineConnection, validateConfig } from '../../src/config.js'
 import {
   desiredTriggers,
   ownedTriggers,
@@ -18,9 +18,9 @@ const config = validateConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    { name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
-    { name: 'b', source: 'post', target: 'user_room', idField: 'postId', fields: ['title'], targetField: 'post', onSourceDelete: 'nothing' },
+  rules: [
+    defineConnection({ name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
+    defineConnection({ name: 'b', source: 'post', target: 'user_room', idField: 'postId', fields: ['title'], targetField: 'post', onSourceDelete: 'nothing' }),
   ],
 })
 

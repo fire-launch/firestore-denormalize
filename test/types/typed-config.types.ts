@@ -41,7 +41,7 @@ type Collections = {
   'users/{uid}/tags': Tag
 }
 
-const { defineConfig, defineView } = typed<Collections>()
+const { defineConfig, defineConnection, defineAggregate, defineView } = typed<Collections>()
 
 // ---------------------------------------------------------------- helpers
 
@@ -80,19 +80,32 @@ defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'sa',
-  connections: [
-    { name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' },
-    { name: 'b', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'nothing' },
+  rules: [
+    { kind: 'connection', name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'color'], targetField: 'category', onSourceDelete: 'setNull' },
+    { kind: 'connection', name: 'b', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'nothing' },
     // @ts-expect-error unknown source collection
-    { name: 'c', source: 'categories', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
+    { kind: 'connection', name: 'c', source: 'categories', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
     // @ts-expect-error `nam` is not a field of Category
-    { name: 'd', source: 'category', target: 'post', idField: 'categoryId', fields: ['nam'], targetField: 'category', onSourceDelete: 'setNull' },
+    { kind: 'connection', name: 'd', source: 'category', target: 'post', idField: 'categoryId', fields: ['nam'], targetField: 'category', onSourceDelete: 'setNull' },
     // @ts-expect-error idField must be a string field of the target (likeCount is a number)
-    { name: 'e', source: 'category', target: 'post', idField: 'likeCount', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
+    { kind: 'connection', name: 'e', source: 'category', target: 'post', idField: 'likeCount', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
     // @ts-expect-error targetField must exist on the target
-    { name: 'f', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'categry', onSourceDelete: 'setNull' },
+    { kind: 'connection', name: 'f', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'categry', onSourceDelete: 'setNull' },
   ],
 })
+
+// ---------------------------------------------------------------- helpers for rules kept in other files
+
+const standalone = defineConnection({
+  name: 'standalone', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull',
+})
+const standaloneCount = defineAggregate({ name: 'count', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount' })
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [standalone, standaloneCount] })
+
+// @ts-expect-error `nam` is not a field of Category
+defineConnection({ name: 'x', source: 'category', target: 'post', idField: 'categoryId', fields: ['nam'], targetField: 'category', onSourceDelete: 'setNull' })
+// @ts-expect-error sum needs a numeric field of the source
+defineAggregate({ name: 'x', source: 'post', target: 'category', idField: 'categoryId', aggregate: { sum: 'title' }, targetField: 'postCount' })
 
 // ---------------------------------------------------------------- aggregates
 
@@ -101,15 +114,15 @@ defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'sa',
-  aggregates: [
-    { name: 'a', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount' },
-    { name: 'b', source: 'post/{postId}/comment', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' },
+  rules: [
+    { kind: 'aggregate', name: 'a', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount' },
+    { kind: 'aggregate', name: 'b', source: 'post/{postId}/comment', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' },
     // @ts-expect-error idParam must be a placeholder of the source
-    { name: 'c', source: 'post/{postId}/comment', target: 'post', idParam: 'commentId', aggregate: 'count', targetField: 'likeCount' },
+    { kind: 'aggregate', name: 'c', source: 'post/{postId}/comment', target: 'post', idParam: 'commentId', aggregate: 'count', targetField: 'likeCount' },
     // @ts-expect-error sum needs a numeric field of the source
-    { name: 'd', source: 'post', target: 'category', idField: 'categoryId', aggregate: { sum: 'title' }, targetField: 'postCount' },
+    { kind: 'aggregate', name: 'd', source: 'post', target: 'category', idField: 'categoryId', aggregate: { sum: 'title' }, targetField: 'postCount' },
     // @ts-expect-error targetField must be numeric
-    { name: 'e', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'name' },
+    { kind: 'aggregate', name: 'e', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'name' },
   ],
 })
 
@@ -141,7 +154,7 @@ const latest = defineView({
   },
 })
 
-defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', views: [latest] })
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [latest] })
 
 defineView({
   name: 'x',

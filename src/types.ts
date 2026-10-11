@@ -71,6 +71,7 @@ export type Params<P extends string> = P extends `${string}{${infer N}}${infer R
 // ---------------------------------------------------------------- rules
 
 export interface TypedConnection<C, S extends Key<C>, T extends Key<C>> {
+  kind: 'connection'
   name: string
   source: S
   target: T
@@ -84,6 +85,7 @@ export interface TypedConnection<C, S extends Key<C>, T extends Key<C>> {
 }
 
 export interface TypedAggregate<C, S extends Key<C>, T extends Key<C>> {
+  kind: 'aggregate'
   name: string
   source: S
   target: T
@@ -130,6 +132,7 @@ export interface TypedPatchContext<C, T extends Key<C>> {
 }
 
 export interface TypedViewRule<C, T extends Key<C>, TF extends FieldPath<C[T]>, S extends Record<string, TypedViewSource<C, T>>> {
+  kind: 'view'
   name: string
   target: T
   targetField: TF
@@ -142,29 +145,35 @@ export interface TypedViewRule<C, T extends Key<C>, TF extends FieldPath<C[T]>, 
   ): Get<C[T], TF> | undefined | Promise<Get<C[T], TF> | undefined>
 }
 
-export interface TypedDocSyncConfig<C> extends Omit<DocSyncConfig, 'connections' | 'aggregates' | 'views'> {
-  connections?: AnyTypedConnection<C>[]
-  aggregates?: AnyTypedAggregate<C>[]
-  /** Views made with the `defineView` returned by the same `typed<C>()` call. */
-  views?: ViewRule[]
+/** A rule in a typed config: a typed connection or aggregate, or a view made with the typed `defineView`. */
+export type TypedRule<C> = AnyTypedConnection<C> | AnyTypedAggregate<C> | ViewRule
+
+export interface TypedDocSyncConfig<C> extends Omit<DocSyncConfig, 'rules'> {
+  rules: TypedRule<C>[]
 }
 
 export interface Typed<C> {
   /** Like `defineConfig`, with `source` / `target` / field names checked against `C`. */
   defineConfig(config: TypedDocSyncConfig<C>): DocSyncConfig
+  /** Like `defineConnection`, with `source` / `target` / field names checked against `C`. */
+  defineConnection<S extends Key<C>, T extends Key<C>>(rule: Omit<TypedConnection<C, S, T>, 'kind'>): TypedConnection<C, S, T>
+  /** Like `defineAggregate`, with `source` / `target` / field names checked against `C`. */
+  defineAggregate<S extends Key<C>, T extends Key<C>>(rule: Omit<TypedAggregate<C, S, T>, 'kind'>): TypedAggregate<C, S, T>
   /** Like `defineView`, with `sources` typed from `C` and `build` / `patch` typed from the target field. */
   defineView<T extends Key<C>, TF extends FieldPath<C[T]>, S extends Record<string, TypedViewSource<C, T>>>(
-    view: TypedViewRule<C, T, TF, S>,
+    view: Omit<TypedViewRule<C, T, TF, S>, 'kind'>,
   ): ViewRule
 }
 
 /**
- * Binds your collection types. Both returned functions are identities at runtime; the result
- * is an ordinary `DocSyncConfig` / `ViewRule`.
+ * Binds your collection types. The returned functions only tag rules with their `kind`; the
+ * results are ordinary `DocSyncConfig` / rule objects.
  */
 export function typed<C extends Collections>(): Typed<C> {
   return {
     defineConfig: (config) => config as unknown as DocSyncConfig,
-    defineView: (view) => view as unknown as ViewRule,
+    defineConnection: (rule) => ({ kind: 'connection', ...rule }),
+    defineAggregate: (rule) => ({ kind: 'aggregate', ...rule }),
+    defineView: (view) => ({ kind: 'view', ...view }) as unknown as ViewRule,
   }
 }

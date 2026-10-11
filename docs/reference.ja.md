@@ -14,11 +14,20 @@
 | `service` | 関数の Cloud Run サービス名（`onRequest` の場合は関数名を小文字化したもの） |
 | `serviceRegion` | Cloud Run のリージョン。既定は `region`。`region` がマルチリージョン（`nam5`、`eur3` など）のときは必須 |
 | `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完される |
-| `connections[]` `aggregates[]` `views[]` | ルール。詳細は後述 |
+| `rules[]` | ルール。順序は自由: `defineConnection(...)`、`defineAggregate(...)`、`defineView(...)`（または `kind` を持つオブジェクト） |
+
+```ts
+export default defineConfig({
+  name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger',
+  rules: [defineConnection({ ... }), defineAggregate({ ... }), defineView({ ... })],
+})
+```
+
+ルールは別のファイルに置いて `rules` にスプレッドできます（`rules: [...postRules, ...userRules]`）。
 
 コレクションはパスで書き、親 ID はプレースホルダにします: `users/{uid}/posts`。フィールドはドット区切りでも書けます: `address.city`。
 
-### connections[]: `source/{id}` の `fields` を、`target.idField == id` となる `target.targetField` にコピーする
+### defineConnection: `source/{id}` の `fields` を、`target.idField == id` となる `target.targetField` にコピーする
 
 | キー | 意味 |
 |---|---|
@@ -28,7 +37,7 @@
 | `targetField` | `{ ...fields }` を受け取るターゲットのフィールド |
 | `onSourceDelete` | ソースが存在しないときの動作: `'setNull'`、`'deleteField'`、`'nothing'` |
 
-### aggregates[]: ターゲットに属するソースの `count()` または `sum(field)` を `target.targetField` に保つ
+### defineAggregate: ターゲットに属するソースの `count()` または `sum(field)` を `target.targetField` に保つ
 
 | キー | 意味 |
 |---|---|
@@ -37,7 +46,7 @@
 | `aggregate` | `'count'` または `{ sum: '<numeric field>' }` |
 | `targetField` | 数値のターゲットフィールド |
 
-### views[]: `target.targetField` を `build(...)` の結果に保つ
+### defineView: `target.targetField` を `build(...)` の結果に保つ
 
 | キー | 意味 |
 |---|---|
@@ -66,7 +75,7 @@
 
 ```ts
 type Collections = { post: Post; category: Category; 'post/{postId}/comment': Comment }  // インターフェースではなく型エイリアス
-const { defineConfig, defineView } = typed<Collections>()
+const { defineConfig, defineConnection, defineAggregate, defineView } = typed<Collections>()
 ```
 
 コレクション名、フィールドパス、`idParam`、`build` の戻り値の型が、ドキュメントの型に対してコンパイル時に検査されます。どちらの関数も実行時には何もしません。

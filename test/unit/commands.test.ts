@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineView, validateConfig } from '../../src/config.js'
+import { defineConnection, defineView, validateConfig } from '../../src/config.js'
 import { deploy, setup, validate, type Context } from '../../src/cli/commands.js'
 import { CommandError, formatCommand, type Runner } from '../../src/cli/exec.js'
 
@@ -8,8 +8,8 @@ const config = validateConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    { name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
+  rules: [
+    defineConnection({ name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
   ],
 })
 
@@ -119,11 +119,9 @@ describe('validate', () => {
     region: 'asia-northeast1',
     service: 'docsync',
     serviceAccount: 'doc-sync-trigger',
-    connections: [
-      { name: 'area-category', source: 'area', target: 'category', idField: 'areaId', fields: ['name'], targetField: 'parent', onSourceDelete: 'setNull' },
-      { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'parent'], targetField: 'category', onSourceDelete: 'setNull' },
-    ],
-    views: [
+    rules: [
+      defineConnection({ name: 'area-category', source: 'area', target: 'category', idField: 'areaId', fields: ['name'], targetField: 'parent', onSourceDelete: 'setNull' }),
+      defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name', 'parent'], targetField: 'category', onSourceDelete: 'setNull' }),
       defineView({
         name: 'post-summary',
         target: 'post',

@@ -19,6 +19,7 @@ export type OnSourceDelete = 'setNull' | 'deleteField' | 'nothing'
  * source of a target can be located. Field names may be dotted paths (`address.city`).
  */
 export interface Connection {
+  kind: 'connection'
   /** Unique name, used in logs. */
   name: string
   /** Collection the data is copied from. */
@@ -44,6 +45,7 @@ export interface Connection {
  * placeholder of the source path (`idParam: 'postId'` for `source: 'post/{postId}/like'`).
  */
 export interface AggregateRule {
+  kind: 'aggregate'
   /** Unique name, used in logs. */
   name: string
   /** Collection whose documents are counted / summed. */
@@ -124,6 +126,7 @@ export interface PatchContext {
  * cannot express: "latest N items", a map keyed by id, a custom summary.
  */
 export interface ViewRule<S extends Record<string, ViewSource> = Record<string, ViewSource>, T = unknown> {
+  kind: 'view'
   /** Unique name, used in logs. */
   name: string
   /** Collection holding the derived value. */
@@ -160,19 +163,19 @@ export interface DocSyncConfig {
   serviceRegion?: string
   /** Service account used by the triggers. A bare ID is expanded to `<id>@<project>.iam.gserviceaccount.com`. */
   serviceAccount: string
-  connections?: Connection[]
-  aggregates?: AggregateRule[]
-  views?: ViewRule[]
+  /** The rules, in any order: {@link defineConnection}, {@link defineAggregate} and {@link defineView} results, or objects with a `kind`. */
+  rules: Rule[]
 }
 
+/** One rule of any kind. */
+export type Rule = Connection | AggregateRule | ViewRule
+
 export interface ResolvedConnection extends Connection {
-  kind: 'connection'
   sourcePattern: CollectionPattern
   targetPattern: CollectionPattern
 }
 
 export interface ResolvedAggregate extends AggregateRule {
-  kind: 'aggregate'
   sourcePattern: CollectionPattern
   targetPattern: CollectionPattern
   /** Source fields whose change requires a recompute (`idField` and/or the summed field). */
@@ -206,8 +209,8 @@ export interface ResolvedView {
 
 export type ResolvedRule = ResolvedConnection | ResolvedAggregate | ResolvedView
 
-/** Config with defaults applied and patterns parsed. */
-export interface ResolvedConfig extends Omit<DocSyncConfig, 'views'> {
+/** Config with defaults applied, patterns parsed and rules grouped by kind. */
+export interface ResolvedConfig extends Omit<DocSyncConfig, 'rules'> {
   /** Marks a config that already went through {@link validateConfig}. */
   resolved: true
   database: string
@@ -227,9 +230,19 @@ export function resolveConfig(config: DocSyncConfig | ResolvedConfig): ResolvedC
   return (config as ResolvedConfig).resolved === true ? (config as ResolvedConfig) : validateConfig(config as DocSyncConfig)
 }
 
-/** Identity helper that types `build` / `patch` from the view's own `sources` keys. */
-export function defineView<S extends Record<string, ViewSource>, T>(view: ViewRule<S, T>): ViewRule<S, T> {
-  return view
+/** Tags a copy rule with its `kind` so it can go into `rules`. */
+export function defineConnection(rule: Omit<Connection, 'kind'>): Connection {
+  return { kind: 'connection', ...rule }
+}
+
+/** Tags a count / sum rule with its `kind` so it can go into `rules`. */
+export function defineAggregate(rule: Omit<AggregateRule, 'kind'>): AggregateRule {
+  return { kind: 'aggregate', ...rule }
+}
+
+/** Tags a view with its `kind` and types `build` / `patch` from the view's own `sources` keys. */
+export function defineView<S extends Record<string, ViewSource>, T>(view: Omit<ViewRule<S, T>, 'kind'>): ViewRule<S, T> {
+  return { kind: 'view', ...view } as ViewRule<S, T>
 }
 
 /** Every rule of a resolved config, connections first. */
@@ -281,18 +294,21 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     problems.push('`serviceRegion` must be a non-empty string')
   }
 
-  const connections = config.connections === undefined ? [] : config.connections
-  const aggregates = config.aggregates === undefined ? [] : config.aggregates
-  const views = config.views === undefined ? [] : config.views
-  if (!Array.isArray(connections)) problems.push('`connections` must be an array')
-  if (!Array.isArray(aggregates)) problems.push('`aggregates` must be an array')
-  if (!Array.isArray(views)) problems.push('`views` must be an array')
-  const connList = Array.isArray(connections) ? connections : []
-  const aggList = Array.isArray(aggregates) ? aggregates : []
-  const viewList = Array.isArray(views) ? views : []
-  if (connList.length + aggList.length + viewList.length === 0) {
-    problems.push('at least one entry in `connections`, `aggregates` or `views` is required')
-  }
+  const rules: unknown[] = Array.isArray(config.rules) ? config.rules : []
+  if (!Array.isArray(config.rules)) problems.push('`rules` must be an array')
+  else if (rules.length === 0) problems.push('`rules` must have at least one entry')
+  // Keep the original index of every rule for messages about rules without a usable name.
+  const connList: { rule: Connection; i: number }[] = []
+  const aggList: { rule: AggregateRule; i: number }[] = []
+  const viewList: { rule: ViewRule; i: number }[] = []
+  rules.forEach((r, i) => {
+    const kind = (r as { kind?: unknown } | null)?.kind
+    if (!r || typeof r !== 'object') problems.push(`rules[${i}]: must be an object`)
+    else if (kind === 'connection') connList.push({ rule: r as Connection, i })
+    else if (kind === 'aggregate') aggList.push({ rule: r as AggregateRule, i })
+    else if (kind === 'view') viewList.push({ rule: r as ViewRule, i })
+    else problems.push(`rules[${i}]: \`kind\` must be 'connection' | 'aggregate' | 'view' (use defineConnection / defineAggregate / defineView)`)
+  })
 
   const names = new Map<string, string>()
   const writtenFields: { rule: string; target: CollectionPattern; field: string }[] = []
@@ -334,8 +350,8 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     return true
   }
 
-  connList.forEach((c, i) => {
-    const label = str(c?.name) ? `connection "${c.name}"` : `connections[${i}]`
+  connList.forEach(({ rule: c, i }) => {
+    const label = str(c?.name) ? `connection "${c.name}"` : `rules[${i}]`
     if (!c || typeof c !== 'object') {
       problems.push(`${label}: must be an object`)
       return
@@ -373,12 +389,12 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     if (target && okTarget) writtenFields.push({ rule: label, target, field: c.targetField })
     if (target && okId) idFields.push({ target, field: c.idField })
     if (source && target && okId && okTarget && okFields) {
-      resolvedConnections.push({ ...c, kind: 'connection', sourcePattern: source, targetPattern: target })
+      resolvedConnections.push({ ...c, sourcePattern: source, targetPattern: target })
     }
   })
 
-  aggList.forEach((a, i) => {
-    const label = str(a?.name) ? `aggregate "${a.name}"` : `aggregates[${i}]`
+  aggList.forEach(({ rule: a, i }) => {
+    const label = str(a?.name) ? `aggregate "${a.name}"` : `rules[${i}]`
     if (!a || typeof a !== 'object') {
       problems.push(`${label}: must be an object`)
       return
@@ -420,12 +436,12 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     if (target && okTarget) writtenFields.push({ rule: label, target, field: a.targetField })
     if (source && target && okTarget && (okId || (hasIdParam && str(a.idParam))) && (a.aggregate === 'count' || sumField)) {
       const watched = [a.idField, sumField].filter((f): f is string => typeof f === 'string')
-      resolvedAggregates.push({ ...a, kind: 'aggregate', sourcePattern: source, targetPattern: target, watchedFields: watched })
+      resolvedAggregates.push({ ...a, sourcePattern: source, targetPattern: target, watchedFields: watched })
     }
   })
 
-  viewList.forEach((v, i) => {
-    const label = str(v?.name) ? `view "${v.name}"` : `views[${i}]`
+  viewList.forEach(({ rule: v, i }) => {
+    const label = str(v?.name) ? `view "${v.name}"` : `rules[${i}]`
     if (!v || typeof v !== 'object') {
       problems.push(`${label}: must be an object`)
       return

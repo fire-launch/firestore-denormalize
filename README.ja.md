@@ -18,10 +18,10 @@ Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 �
 
 ## 本ライブラリでできること
 
-**コピー**（`connections`）: ドキュメントのフィールドを、関連ドキュメントにコピーします。
+**コピー**（`defineConnection`）: ドキュメントのフィールドを、関連ドキュメントにコピーします。
 
 ```ts
-{
+defineConnection({
   name: 'post-category',
   source: 'category',
   target: 'post',
@@ -29,7 +29,7 @@ Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 �
   fields: ['name', 'color'],
   targetField: 'category',
   onSourceDelete: 'setNull',
-}
+})
 ```
 ```
 category/c1   { name: 'News', color: 'red', slug: 'news' }
@@ -38,17 +38,17 @@ post/p1       { title: 'Hello', categoryId: 'c1' }
 post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
 ```
 
-**件数・合計**（`aggregates`）: コレクション内のドキュメント数や特定フィールドの合計値を同期します
+**件数・合計**（`defineAggregate`）: コレクション内のドキュメント数や特定フィールドの合計値を同期します
 
 ```ts
-{
+defineAggregate({
   name: 'post-likes',
   source: 'post/{postId}/like',
   target: 'post',
   idParam: 'postId',
   aggregate: 'count', // または { sum: 'amount' }
   targetField: 'likeCount',
-}
+})
 ```
 ```
 post/p1/like/u1, post/p1/like/u2
@@ -57,7 +57,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**ビュー**（`views`）: 同期先/同期元の変更を検知し、任意のフィールドを組み立てます。最新 N 件のリスト、ID をキーにしたマップ、サマリーなどに使います。
+**ビュー**（`defineView`）: 同期先/同期元の変更を検知し、任意のフィールドを組み立てます。最新 N 件のリスト、ID をキーにしたマップ、サマリーなどに使います。
 
 ```ts
 defineView({
@@ -81,6 +81,8 @@ post/p1       { title: 'Hello' }
                                    ▼
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
+
+これらは設定の `rules` 配列に入れます。順序は自由なので、ドメインごとにまとめてファイルを分けられます。
 
 `patch`（ビュー用）や型付き設定を含む全オプションは [リファレンス](./docs/reference.ja.md#設定) にあります。
 

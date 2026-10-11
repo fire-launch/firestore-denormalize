@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { FieldValue, type Firestore, Timestamp } from 'firebase-admin/firestore'
-import { createDocSyncHandler, defineConfig, type DocSyncConfig } from '../src/index.js'
+import { createDocSyncHandler, defineAggregate, defineConfig, defineConnection, type DocSyncConfig } from '../src/index.js'
 import { change, clearFirestore, encodeEvent, firestore, invoke, resourceName, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -10,8 +10,8 @@ const config = defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    {
+  rules: [
+    defineConnection({
       name: 'post-category',
       source: 'category',
       target: 'post',
@@ -19,8 +19,8 @@ const config = defineConfig({
       fields: ['name', 'color'],
       targetField: 'category',
       onSourceDelete: 'setNull',
-    },
-    {
+    }),
+    defineConnection({
       name: 'post-author',
       source: 'user',
       target: 'post',
@@ -28,8 +28,8 @@ const config = defineConfig({
       fields: ['name'],
       targetField: 'author',
       onSourceDelete: 'deleteField',
-    },
-    {
+    }),
+    defineConnection({
       name: 'post-tag',
       source: 'tag',
       target: 'post',
@@ -37,7 +37,7 @@ const config = defineConfig({
       fields: ['label'],
       targetField: 'tag',
       onSourceDelete: 'nothing',
-    },
+    }),
   ],
 })
 
@@ -437,9 +437,9 @@ describe('precondition failures (5.4)', () => {
 describe('chains (5.5)', () => {
   const chain = defineConfig({
     ...config,
-    connections: [
-      { name: 'shop-area', source: 'area', target: 'shop', idField: 'areaId', fields: ['name'], targetField: 'area', onSourceDelete: 'setNull' },
-      { name: 'post-shop', source: 'shop', target: 'post', idField: 'shopId', fields: ['name', 'area'], targetField: 'shop', onSourceDelete: 'setNull' },
+    rules: [
+      defineConnection({ name: 'shop-area', source: 'area', target: 'shop', idField: 'areaId', fields: ['name'], targetField: 'area', onSourceDelete: 'setNull' }),
+      defineConnection({ name: 'post-shop', source: 'shop', target: 'post', idField: 'shopId', fields: ['name', 'area'], targetField: 'shop', onSourceDelete: 'setNull' }),
     ],
   })
 
@@ -577,8 +577,8 @@ describe('request handling (5.1 / 6)', () => {
 describe('subcollections and dotted fields', () => {
   const nested = defineConfig({
     ...config,
-    connections: [
-      {
+    rules: [
+      defineConnection({
         name: 'user-post-category',
         source: 'users/{uid}/categories',
         target: 'users/{uid}/posts',
@@ -586,8 +586,8 @@ describe('subcollections and dotted fields', () => {
         fields: ['name'],
         targetField: 'category',
         onSourceDelete: 'setNull',
-      },
-      {
+      }),
+      defineConnection({
         name: 'post-global-tag',
         source: 'tag',
         target: 'users/{uid}/posts',
@@ -595,8 +595,8 @@ describe('subcollections and dotted fields', () => {
         fields: ['label'],
         targetField: 'tag',
         onSourceDelete: 'deleteField',
-      },
-      {
+      }),
+      defineConnection({
         name: 'profile-city',
         source: 'city',
         target: 'profile',
@@ -604,7 +604,7 @@ describe('subcollections and dotted fields', () => {
         fields: ['address.city', 'name'],
         targetField: 'meta.city',
         onSourceDelete: 'setNull',
-      },
+      }),
     ],
   })
 
@@ -673,10 +673,9 @@ describe('subcollections and dotted fields', () => {
 describe('aggregates (count / sum)', () => {
   const agg = defineConfig({
     ...config,
-    connections: [],
-    aggregates: [
-      { name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' },
-      { name: 'customer-total', source: 'order', target: 'customer', idField: 'customerId', aggregate: { sum: 'amount' }, targetField: 'total' },
+    rules: [
+      defineAggregate({ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount' }),
+      defineAggregate({ name: 'customer-total', source: 'order', target: 'customer', idField: 'customerId', aggregate: { sum: 'amount' }, targetField: 'total' }),
     ],
   })
 

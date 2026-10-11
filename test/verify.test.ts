@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore } from 'firebase-admin/firestore'
-import { defineConfig, verify, type Mismatch } from '../src/index.js'
+import { defineAggregate, defineConfig, defineConnection, verify, type Mismatch } from '../src/index.js'
 import { clearFirestore, firestore, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -10,12 +10,12 @@ const config = defineConfig({
   region: 'asia-northeast1',
   service: 'docsync',
   serviceAccount: 'doc-sync-trigger',
-  connections: [
-    { name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' },
-    { name: 'post-author', source: 'user', target: 'post', idField: 'authorId', fields: ['name'], targetField: 'author', onSourceDelete: 'nothing' },
-    { name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'deleteField' },
+  rules: [
+    defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
+    defineConnection({ name: 'post-author', source: 'user', target: 'post', idField: 'authorId', fields: ['name'], targetField: 'author', onSourceDelete: 'nothing' }),
+    defineConnection({ name: 'user-post-tag', source: 'users/{uid}/tags', target: 'users/{uid}/posts', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'deleteField' }),
+    defineAggregate({ name: 'category-posts', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount' }),
   ],
-  aggregates: [{ name: 'category-posts', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount' }],
 })
 
 beforeAll(() => {
