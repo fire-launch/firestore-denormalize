@@ -342,7 +342,7 @@ describe('validateConfig', () => {
     })
 
     it('rejects a connection writing a field a view uses as refField', () => {
-      const conn = defineConnection({ name: 'post-author-id', source: 'user', target: 'post', idField: 'authorId', fields: ['name'], targetField: 'authorId', onSourceDelete: 'setNull' })
+      const conn = defineConnection({ name: 'post-author-id', source: 'user', target: 'post', idField: 'userId', fields: ['name'], targetField: 'authorId', onSourceDelete: 'setNull' })
       const withRef = { ...view, sources: { ...view.sources, author: { collection: 'user', refField: 'authorId' } } }
       expect(problemsOf({ ...base, rules: [conn, withRef] })).toContainEqual(expect.stringContaining('is used as an `idField` by another rule'))
     })

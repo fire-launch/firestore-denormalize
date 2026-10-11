@@ -510,7 +510,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
       if (prev && prev.key !== basePattern.key) {
         problems.push(`${label}: \`base\` "${v.base}" differs from "${prev.raw}" declared by ${prev.rule} for the same target`)
         okBase = false
-      } else if (!prev) baseByTarget.set(target.key, { key: basePattern.key, raw: v.base as string, rule: label })
+      } else if (!prev && okBase) baseByTarget.set(target.key, { key: basePattern.key, raw: v.base as string, rule: label })
     }
     if (restCount > 1) {
       problems.push(`${label}: 'rest' may appear once in \`targetFields\``)
