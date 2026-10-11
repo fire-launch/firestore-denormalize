@@ -462,6 +462,9 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
   })
 
+  /** The base declared for each target collection, so every base view of a target agrees. */
+  const baseByTarget = new Map<string, { key: string; raw: string; rule: string }>()
+
   viewList.forEach(({ rule: v, i }) => {
     const label = str(v?.name) ? `view "${v.name}"` : `rules[${i}]`
     if (!v || typeof v !== 'object') {
@@ -490,25 +493,54 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         }
       }
     }
-    if (restCount > 0) {
+    const hasBase = v.base !== undefined
+    const basePattern = hasBase ? pattern(v.base, label, 'base') : undefined
+    let okBase = !hasBase || basePattern !== undefined
+    if (basePattern && target) {
+      if (basePattern.key === target.key) {
+        problems.push(`${label}: \`base\` and \`target\` must be different collections`)
+        okBase = false
+      }
+      const sameParams = basePattern.params.length === target.params.length && basePattern.params.every((p) => target.params.includes(p))
+      if (!sameParams) {
+        problems.push(`${label}: \`base\` must have the same placeholders as \`target\``)
+        okBase = false
+      }
+      const prev = baseByTarget.get(target.key)
+      if (prev && prev.key !== basePattern.key) {
+        problems.push(`${label}: \`base\` "${v.base}" differs from "${prev.raw}" declared by ${prev.rule} for the same target`)
+        okBase = false
+      } else if (!prev) baseByTarget.set(target.key, { key: basePattern.key, raw: v.base as string, rule: label })
+    }
+    if (restCount > 1) {
+      problems.push(`${label}: 'rest' may appear once in \`targetFields\``)
+      okTargetFields = false
+    }
+    if (restCount > 0 && !hasBase) {
       problems.push(`${label}: 'rest' in \`targetFields\` requires \`base\``)
       okTargetFields = false
     }
 
-    const sourcesIsObject = v.sources !== null && typeof v.sources === 'object' && !Array.isArray(v.sources)
+    const sourcesIsObject = v.sources === undefined || (v.sources !== null && typeof v.sources === 'object' && !Array.isArray(v.sources))
     if (!sourcesIsObject) problems.push(`${label}: \`sources\` must be an object keyed by source name`)
-    const sourceEntries: [string, ViewSource][] = sourcesIsObject ? Object.entries(v.sources as Record<string, ViewSource>) : []
-    if (sourcesIsObject && sourceEntries.length === 0) problems.push(`${label}: \`sources\` must have at least one entry`)
+    const sourceEntries: [string, ViewSource][] = sourcesIsObject && v.sources ? Object.entries(v.sources as Record<string, ViewSource>) : []
+    if (sourcesIsObject && sourceEntries.length === 0 && !hasBase) problems.push(`${label}: \`sources\` must have at least one entry (or set \`base\`)`)
 
     const okBuild = typeof v.build === 'function'
     if (!okBuild) problems.push(`${label}: \`build\` must be a function`)
     const okPatch = v.patch === undefined || typeof v.patch === 'function'
     if (!okPatch) problems.push(`${label}: \`patch\` must be a function`)
 
-    let sourcesOk = sourceEntries.length > 0
+    let sourcesOk = sourcesIsObject && (sourceEntries.length > 0 || hasBase)
     const resolvedSources: ResolvedViewSource[] = []
     for (const [key, s] of sourceEntries) {
       const sLabel = `${label}: source "${key}"`
+      if (key === 'base') {
+        // `RuleResult.source` reports the base as "base"; a source of that name would be indistinguishable in logs.
+        problems.push(`${label}: source key "base" is reserved`)
+        sourcesOk = false
+        continue
+      }
       if (!s || typeof s !== 'object') {
         problems.push(`${sLabel}: must be an object`)
         sourcesOk = false
@@ -629,7 +661,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
 
     if (target && okTargetFields) for (const f of explicit) writtenFields.push({ rule: label, target, field: f })
 
-    if (target && okTargetFields && okBuild && okPatch && sourcesOk) {
+    if (target && okTargetFields && okBuild && okPatch && sourcesOk && okBase) {
       resolvedViews.push({
         kind: 'view',
         name: v.name,
@@ -637,6 +669,8 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         targetFields: explicit,
         rest: restCount === 1,
         reservedRootKeys: [],
+        base: v.base,
+        basePattern,
         targetPattern: target,
         sources: resolvedSources,
         build: v.build,
@@ -710,7 +744,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
 export function collectionsOf(config: {
   connections?: readonly { source: string; target: string }[]
   aggregates?: readonly { source: string; target: string }[]
-  views?: readonly { target: string; sources: Record<string, { collection: string }> | readonly { collection: string }[] }[]
+  views?: readonly { target: string; base?: string; sources?: Record<string, { collection: string }> | readonly { collection: string }[] }[]
 }): CollectionPattern[] {
   const byKey = new Map<string, CollectionPattern>()
   const add = (raw: unknown) => {
@@ -728,6 +762,7 @@ export function collectionsOf(config: {
   }
   for (const v of config.views ?? []) {
     add(v?.target)
+    add(v?.base)
     const sources = v?.sources
     if (sources && typeof sources === 'object') for (const s of Object.values(sources)) add((s as { collection?: unknown })?.collection)
   }
@@ -790,7 +825,7 @@ function writeTriggerEdges(rules: ResolvedRule[]): WriteTrigger[] {
   const watchers = (r: ResolvedRule): { key: string; fields: string[] | undefined }[] => {
     if (r.kind === 'connection') return [{ key: r.sourcePattern.key, fields: r.fields }]
     if (r.kind === 'aggregate') return [{ key: r.sourcePattern.key, fields: r.watchedFields }]
-    return r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))
+    return [...(r.basePattern ? [{ key: r.basePattern.key, fields: undefined }] : []), ...r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))]
   }
   /** Field paths a rule writes; `undefined` when it may write any field (`rest`). */
   const written = (r: ResolvedRule): string[] | undefined => (r.kind === 'view' ? (r.rest ? undefined : r.targetFields) : [r.targetField])

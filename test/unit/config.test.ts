@@ -11,6 +11,7 @@ import {
   rulesOf,
   triggerName,
   validateConfig,
+  writeTriggers,
   type Connection,
   type ViewRule,
 } from '../../src/index.js'
@@ -338,6 +339,36 @@ describe('validateConfig', () => {
       expect(problemsOf(only({ sources: { p: { collection: 'post', idField: 'parentId' } } }))).toContainEqual(
         expect.stringContaining('source "p" and `target` must be different collections'),
       )
+    })
+
+    it('rejects a connection writing a field a view uses as refField', () => {
+      const conn = defineConnection({ name: 'post-author-id', source: 'user', target: 'post', idField: 'authorId', fields: ['name'], targetField: 'authorId', onSourceDelete: 'setNull' })
+      const withRef = { ...view, sources: { ...view.sources, author: { collection: 'user', refField: 'authorId' } } }
+      expect(problemsOf({ ...base, rules: [conn, withRef] })).toContainEqual(expect.stringContaining('is used as an `idField` by another rule'))
+    })
+
+    it('accepts base with the same placeholders and rejects mismatches', () => {
+      const r = validateConfig(only({ base: 'draft', sources: undefined, targetFields: ['title'], build: ({ base }) => ({ title: base!.get('title') }) }))
+      expect(r.views[0]).toMatchObject({ base: 'draft', basePattern: expect.objectContaining({ key: 'draft' }), sources: [] })
+      expect(problemsOf(only({ base: 'post' }))).toContainEqual(expect.stringContaining('`base` and `target` must be different collections'))
+      expect(problemsOf(only({ base: 'shop/{shopId}/draft' }))).toContainEqual(expect.stringContaining('`base` must have the same placeholders as `target`'))
+      expect(problemsOf(only({ sources: undefined }))).toContainEqual(expect.stringContaining('`sources` must have at least one entry (or set `base`)'))
+      expect(problemsOf(only({ targetFields: ['latestComments', 'rest'] }))).toContainEqual(expect.stringContaining("'rest' in `targetFields` requires `base`"))
+      expect(problemsOf(only({ base: 'draft', targetFields: ['rest', 'rest'] }))).toContainEqual(expect.stringContaining("'rest' may appear once"))
+      expect(problemsOf(only({ sources: { base: { collection: 'draft', refField: 'draftId' } } }))).toContainEqual(expect.stringContaining('source key "base" is reserved'))
+    })
+
+    it('requires every base view of a target to agree on the base', () => {
+      const other = { ...view, name: 'post-other', targetFields: ['other'], base: 'archive' }
+      expect(problemsOf({ ...base, rules: [{ ...view, base: 'draft' }, other] })).toContainEqual(
+        expect.stringContaining('`base` "archive" differs from "draft" declared by view "post-latest-comments"'),
+      )
+    })
+
+    it('lists the base collection for triggers and treats a base view as watching every base field', () => {
+      expect(collectionsOf(validateConfig(only({ base: 'draft' }))).map((p) => p.raw)).toContain('draft')
+      const watcher = defineView({ name: 'post-public', target: 'postPublic', base: 'post', targetFields: ['title'], build: ({ base }) => ({ title: base!.get('title') }) })
+      expect(writeTriggers(validateConfig({ ...base, rules: [view, watcher] }))).toContainEqual({ from: 'post-latest-comments', field: 'post.latestComments', to: 'post-public' })
     })
 
     it('treats a view without `watch` as watching every field in loop detection', () => {
