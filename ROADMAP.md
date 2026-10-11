@@ -24,7 +24,7 @@ We stay with **Eventarc → one HTTP function**. We do not intend to add a secon
 | Typed config | Done (v0.4) |
 | Views (`build` + `patch`) | Done (v0.3) |
 | Cost estimate in `validate` | Done (v0.5) |
-| Sync metadata (`_sync`) | Planned |
+| Sync metadata (`_sync`) | Not planned |
 
 ## 1. Required before publishing
 
@@ -96,10 +96,6 @@ Shipped in v0.3.
 
 `doc-sync validate` prints, per rule, the maximum number of document reads and writes caused by one source update (for example "1 read of the source, up to N target reads and N writes, where N is the number of matching targets"). Firestore users are cost-sensitive, and this surfaces fan-out-shaped rules before they are deployed. Shipped in v0.5.
 
-### Sync metadata (`_sync`)
-
-Optional per-rule setting that stores the source's `updateTime` next to the derived value, e.g. `post._sync.category.sourceUpdatedAt`. Clients can tell how fresh a derived value is. The timestamp comes from the source document, not from the clock, so the written value stays deterministic and idempotent.
-
 ## Not planned
 
 These change the correctness model and belong in a separate package, if anywhere:
@@ -108,6 +104,13 @@ These change the correctness model and belong in a separate package, if anywhere
 - **Debouncing with Cloud Tasks.**
 - **Scheduled recomputation of time-dependent values.**
 - **A second deployment mode** based on per-collection `onDocumentWritten` functions; see *Deployment model*.
+
+Deferred because the benefit is small for the complexity it adds to the write path; revisit if a user asks for it:
+
+### Sync metadata (`_sync`)
+
+Optional per-rule setting that stores the source's `updateTime` next to the derived value, e.g. `post._sync.category.sourceUpdatedAt`. Clients can tell how fresh a derived value is. The timestamp comes from the source document, not from the clock, so the written value stays deterministic and idempotent.
+
 
 ## Release plan
 
@@ -119,4 +122,3 @@ These change the correctness model and belong in a separate package, if anywhere
 | v0.4 | typed config |
 | v0.5 | cost estimate, runtime read counters |
 | v1.0 (public release) | validated in the first production project |
-| v1.x | `_sync` metadata |
