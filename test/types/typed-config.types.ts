@@ -2,7 +2,7 @@
  * Compile-time tests for `typed<Collections>()`. Checked by `npm run typecheck`; every
  * `@ts-expect-error` line must fail to compile, every other line must compile.
  */
-import type { Timestamp } from 'firebase-admin/firestore'
+import { Timestamp } from 'firebase-admin/firestore'
 import { typed, type FieldPath, type FieldPathOf, type Get, type Params } from '../../src/index.js'
 
 interface Post {
@@ -287,4 +287,21 @@ defineProjection({
   target: 'userPublic',
   // @ts-expect-error email is not a field of userPublic
   targetFields: ['email'],
+})
+
+// ---------------------------------------------------------------- DeepPartial stops at Leaf types
+
+defineView({
+  name: 'x',
+  target: 'post',
+  targetFields: ['meta'],
+  // @ts-expect-error createdAt must be a Timestamp
+  build: () => ({ meta: { createdAt: 'x', tags: [], by: { uid: 'u' } } }),
+})
+
+defineView({
+  name: 'y',
+  target: 'post',
+  targetFields: ['meta'],
+  build: () => ({ meta: { createdAt: Timestamp.now(), tags: [], by: { uid: 'u' } } }),
 })

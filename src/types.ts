@@ -120,7 +120,7 @@ type SourceDoc<C, S> = S extends { collection: infer K extends Key<C> } ? C[K] :
 /** The first segment of a field path. */
 type Root<P extends string> = P extends `${infer K}.${string}` ? K : P
 
-type DeepPartial<T> = T extends readonly unknown[] ? T : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T
+type DeepPartial<T> = T extends Leaf ? T : T extends object ? { [K in keyof T]?: DeepPartial<T[K]> } : T
 
 /**
  * What `build` / `patch` return and `patch` receives: the target type, deep-partial, restricted to
