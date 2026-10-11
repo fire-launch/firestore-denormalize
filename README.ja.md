@@ -126,9 +126,9 @@ Node.js 20 以上、`firebase-admin` 12 以上、`gcloud` と `firebase` の CLI
 npm install firestore-denormalize
 ```
 
-**1. 設定。** 設定ファイル（例: `doc-sync.config.ts`。名前は自由で、`--config` で渡します）を `functions/src/` に置きます（`firebase deploy` がそこをデプロイするため）。完全な例: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts)。
+**1. 設定ファイル（例: `doc-sync.config.ts`）を `functions/src/` に置きます。** [設定サンプル](./examples/functions/src/doc-sync.config.ts)。
 
-**2. 関数。** ハンドラを HTTP 関数として公開します。`invoker` は必須です。指定しないと関数が公開状態になります。
+**2. ハンドラを HTTP 関数として公開します。`invoker` は必須です。**（指定しないと関数が公開状態になります。）
 
 ```ts
 // functions/src/index.ts
@@ -140,12 +140,15 @@ import config from './doc-sync.config'
 initializeApp()
 
 export const docSync = onRequest(
-  { region: 'asia-northeast1', invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com' },
+  {
+    region: 'asia-northeast1',
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+  },
   createDocSyncHandler(config),
 )
 ```
 
-**3. サービスアカウント、デプロイ、トリガー。**
+**3. サービスアカウント、デプロイ、トリガーの設定。**
 
 ```sh
 npx doc-sync setup  --project <project> --config functions/src/doc-sync.config.ts   # 初回のみ: SA・IAM・API
@@ -153,7 +156,7 @@ firebase deploy --only functions:docSync
 npx doc-sync deploy --project <project> --config functions/src/doc-sync.config.ts   # トリガーを作成・更新・削除
 ```
 
-**4. 既存データ。**
+**4. 既存データの上書き。**
 
 ```sh
 npx doc-sync rebuild --project <project> --config functions/src/doc-sync.config.ts --dry-run   # その後 --dry-run なしで実行
@@ -162,12 +165,23 @@ npx doc-sync verify  --project <project> --config functions/src/doc-sync.config.
 
 ## CLI
 
-```
-doc-sync validate [--config <path>] [--strict]                       # 設定を検査し、コスト見積りを表示
+```shell
+# 設定を検査し、トリガー一覧とコスト見積もりを表示（--strict で警告を失敗扱い）
+doc-sync validate [--config <path>] [--strict]
+
+# トリガー用サービスアカウントの作成、IAM 付与、API 有効化（初回のみ、再実行可）
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
+
+# Eventarc トリガーを設定に合わせて作成・更新・削除（--deploy-function で先に firebase deploy）
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
+
+# 既存のターゲットを全件たどって現在のソースに合わせる（バックフィル。--dry-run は報告のみ）
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+
+# 派生値を再計算して不一致を報告（--fix で修復。不一致が残れば終了コード 1）
 doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+
+# Firestore エミュレータの変更をハンドラに CloudEvent として転送（ローカル開発用）
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
@@ -186,7 +200,7 @@ FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
 ## 次に読むもの
 
 - [リファレンス](./docs/reference.ja.md): 全設定オプション、型付き設定、処理ルール、ログ、コストの見積もり、セキュリティ、制約、推奨する関数の設定。
-- [ROADMAP](./ROADMAP.ja.md) と [CHANGELOG](./CHANGELOG.md)。
+- [CHANGELOG](./CHANGELOG.md)。
 
 ## 開発
 

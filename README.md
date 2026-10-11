@@ -113,9 +113,9 @@ Requires Node.js 20+, `firebase-admin` 12+, the `gcloud` and `firebase` CLIs, an
 npm install firestore-denormalize
 ```
 
-**1. Config.** Put the config file (e.g. `doc-sync.config.ts`; any name works, pass it with `--config`) in `functions/src/` so `firebase deploy` ships it. A complete example: [examples/functions/src/doc-sync.config.ts](./examples/functions/src/doc-sync.config.ts).
+**1. Put the config file (e.g. `doc-sync.config.ts`) in `functions/src/`.** [Sample config](./examples/functions/src/doc-sync.config.ts).
 
-**2. Function.** Expose the handler as an HTTP function. `invoker` is required; without it the function is public.
+**2. Expose the handler as an HTTP function. `invoker` is required.** (Without it the function is public.)
 
 ```ts
 // functions/src/index.ts
@@ -127,12 +127,15 @@ import config from './doc-sync.config'
 initializeApp()
 
 export const docSync = onRequest(
-  { region: 'asia-northeast1', invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com' },
+  {
+    region: 'asia-northeast1',
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+  },
   createDocSyncHandler(config),
 )
 ```
 
-**3. Service account, deploy, triggers.**
+**3. Set up the service account, deploy, create the triggers.**
 
 ```sh
 npx doc-sync setup  --project <project> --config functions/src/doc-sync.config.ts   # once: SA, IAM, APIs
@@ -140,7 +143,7 @@ firebase deploy --only functions:docSync
 npx doc-sync deploy --project <project> --config functions/src/doc-sync.config.ts   # creates / updates / deletes triggers
 ```
 
-**4. Existing data.**
+**4. Backfill existing data.**
 
 ```sh
 npx doc-sync rebuild --project <project> --config functions/src/doc-sync.config.ts --dry-run   # then without --dry-run
@@ -149,12 +152,23 @@ npx doc-sync verify  --project <project> --config functions/src/doc-sync.config.
 
 ## CLI
 
-```
-doc-sync validate [--config <path>] [--strict]                       # check config, show cost estimate
+```shell
+# Check the config; list triggers and the cost estimate (--strict fails on warnings)
+doc-sync validate [--config <path>] [--strict]
+
+# Create the trigger service account, grant IAM roles, enable APIs (once; safe to rerun)
 doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
+
+# Create / update / delete Eventarc triggers to match the config (--deploy-function runs firebase deploy first)
 doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
+
+# Walk every existing target and bring it in line with its sources (backfill; --dry-run only reports)
 doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+
+# Recompute derived values and report mismatches (--fix repairs; exits 1 while any remain)
 doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
+
+# Forward Firestore emulator changes to the handler as CloudEvents (local development)
 doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
 ```
 
@@ -173,7 +187,7 @@ FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
 ## Read next
 
 - [Reference](./docs/reference.md): every config option, typed configs, processing rules, logs, cost estimate, security, limitations, recommended function settings.
-- [ROADMAP](./ROADMAP.md) and [CHANGELOG](./CHANGELOG.md).
+- [CHANGELOG](./CHANGELOG.md).
 
 ## Development
 
