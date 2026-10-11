@@ -1,6 +1,7 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
-import { createDocSyncHandler, defineAggregate, defineConfig, defineView, rebuild, verify, type DocSyncConfig } from '../src/index.js'
+import { FieldValue } from 'firebase-admin/firestore'
+import { createDocSyncHandler, defineAggregate, defineConfig, defineProjection, defineView, rebuild, verify, type DocSyncConfig } from '../src/index.js'
 import { change, clearFirestore, firestore, invoke, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -764,5 +765,37 @@ describe('views: rest', () => {
     const c = db.doc('post/p1/comment/c3')
     await invoke(handler, await change(c, () => c.set({ body: 'x' })))
     expect((await db.doc('postPublic/p1').get()).data()).toEqual({ title: 'a', stats: { commentCount: 3 } })
+  })
+})
+
+describe('projections', () => {
+  const userPublic = defineProjection({ name: 'user-public', base: 'user', target: 'userPublic', targetFields: ['displayName', 'profile.bio'] })
+  const cfg = defineConfig({ ...config, rules: [userPublic] })
+
+  it('mirrors the declared paths and follows the base lifecycle', async () => {
+    const user = db.doc('user/u1')
+    const pub = db.doc('userPublic/u1')
+    const { handler, logs } = handlerFor(cfg)
+    await invoke(handler, await change(user, () => user.set({ displayName: 'D', email: 'e', profile: { bio: 'b', phone: 'p' } })))
+    expect((await pub.get()).data()).toEqual({ displayName: 'D', profile: { bio: 'b' } })
+    expect(processed(logs, 'user-public')).toMatchObject({ kind: 'projection', source: 'base', action: 'create' })
+    await invoke(handler, await change(user, () => user.update({ 'profile.bio': FieldValue.delete(), email: 'f' })))
+    expect((await pub.get()).data()).toEqual({ displayName: 'D', profile: {} })
+    await invoke(handler, await change(user, () => user.delete()))
+    expect((await pub.get()).exists).toBe(false)
+    expect(processed(logs, 'user-public')).toMatchObject({ kind: 'projection', action: 'remove' })
+  })
+
+  it('is rebuilt and verified like a base view', async () => {
+    await db.doc('user/u1').set({ displayName: 'D' })
+    await db.doc('userPublic/gone').set({ displayName: 'x' })
+    const [report] = await verify(cfg, { firestore: db, logger: silentLogger() })
+    expect(report!.mismatches.map((m) => [m.document, m.issue])).toEqual([
+      ['userPublic/u1', 'missing'],
+      ['userPublic/gone', 'orphan'],
+    ])
+    await rebuild(cfg, { firestore: db, logger: silentLogger() })
+    expect((await db.doc('userPublic/u1').get()).data()).toEqual({ displayName: 'D' })
+    expect((await db.doc('userPublic/gone').get()).exists).toBe(false)
   })
 })

@@ -5,7 +5,7 @@
  * (`createDocSyncHandler`) and by the CLI (`doc-sync validate|setup|deploy|rebuild|dev`).
  */
 import type { DocumentData, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
-import { fieldPathsOverlap, isValidFieldPath, splitFieldPath } from './fields.js'
+import { fieldPathsOverlap, isValidFieldPath, setField, splitFieldPath } from './fields.js'
 import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug, patternsIntersect } from './paths.js'
 
 /** What to write into `targetField` when the source document no longer exists. */
@@ -163,6 +163,26 @@ export interface ViewRule<S extends Record<string, ViewSource> = Record<string, 
   patch?(current: T, change: ViewChange, ctx: PatchContext): T | undefined | Promise<T | undefined>
 }
 
+/**
+ * Projection: `target/{id}` mirrors the declared paths of `base/{id}` and exists exactly when
+ * the base does. A view with `base`, no `sources` and a generated `build`; add aggregates or
+ * views on `target` for derived fields.
+ */
+export interface ProjectionRule {
+  kind: 'projection'
+  /** Unique name, used in logs. */
+  name: string
+  /** Collection to mirror. */
+  base: string
+  /** Collection receiving one document per base document, same ID. Same placeholders as `base`. */
+  target: string
+  /** Paths copied from the base as they are. `'rest'` is not supported. */
+  targetFields: string[]
+}
+
+/** One rule of any kind. */
+export type Rule = Connection | AggregateRule | ViewRule | ProjectionRule
+
 export interface DocSyncConfig {
   /** Instance name. Used for trigger names and labels (lowercase letters, digits, hyphens). */
   name: string
@@ -176,12 +196,9 @@ export interface DocSyncConfig {
   serviceRegion?: string
   /** Service account used by the triggers. A bare ID is expanded to `<id>@<project>.iam.gserviceaccount.com`. */
   serviceAccount: string
-  /** The rules, in any order: {@link defineConnection}, {@link defineAggregate} and {@link defineView} results, or objects with a `kind`. */
+  /** The rules, in any order: {@link defineConnection}, {@link defineAggregate}, {@link defineView} and {@link defineProjection} results, or objects with a `kind`. */
   rules: Rule[]
 }
-
-/** One rule of any kind. */
-export type Rule = Connection | AggregateRule | ViewRule
 
 export interface ResolvedConnection extends Connection {
   sourcePattern: CollectionPattern
@@ -267,6 +284,23 @@ export function defineView<S extends Record<string, ViewSource>, T extends Docum
   return { kind: 'view', ...view } as ViewRule<S, T>
 }
 
+/** Tags a projection with its `kind` so it can go into `rules`. */
+export function defineProjection(rule: Omit<ProjectionRule, 'kind'>): ProjectionRule {
+  return { kind: 'projection', ...rule }
+}
+
+/** The `build` of a projection: the declared paths of the base, as they are. */
+function projectionBuild(paths: string[]): ViewRule['build'] {
+  return ({ base }) => {
+    const out: DocumentData = {}
+    for (const p of paths) {
+      const v: unknown = base!.get(p)
+      if (v !== undefined) setField(out, p, v)
+    }
+    return out
+  }
+}
+
 /** Every rule of a resolved config, connections first. */
 export function rulesOf(config: ResolvedConfig): ResolvedRule[] {
   return [...config.connections, ...config.aggregates, ...config.views]
@@ -322,14 +356,16 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   // Keep the original index of every rule for messages about rules without a usable name.
   const connList: { rule: Connection; i: number }[] = []
   const aggList: { rule: AggregateRule; i: number }[] = []
-  const viewList: { rule: ViewRule; i: number }[] = []
+  const viewList: { rule: ViewRule; i: number; label?: string; projection?: true }[] = []
+  const projList: { rule: ProjectionRule; i: number }[] = []
   rules.forEach((r, i) => {
     const kind = (r as { kind?: unknown } | null)?.kind
     if (!r || typeof r !== 'object') problems.push(`rules[${i}]: must be an object`)
     else if (kind === 'connection') connList.push({ rule: r as Connection, i })
     else if (kind === 'aggregate') aggList.push({ rule: r as AggregateRule, i })
     else if (kind === 'view') viewList.push({ rule: r as ViewRule, i })
-    else problems.push(`rules[${i}]: \`kind\` must be 'connection' | 'aggregate' | 'view' (use defineConnection / defineAggregate / defineView)`)
+    else if (kind === 'projection') projList.push({ rule: r as ProjectionRule, i })
+    else problems.push(`rules[${i}]: \`kind\` must be 'connection' | 'aggregate' | 'view' | 'projection' (use defineConnection / defineAggregate / defineView / defineProjection)`)
   })
 
   const names = new Map<string, string>()
@@ -465,8 +501,41 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   /** The base declared for each target collection, so every base view of a target agrees. */
   const baseByTarget = new Map<string, { key: string; raw: string; rule: string }>()
 
-  viewList.forEach(({ rule: v, i }) => {
-    const label = str(v?.name) ? `view "${v.name}"` : `rules[${i}]`
+  projList.forEach(({ rule: p, i }) => {
+    const label = str(p?.name) ? `projection "${p.name}"` : `rules[${i}]`
+    if (!p || typeof p !== 'object') {
+      problems.push(`${label}: must be an object`)
+      return
+    }
+    let ok = true
+    if (!str(p.base)) {
+      problems.push(`${label}: \`base\` is required`)
+      ok = false
+    }
+    if (!Array.isArray(p.targetFields) || p.targetFields.length === 0 || !p.targetFields.every((f) => typeof f === 'string')) {
+      problems.push(`${label}: \`targetFields\` must be a non-empty array of field paths`)
+      ok = false
+    } else if (p.targetFields.includes('rest')) {
+      problems.push(`${label}: 'rest' is not supported by a projection`)
+      ok = false
+    }
+    for (const k of ['sources', 'build', 'patch', 'exclude', 'rename'] as const) {
+      if (k in p) {
+        problems.push(`${label}: \`${k}\` does not apply to a projection`)
+        ok = false
+      }
+    }
+    if (!ok) return
+    viewList.push({
+      rule: { kind: 'view', name: p.name, target: p.target, base: p.base, targetFields: p.targetFields, build: projectionBuild(p.targetFields) },
+      i,
+      label,
+      projection: true,
+    })
+  })
+
+  viewList.forEach(({ rule: v, i, label: givenLabel, projection }) => {
+    const label = givenLabel ?? (str(v?.name) ? `view "${v.name}"` : `rules[${i}]`)
     if (!v || typeof v !== 'object') {
       problems.push(`${label}: must be an object`)
       return
@@ -675,6 +744,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         sources: resolvedSources,
         build: v.build,
         patch: v.patch,
+        projection,
       })
     }
   })

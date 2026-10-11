@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import type { DocumentSnapshot } from 'firebase-admin/firestore'
 import {
   collectionGroupQueries,
   collectionsOf,
@@ -6,6 +7,7 @@ import {
   defineAggregate,
   defineConfig,
   defineConnection,
+  defineProjection,
   defineView,
   needsCollectionGroupQuery,
   rulesOf,
@@ -511,5 +513,27 @@ describe('collectionsOf / triggerName', () => {
   it('replaces underscores and joins subcollection ids', () => {
     expect(triggerName('doc-sync', 'user_room')).toBe('doc-sync-user-room')
     expect(triggerName('doc-sync', 'users/{uid}/payments')).toBe('doc-sync-users-payments')
+  })
+})
+
+describe('projections', () => {
+  const projection = defineProjection({ name: 'user-public', base: 'user', target: 'userPublic', targetFields: ['displayName', 'profile.bio'] })
+
+  it('becomes a view with base, no sources and a build that copies the declared paths', async () => {
+    const r = validateConfig({ ...base, rules: [projection] })
+    const v = r.views[0]!
+    expect(v).toMatchObject({ kind: 'view', projection: true, name: 'user-public', base: 'user', targetFields: ['displayName', 'profile.bio'], rest: false, sources: [] })
+    const snap = { get: (p: string) => ({ displayName: 'D' } as Record<string, unknown>)[p] } as unknown as DocumentSnapshot
+    expect(await v.build({ base: snap, target: snap, sources: {}, firestore: {} as never })).toEqual({ displayName: 'D' })
+    expect(collectionsOf(r).map((p) => p.raw)).toEqual(expect.arrayContaining(['user', 'userPublic']))
+  })
+
+  it('rejects rest, sources, build, patch and a missing base', () => {
+    expect(problemsOf({ ...base, rules: [{ ...projection, targetFields: ['rest'] }] })).toContainEqual(expect.stringContaining("'rest' is not supported by a projection"))
+    expect(problemsOf({ ...base, rules: [{ ...projection, build: () => ({}) } as never] })).toContainEqual(expect.stringContaining('`build` does not apply to a projection'))
+    expect(problemsOf({ ...base, rules: [{ ...projection, sources: {} } as never] })).toContainEqual(expect.stringContaining('`sources` does not apply to a projection'))
+    expect(problemsOf({ ...base, rules: [{ ...projection, exclude: ['email'] } as never] })).toContainEqual(expect.stringContaining('`exclude` does not apply to a projection'))
+    expect(problemsOf({ ...base, rules: [{ ...projection, base: undefined } as never] })).toContainEqual(expect.stringContaining('projection "user-public": `base` is required'))
+    expect(problemsOf({ ...base, rules: [{ ...projection, targetFields: 'displayName' } as never] })).toContainEqual(expect.stringContaining('projection "user-public": `targetFields` must be a non-empty array'))
   })
 })
