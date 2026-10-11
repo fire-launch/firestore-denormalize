@@ -56,20 +56,33 @@ post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { 
 
 ```mermaid
 flowchart LR
-  subgraph fs[Firestore]
-    S[(ソースのコレクション)]
-    T[(ターゲットのコレクション)]
-  end
-  S -- 文書の書き込み --> E[Eventarc<br/>コレクションごとに 1 トリガー]
-  T -- 文書の書き込み --> E
-  E -- CloudEvent --> H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
-  H -- "1. ターゲットを読み、updateTime を控える" --> T
+  C[/"doc-sync.config.ts"/]
+  CLI["doc-sync CLI<br/>validate · setup · deploy<br/>rebuild · verify · dev"]
+  S[("Firestore<br/>ソースのコレクション")]
+  T[("Firestore<br/>ターゲットのコレクション")]
+  E["Eventarc<br/>コレクションごとに<br/>トリガー 1 本"]
+  H["Cloud Run / Cloud Functions<br/>createDocSyncHandler(config)"]
+
+  S -- "文書の書き込み" --> E
+  T -- "文書の書き込み" --> E
+  E -- "CloudEvent" --> H
+  H -- "1. ターゲットを読み、updateTime を控える<br/>3. 差があれば updateTime を条件に update" --> T
   H -- "2. ソースを読み直す / count() / build()" --> S
-  H -- "3. 差があれば updateTime を条件に update" --> T
-  C[/doc-sync.config.ts/] -.-> H
-  C -.-> CLI["doc-sync CLI<br/>validate · setup · deploy · rebuild · verify · dev"]
-  CLI -- トリガー・IAM --> E
-  CLI -- rebuild / verify --> T
+  C -. "読む" .-> H
+  C -. "読む" .-> CLI
+  CLI -- "トリガー・IAM" --> E
+  CLI -- "rebuild / verify" --> T
+
+  classDef store fill:#FFF1D6,stroke:#E09A2D,stroke-width:1.5px,color:#3B2A06
+  classDef event fill:#E4ECFF,stroke:#4F7BE8,stroke-width:1.5px,color:#14275E
+  classDef fn fill:#DDF4E7,stroke:#2F9E62,stroke-width:1.5px,color:#0F3D25
+  classDef conf fill:#F1E8FF,stroke:#8B5CF6,stroke-width:1.5px,color:#2E1065
+  classDef cli fill:#EEF1F5,stroke:#6B7280,stroke-width:1.5px,color:#1F2937
+  class S,T store
+  class E event
+  class H fn
+  class C conf
+  class CLI cli
 ```
 
 1 が 2 より先に行われるので、古い読み取りから計算した値が 3 の前提条件を通ることはありません。詳細: [変更はこう処理される](./docs/reference.ja.md#変更はこう処理される)。
