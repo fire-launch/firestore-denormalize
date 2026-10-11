@@ -1,5 +1,10 @@
 import { defineConfig, defineView } from "firestore-denormalize";
 
+/** order.summary shape, computed the same way by build and patch. */
+function summarize(items: Record<string, { sku: string; amount: number }>) {
+  return { items, total: Object.values(items).reduce((n, i) => n + i.amount, 0) };
+}
+
 export default defineConfig({
   name: "doc-sync",
   region: "asia-northeast1",
@@ -80,6 +85,7 @@ export default defineConfig({
     defineView({
       // A map keyed by document id: user.badges = { [badgeId]: { name } } over badge where badge.userId == uid.
       // `patch` handles creates and deletes from the changed document alone; updates fall back to `build`.
+      // Without `patch` (or a `limit`), validate warns: every badge change would read all badges of the user.
       name: "user-badges",
       target: "user",
       targetField: "badges",
@@ -100,7 +106,8 @@ export default defineConfig({
     defineView({
       // Latest N kept by patch with at most one extra read per event (the refill after a delete).
       // thread.latest = newest 50 messages where message.threadId == thread id, as [{ id, body, createdAt }].
-      // Needs a composite index on message (threadId asc, createdAt desc).
+      // Needs a composite index on message (threadId asc, createdAt desc). `limit` alone would already satisfy
+      // validate; `patch` additionally keeps the per-event cost at two reads instead of 50.
       name: "thread-latest-messages",
       target: "thread",
       targetField: "latest",
@@ -140,35 +147,28 @@ export default defineConfig({
     }),
 
     defineView({
-      // Several numbers at once from a subcollection, where aggregates (one number each) would need three rules:
-      // order.summary = { itemCount, total, skus } over order/{orderId}/item.
+      // Several values at once from a subcollection, where aggregates (one number each) would need several rules:
+      // order.summary = { items: { [itemId]: { sku, amount } }, total } over order/{orderId}/item.
+      // Without `patch` (or a `limit`), validate warns: every item change would read all items of the order.
       name: "order-summary",
       target: "order",
       targetField: "summary",
       sources: { items: { collection: "order/{orderId}/item", idParam: "orderId" } },
-      build: ({ sources }) => ({
-        itemCount: sources.items.length,
-        total: sources.items.reduce((n, i) => n + (i.get("price") as number) * (i.get("qty") as number), 0),
-        skus: sources.items.map((i) => i.get("sku") as string).sort(),
-      }),
+      build: ({ sources }) =>
+        summarize(Object.fromEntries(sources.items.map((i) => [i.id, { sku: i.get("sku") as string, amount: i.get("price") * i.get("qty") }]))),
+      patch: (current, change) => {
+        // keyed by item id, so a duplicate or late event converges on the same value
+        const id = change.path.split("/").pop()!;
+        const items = { ...(current?.items ?? {}) };
+        if (change.after) items[id] = { sku: change.after.sku, amount: change.after.price * change.after.qty };
+        else delete items[id];
+        return summarize(items);
+      },
     }),
 
-    defineView({
-      // One-to-one sources via refField: post.summary = "<author name> / <category name>".
-      // Fans out: a change of a user or category rebuilds every post pointing at it, so `watch` keeps that to name changes.
-      name: "post-summary",
-      target: "post",
-      targetField: "summary",
-      sources: {
-        author: { collection: "user", refField: "authorId", watch: ["displayName"] },
-        category: { collection: "category", refField: "categoryId", watch: ["name"] },
-      },
-      build: ({ sources }) => {
-        const [author] = sources.author;
-        const [category] = sources.category;
-        if (!author && !category) return undefined; // deletes post.summary
-        return `${author?.get("displayName") ?? "?"} / ${category?.get("name") ?? "?"}`;
-      },
-    }),
+    // A view with a `refField` source (e.g. post.summary = "<author name> / <category name>" from user and
+    // category) always makes validate warn about fan-out: one change of the referenced document rebuilds every
+    // post that points at it. Prefer a connection for one-to-one copies; use refField only when the referenced
+    // document changes rarely and the number of targets is small.
   ],
 });
