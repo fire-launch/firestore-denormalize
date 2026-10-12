@@ -12,14 +12,16 @@ export interface DirtyUnit {
 }
 
 export interface ContinuationBody {
-  /** Last document path the previous chunk processed (`RebuildResult.lastPath`). */
-  startAfter: string
-  /** Identifies one pass over the collection (all its chunks share it). */
-  runId: string
-  /** 0 for the chunk the Scheduler started, then 1, 2, ... */
-  chunk: number
-  /** When the pass started (ISO 8601). */
-  startedAt: string
+  /** Last document path the previous chunk processed (`RebuildResult.lastPath`). Absent for a deferred flush. */
+  startAfter?: string
+  /** Identifies one pass over the collection (all its chunks share it). Absent for a deferred flush. */
+  runId?: string
+  /** 0 for the chunk the Scheduler started, then 1, 2, ... Absent for a deferred flush. */
+  chunk?: number
+  /** When the pass started (ISO 8601). Absent for a deferred flush. */
+  startedAt?: string
+  /** Set for a deferred flush; the cursor fields are then absent. */
+  flush?: DirtyUnit
 }
 
 export interface ContinuationTask {
@@ -28,7 +30,7 @@ export interface ContinuationTask {
   rule: string
   /** `<serviceUrl>/schedule/<rule>`. */
   url: string
-  body: ContinuationBody | { flush: DirtyUnit }
+  body: ContinuationBody
   /** When set, the task runs no earlier than this time (ISO 8601), e.g. the end of a defer bucket. */
   scheduleTime?: string
   /** OIDC identity of the task call (the trigger service account) and its audience (the service URL). */
@@ -50,10 +52,10 @@ export function deferBucket(everyMs: number, now: number = Date.now()): { bucket
   return { bucket, scheduleTime: new Date(bucket * everyMs).toISOString() }
 }
 
-/** Cloud Tasks task id for one dirty unit's bucket: stable, so retries of the same unit/bucket dedupe. */
+/** Cloud Tasks task id for one dirty unit's bucket: the hash leads so sequential ids don't cluster in one Cloud Tasks shard; stable, so retries of the same unit/bucket dedupe. */
 export function deferTaskId(rule: string, bucket: number, unit: DirtyUnit): string {
   const hash = createHash('sha256').update(`${unit.unit}\n${unit.path}`).digest('hex').slice(0, 16)
-  return `${rule}-d${bucket}-${hash}`
+  return `${hash}-${rule}-d${bucket}`
 }
 
 /** Enqueues one continuation task. The default implementation calls the Cloud Tasks REST API with ADC. */
@@ -68,7 +70,7 @@ export function continuationRunId(bodyRunId: unknown, scheduleTimeHeader: string
 }
 
 /** The continuation fields of a request body (JSON text, bytes or an already-parsed object); fields of the wrong type are dropped. Also recognises a well-formed `{ flush: DirtyUnit }` body. */
-export function parseContinuationBody(body: unknown): Partial<ContinuationBody> & { flush?: DirtyUnit } {
+export function parseContinuationBody(body: unknown): Partial<ContinuationBody> {
   let data: unknown = body
   if (data instanceof Uint8Array) data = Buffer.from(data).toString('utf8')
   if (typeof data === 'string') {
@@ -80,7 +82,7 @@ export function parseContinuationBody(body: unknown): Partial<ContinuationBody> 
   }
   if (data === null || typeof data !== 'object') return {}
   const o = data as Record<string, unknown>
-  const out: Partial<ContinuationBody> & { flush?: DirtyUnit } = {}
+  const out: Partial<ContinuationBody> = {}
   if (typeof o.startAfter === 'string' && o.startAfter.length > 0) out.startAfter = o.startAfter
   if (typeof o.runId === 'string' && o.runId.length > 0) out.runId = o.runId
   if (typeof o.chunk === 'number' && Number.isInteger(o.chunk) && o.chunk >= 0) out.chunk = o.chunk

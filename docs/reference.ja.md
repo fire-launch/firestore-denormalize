@@ -101,8 +101,10 @@ export default defineConfig({
 | （即時。defer されない） | base の作成・削除、ターゲットの最初の値、base 付き view のターゲットの手動削除 | `defer` の無いルールと同じく、すぐに |
 
 - skip 判定（フィールド未変更、`watch` 未変更など）が先に効くので、関係ない書き込みには何も印をつけません。
-- タスクを積めなかった場合、イベントは 500 を返し Eventarc が再送するので、印を失うことはありません。
+- タスクを積めなかった場合、イベントは 500 を返し Eventarc が再送します。
+- 失敗が続くフラッシュはキューが最大 5 回まで再試行し、それでも失敗すれば捨てられます。そのようなターゲットは `verify --fix` で直せます。
 - 上の schedule の継続と同じ Cloud Tasks キューと権限が必要です。`setup` は、いずれかのルールが `schedule` または `defer` を持つときにキューを作成します。
+- 独自の `schedule.enqueue` は、タスクの `scheduleTime` を守り、`id` の重複を成功として扱う必要があります。
 - フラッシュ: `POST /schedule/<rule>` に本文 `{ "flush": { "unit": "source" | "target", "path": "..." } }` を送ると、その単位だけを再計算し、処理済みイベントと同じ JSON に `flush` と `durationMs` を加えて返します。`defer` の無いルールへの `flush` は 404、`flush` の無い本文で `defer` ルールを呼んだ場合は 400 です。
 - エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` を `createDocSyncHandler` に渡し、各タスクの `body` を自分で `/schedule/<rule>` に POST してください（テストスイートがそうしています）。
 
@@ -172,7 +174,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `logger` | 標準出力への JSON | `info` / `warn` / `error` を持つ任意のオブジェクト。`console` も使えます |
 | `maxRetries` | 5 | 条件付き書き込みが失敗したターゲットのやり直し回数 |
 | `pageSize` | 500 | ターゲット検索のページサイズ |
-| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true` | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤） |
+| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true` | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤）。defer のルールでは、タスクの `scheduleTime` を守る必要があります |
 
 同じイベントの中では、ソースドキュメントは 1 回だけ読みます。組み合わせるターゲットより古い読み取りは使い回しません。
 
@@ -219,7 +221,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 ## ログ
 
-1 イベント・1 ルールにつき 1 行の JSON ログを出力します: `eventId`、`rule`、`kind`、`source`（ビューのソースキー）、`document`、`role`、`action`（`skip` / `write` / `delete`）、`reason`、`targets`、`writes`、`retries`、`reads`、`queries`、`aggregations`、`durationMs`（イベント全体の時間）。失敗したルールは `error` 付きで `doc-sync: failed, will be retried by Eventarc` をログに出します。
+1 イベント・1 ルールにつき 1 行の JSON ログを出力します: `eventId`、`rule`、`kind`、`source`（ビューのソースキー）、`document`、`role`、`action`（`skip` / `write` / `delete` / `defer`。`defer` には印をつけた件数を表す `deferred` が付きます）、`reason`、`targets`、`writes`、`retries`、`reads`、`queries`、`aggregations`、`durationMs`（イベント全体の時間）。失敗したルールは `error` 付きで `doc-sync: failed, will be retried by Eventarc` をログに出します。defer のルールは `doc-sync: deferred`（印をつけた）、`doc-sync: flushed`（フラッシュが走った）、`doc-sync schedule: flush failed` もログに出します。
 
 ## コストの見積もり
 
@@ -227,7 +229,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 スケジュールルールは `schedule <cron> (<tz>): every <target>` の 1 行で、reads は `T × (ターゲット 1 件あたりの読み取り)`、writes は `≤ T`（T はターゲット数）です。
 
-defer ルールは、1 イベントあたりの各行が reads `0 (+ 1 task)`、writes `0` になり、それぞれに元の reads/writes を持つ `flush (≤ 1 per <interval> per <unit>)` 行が加わります。
+defer ルールの印をつけるだけのイベントは reads `0 (+ 1 task)`（または `≤ 2 tasks`）、writes `0` になり、それぞれに再計算の reads/writes を持つ `flush <collection>/{id} (≤ 1 per <interval>)` 行が加わります。ライフサイクル行（ターゲットの最初の値、base の作成・削除）はそのままの即時コストを保ちます。
 
 ## 既知の制約
 

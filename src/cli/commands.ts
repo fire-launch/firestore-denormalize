@@ -229,7 +229,7 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
 
   if (queueNeeded) {
     const queue = scheduleQueueName(config.name)
-    log(`# 5/5 Cloud Tasks queue "${queue}" for scheduled-run continuation`)
+    log(`# 5/5 Cloud Tasks queue "${queue}" for scheduled-run continuation and deferred flushes`)
     let current: ExistingQueue | undefined
     try {
       current = (JSON.parse(runner.read('gcloud', queueDescribeArgs(config, project, queue)) || 'null') as ExistingQueue | null) ?? undefined
@@ -276,7 +276,7 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
       log('  (the default runtime SA is <project-number>-compute@developer.gserviceaccount.com)')
     }
   } else if (opts.runtimeServiceAccount) {
-    log('  --runtime-service-account ignored: no rule has a schedule.')
+    log('  --runtime-service-account ignored: no rule has a schedule or defer.')
   }
 
   log()

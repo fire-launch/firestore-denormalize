@@ -69,7 +69,7 @@ describe('schedule continuation helpers', () => {
     expect(bucket).toBe(Math.floor(1_760_000_123_456 / 600_000) + 1)
     expect(scheduleTime).toBe(new Date(bucket * 600_000).toISOString())
     const id = deferTaskId('post-category', bucket, { unit: 'source', path: 'category/c1' })
-    expect(id).toMatch(new RegExp(`^post-category-d${bucket}-[0-9a-f]{16}$`))
+    expect(id).toMatch(new RegExp(`^[0-9a-f]{16}-post-category-d${bucket}$`))
     expect(deferTaskId('post-category', bucket, { unit: 'source', path: 'category/c1' })).toBe(id)
     expect(deferTaskId('post-category', bucket + 1, { unit: 'source', path: 'category/c1' })).not.toBe(id)
     expect(deferTaskId('post-category', bucket, { unit: 'target', path: 'category/c1' })).not.toBe(id)

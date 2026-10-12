@@ -49,7 +49,7 @@ describe('defer: events mark, tasks flush', () => {
     expect(processed(logs, 'post-category')).toMatchObject({ action: 'defer', deferred: 1, writes: 0 })
     expect(tasks).toHaveLength(1)
     expect(tasks[0]).toMatchObject({ rule: 'post-category', url: `https://${host}/schedule/post-category`, body: { flush: { unit: 'source', path: 'category/c1' } }, queue: { name: 'doc-sync-schedule' } })
-    expect(tasks[0]!.id).toMatch(/^post-category-d\d+-[0-9a-f]{16}$/)
+    expect(tasks[0]!.id).toMatch(/^[0-9a-f]{16}-post-category-d\d+$/)
     expect(tasks[0]!.scheduleTime).toMatch(/^\d{4}-/)
     // a second change in the same bucket collapses onto the same task id
     await invoke(handler, { ...(await change(cat, () => cat.update({ name: 'Tech2' }))), headers: { host } })

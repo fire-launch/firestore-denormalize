@@ -101,8 +101,10 @@ Any rule may carry `defer: '<duration>'` (`'90s'`, `'10m'`, `'1h'`, `'1h30m'`; 1
 | (immediate, not deferred) | A base created or deleted, a target's first value, or a hand-deleted base-view target | Right away, same as a rule without `defer` |
 
 - Skip checks (unchanged fields, unchanged `watch` fields, ...) run first, so an irrelevant write marks nothing.
-- If the task cannot be queued, the event answers 500 and Eventarc retries it, so a mark is never lost.
+- If the task cannot be queued, the event answers 500 and Eventarc retries it.
+- A flush that keeps failing is retried by the queue up to 5 times, then dropped. `verify --fix` repairs such a target.
 - Needs the same Cloud Tasks queue and grants as the schedule continuation above; `setup` creates the queue when any rule has `schedule` or `defer`.
+- A custom `schedule.enqueue` must honour `scheduleTime` and treat a duplicate `id` as success.
 - Flush: `POST /schedule/<rule>` with body `{ "flush": { "unit": "source" | "target", "path": "..." } }` recomputes that one unit and answers the same JSON as a processed event, plus `flush` and `durationMs`. A `flush` for a rule without `defer` gets 404; a `defer` rule called without `flush` gets 400.
 - Emulator: there is no Cloud Tasks emulator. Pass `schedule.enqueue` to `createDocSyncHandler` and post each task's `body` to `/schedule/<rule>` yourself (the test suite does this).
 
@@ -172,7 +174,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `logger` | JSON to stdout | Anything with `info` / `warn` / `error`; `console` works |
 | `maxRetries` | 5 | Redos of a target whose conditional write failed |
 | `pageSize` | 500 | Target query page size |
-| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` 20 minutes, `concurrency` 20, `continue` `true` | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page. A budget-stopped run enqueues a Cloud Tasks continuation unless `continue: false`; `project` / `serviceUrl` override the GCP project of the queue and this service's public URL (defaults: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client's project; the request's `host` header); `enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms) |
+| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` 20 minutes, `concurrency` 20, `continue` `true` | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page. A budget-stopped run enqueues a Cloud Tasks continuation unless `continue: false`; `project` / `serviceUrl` override the GCP project of the queue and this service's public URL (defaults: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client's project; the request's `host` header); `enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms); for deferred rules it must honour the task's `scheduleTime` |
 
 Within one event, a source document is read once; a read older than the target it is combined with is never reused.
 
@@ -219,7 +221,7 @@ Every rule whose `source` or `target` is the event's collection runs. Source-sid
 
 ## Logs
 
-One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view source key), `document`, `role`, `action` (`skip` / `write` / `delete`), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs` (whole event). A failed rule logs `doc-sync: failed, will be retried by Eventarc` with `error`.
+One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view source key), `document`, `role`, `action` (`skip` / `write` / `delete` / `defer`, the last with `deferred` = number of marked documents), `reason`, `targets`, `writes`, `retries`, `reads`, `queries`, `aggregations`, `durationMs` (whole event). A failed rule logs `doc-sync: failed, will be retried by Eventarc` with `error`. A deferred rule also logs `doc-sync: deferred` (a unit was marked), `doc-sync: flushed` (a flush ran), and `doc-sync schedule: flush failed`.
 
 ## Cost estimate
 
@@ -227,7 +229,7 @@ One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view sour
 
 A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with reads `T × (per-target reads)` and writes `≤ T`, T being the number of targets.
 
-A deferred rule's per-event lines become `0 (+ 1 task)` reads and `0` writes, each with a matching `flush (≤ 1 per <interval> per <unit>)` line carrying the reads and writes that line would otherwise have.
+A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) and `0` writes, each with a matching `flush <collection>/{id} (≤ 1 per <interval>)` line carrying the recompute's reads and writes. Lifecycle lines (a target's first value, a base created or deleted) keep their immediate cost.
 
 ## Known limitations
 

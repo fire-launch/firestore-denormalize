@@ -87,6 +87,12 @@ export interface TypedConnection<C, S extends Key<C>, T extends Key<C>> {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 export interface TypedAggregate<C, S extends Key<C>, T extends Key<C>> {
@@ -105,6 +111,12 @@ export interface TypedAggregate<C, S extends Key<C>, T extends Key<C>> {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /** Every (source, target) combination, so the literal `source` / `target` select the field types. */
@@ -176,6 +188,12 @@ export interface TypedViewRule<C, T extends Key<C>, B extends Key<C> | undefined
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 export interface TypedProjection<C, B extends Key<C>, T extends Key<C>> {
@@ -189,6 +207,12 @@ export interface TypedProjection<C, B extends Key<C>, T extends Key<C>> {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /** A rule in a typed config: a typed connection, aggregate or projection, or a view made with the typed `defineView`. */

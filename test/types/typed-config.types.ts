@@ -312,6 +312,14 @@ defineProjection({
   targetFields: ['email'],
 })
 
+// ---------------------------------------------------------------- defer
+
+const deferredCopy = defineConnection({
+  name: 'deferred-copy', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull', defer: '10m',
+})
+// `defer: '10m'` validates to `deferred: { everyMs: 600000 }` (runtime behavior checked in test/unit/config.test.ts).
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [deferredCopy] })
+
 // ---------------------------------------------------------------- DeepPartial stops at Leaf types
 
 defineView({

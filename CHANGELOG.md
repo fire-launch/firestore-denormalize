@@ -16,6 +16,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `setup` enables the Cloud Tasks API and creates the continuation queue for deferred rules too. `validate` lists deferred rules and their flush cost.
 - Within one event, a source document is read once and shared across rules. A read older than the target it is combined with is never reused.
 
+### Changed
+
+- `ContinuationBody` gains an optional `flush` field and `ContinuationTask` an optional `scheduleTime`. A custom `schedule.enqueue` must honour `scheduleTime` for deferred rules.
+- `RuleResult.action` can now be `defer`.
+
 ## [0.11.0] - 2026-10-13
 
 ### Changed
