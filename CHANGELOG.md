@@ -8,7 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- Trigger and job names now end in a short hash, so two instances can never produce the same name. The next `deploy` creates the new names, then deletes the old ones; events in the switch-over minute may be missed or delivered twice; run `doc-sync verify --fix` after that deploy. A paused job is recreated enabled. Collection ids ending in `_` are now accepted.
+- Trigger and job names now end in a short hash, so two instances never produce the same name. Collection ids ending in `_` are now accepted.
+- The next `deploy` creates the new names, then deletes the old ones. Events in the switch-over minute may be missed or delivered twice, so run `doc-sync verify --fix` afterwards. A paused job comes back enabled.
 - `setup` fixes the retry policy of an existing continuation queue when it differs from the expected one.
 - New exports `jobName` and `resourceHash`. Do not run an older CLI against the same project afterwards; it would rename the resources back.
 
