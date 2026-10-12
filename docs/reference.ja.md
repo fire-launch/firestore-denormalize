@@ -46,6 +46,21 @@ export default defineConfig({
 | `aggregate` | `'count'` または `{ sum: '<numeric field>' }` |
 | `targetField` | 数値のターゲットフィールド |
 
+### `schedule`: イベントではなく定期的に同期する
+
+どのルールにも `schedule: '<unix-cron>'`（5 フィールド）と任意の `timeZone`（IANA 名、既定 `Etc/UTC`）を付けられます。付けたルールは Firestore のイベントでは処理されません。代わりに `deploy` が Cloud Scheduler のジョブ `<instance>-<rule>` を作り、トリガー用サービスアカウントの OIDC トークンで `POST <サービス URL>/schedule/<rule>` を呼び、ハンドラがそのルールだけ `rebuild` を実行します。スケジュールルールだけが使うコレクションには Eventarc トリガーを作りません。
+
+| キー | 意味 |
+|---|---|
+| `schedule` | Cloud Scheduler の unix-cron。例 `'0 3 * * *'`。ルールの `name` は `[A-Za-z0-9_-]` に限る（ジョブ名と URL になるため） |
+| `timeZone` | cron のタイムゾーン（IANA 名）。既定 `Etc/UTC` |
+
+- 整合性は「cron 間隔 + 1 回の実行時間」を上限とする最終的整合になります。書き込みは引き続き `update(..., { lastUpdateTime })` なので、定期実行がイベント駆動の並行書き込みを古い値で上書きすることはありません。
+- 1 回の実行には時間予算があります（`createDocSyncHandler` の `schedule.budgetMs`、既定 20 分。Cloud Scheduler の応答待ちは最長 30 分）。予算を超えるとページ境界で止まり、`completed: false` と `lastPath` を返します。次の定期実行は先頭からやり直します。1 回で終わらない規模ならルールを分けるか、再開対応版（予定）を待ってください。
+- 手動やエミュレータで実行するには `doc-sync rebuild --rule <name>`、または関数の `POST /schedule/<name>`（CloudEvent ヘッダーは不要）。
+- スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
+- 関数の `timeoutSeconds` は予算より長くしてください（README の例は 1800）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
+
 ### `defineView`: `target` の宣言した `targetFields` = `build(...)` の該当パス、を保つ
 
 一般形です。`defineConnection`・`defineAggregate`・`defineProjection` は、形の決まった view の簡易設定です。
@@ -103,7 +118,7 @@ const { defineConfig, defineConnection, defineAggregate, defineView } = typed<Co
 ## ハンドラ
 
 ```ts
-createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
+createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule })
 ```
 
 | オプション | 既定 | 意味 |
@@ -112,16 +127,19 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | `logger` | 標準出力への JSON | `info` / `warn` / `error` を持つ任意のオブジェクト。`console` も使えます |
 | `maxRetries` | 5 | 条件付き書き込みが失敗したターゲットのやり直し回数 |
 | `pageSize` | 500 | ターゲット検索のページサイズ |
+| `schedule: { budgetMs, concurrency }` | `budgetMs` は 20 分、`concurrency` は 20 | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数 |
 
 ハンドラは `(req, res) => Promise<void>` で、Express や Node の `http` でも使えます。
+
+`POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知のルールやイベント駆動のルールは 404、失敗は 500（Cloud Scheduler が再試行）。`req.url` を渡してください（Express は渡します）。
 
 ## CLI
 
 | コマンド | 内容 |
 |---|---|
 | `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告を表示します。`--strict` を付けると警告があれば失敗します |
-| `setup` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
-| `deploy [--deploy-function <name>]` | 不足しているトリガーを作成し、ずれたもの（サービス、サービスのリージョン、パスパターン、サービスアカウント）を更新し、不要になったものを削除します。対象は `region` にある `doc-sync-instance=<name>` ラベル付きのトリガーだけです。先に `firebase deploy` を実行することもできます |
+| `setup` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API も有効化します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
+| `deploy [--deploy-function <name>]` | イベント駆動ルールの Eventarc トリガーと、スケジュールルールの Cloud Scheduler ジョブを差分で作成・更新・削除します（`--dry-run` はコマンド表示のみ）。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | 全ターゲットを巡り、実際のイベントが書き込むはずの値を書き込みます。ソースが存在しない場合は `onSourceDelete` に従います |
 | `verify [--fix] [--rule]... [--start-after]` | 全ターゲットを巡り、不整合（実際の値と期待値の差）を報告します。`--fix` を付けると修復します。不整合が残っていると終了コード 1 になります |
 | `dev --url <handler>` | Firestore エミュレータとハンドラを CloudEvents で橋渡しします。エミュレータ専用です |
@@ -160,6 +178,8 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 
 `validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（マッチするターゲット数）と `M`（ターゲット 1 件あたりのソース文書数）の式で表示し、`refField` のビューのソース（ファンアウト）と、`limit` も `patch` も無い多対一のビューのソースを警告します。`--strict` で警告を終了コード 1 にできます。
 
+スケジュールルールは `schedule <cron> (<tz>): every <target>` の 1 行で、reads は `T × (ターゲット 1 件あたりの読み取り)`、writes は `≤ T`（T はターゲット数）です。
+
 ## 既知の制約
 
 - ソースが削除されたときにターゲットは削除されません。`setNull` または `deleteField` を使ってください。
@@ -171,6 +191,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 
 - ハンドラはリクエストを認証しません。トリガー用サービスアカウントだけが呼べるように制限してください: `onRequest` の `invoker:`、または Cloud Run での `--no-allow-unauthenticated` + `roles/run.invoker` です。これがないと関数は公開状態になります。
 - 偽造・再送されたリクエストができるのは、再計算(読み取り)を強制することだけです。値は常に本物のソースから読み直され、`patch` が受け取るのもリクエストのデータではなく、メンバーシップを確認した上での読み直しです。
+- Scheduler ジョブはトリガー用サービスアカウントの OIDC トークンで関数を呼ぶので、同じ `invoker` の制限がかかります。`/schedule/<rule>` 経路自体は認証しません。
 - `setup` がトリガー用サービスアカウントに付与するのは、プロジェクトへの `roles/eventarc.eventReceiver` とサービスへの `roles/run.invoker` だけです。
 - 関数のランタイム用サービスアカウントには Firestore の読み書き権限（`roles/datastore.user`）が必要で、あなたの `build` / `patch` を実行します。既定のコンピュート用サービスアカウントではなく専用のものを使ってください。
 - ファンアウトにはイベント単位の上限がありません。`validate` の警告、`maxInstances`、`timeoutSeconds` で制御してください。

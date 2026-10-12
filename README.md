@@ -16,6 +16,7 @@ Keep data in sync between Firestore documents with **one Cloud Run function and 
 - 👍 `rebuild` backfills existing data.
 - 👍 `verify` checks stored data for anything the sync missed.
 - 👍 `validate` estimates the reads and writes per event before you deploy.
+- 👍 Any rule can run on a Cloud Scheduler cron instead of on events (`schedule: '0 3 * * *'`), still with one function.
 
 ## What this library does
 
@@ -101,6 +102,12 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
+**Scheduled instead of event-driven**: add `schedule` to any rule and it is synced by a Cloud Scheduler job calling the same function (`/schedule/<rule>`) rather than by Firestore events. For large fan-outs, nightly aggregates, or read models that may lag.
+
+```ts
+defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })
+```
+
 Targets are never created by connections, aggregates or views without `base`: they fill fields of documents that already exist. A view with `base` (and a projection) is the one exception and owns its target's existence.
 
 These go into the config's `rules` array, in any order, so rules can be grouped by domain and split across files.
@@ -166,7 +173,8 @@ initializeApp()
 export const docSync = onRequest(
   {
     region: 'asia-northeast1',
-    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com'
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+    timeoutSeconds: 1800, // scheduled runs may take up to schedule.budgetMs (default 20 min)
   },
   createDocSyncHandler(config),
 )

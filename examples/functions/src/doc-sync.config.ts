@@ -60,6 +60,17 @@ export default defineConfig({
       aggregate: { sum: "amount" },
       targetField: "total",
     }),
+    defineAggregate({
+      // post.likeCountNightly = number of documents in post/{postId}/like, recomputed nightly instead of on every like
+      name: "post-likes-nightly",
+      source: "post/{postId}/like",
+      target: "post",
+      idParam: "postId",
+      aggregate: "count",
+      targetField: "likeCountNightly",
+      schedule: "0 3 * * *",
+      timeZone: "Asia/Tokyo",
+    }),
 
     defineView({
       // post.latestComments = the 2 newest comments of post/{postId}/comment, as [{ id, body }]

@@ -15,6 +15,7 @@ Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 �
 - 👍 `rebuild` により既存データをバックフィル可能です
 - 👍 `verify` により保存データに同期漏れがないかの確認も可能です。
 - 👍 `validate` により、デプロイ前に 1 イベントあたりの読み書き量を見積もれます
+- 👍 どのルールもイベントの代わりに Cloud Scheduler の cron で実行できます（`schedule: '0 3 * * *'`）。関数は 1 つのままです。
 
 ## 本ライブラリでできること
 
@@ -100,6 +101,12 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
+**イベントではなく定期実行**: どのルールにも `schedule` を付けると、Firestore のイベントではなく Cloud Scheduler のジョブが同じ関数（`/schedule/<rule>`）を呼んで同期します。大きなファンアウト、夜間の集計、遅れてよい読み取りモデルに。
+
+```ts
+defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })
+```
+
 connection・aggregate・`base` の無い view はターゲットを作りません。既存ドキュメントのフィールドを埋めるだけです。`base` 付きの view（と projection）だけが例外で、ターゲットの存在を所有します。
 
 これらは設定の `rules` 配列に入れます。順序は自由なので、ドメインごとにまとめてファイルを分けられます。
@@ -165,7 +172,8 @@ initializeApp()
 export const docSync = onRequest(
   {
     region: 'asia-northeast1',
-    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com'
+    invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
+    timeoutSeconds: 1800, // 定期実行は schedule.budgetMs（既定 20 分）まで走る
   },
   createDocSyncHandler(config),
 )

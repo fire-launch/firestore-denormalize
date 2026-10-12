@@ -4,6 +4,16 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.9.0] - 2026-10-12
+
+### Added
+
+- `schedule` (and `timeZone`) on any rule: the rule is synced by a Cloud Scheduler job calling `POST /schedule/<rule>` on the same function instead of by Firestore events. `deploy` creates / updates / deletes the jobs; `setup` enables the Cloud Scheduler API; Eventarc triggers are created only for collections used by event-driven rules.
+- The handler answers `/schedule/<rule>` with a time-boxed `rebuild` (`schedule.budgetMs`, default 20 minutes) and a JSON result including `completed`.
+- `rebuild()` accepts `budgetMs` and reports `completed`.
+- `validate` lists scheduled rules and estimates their cost per run.
+- `/schedule/<rule>` accepts POST only (405 otherwise).
+
 ## [0.8.0] - 2026-10-12
 
 ### Changed

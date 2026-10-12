@@ -46,6 +46,21 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `aggregate` | `'count'` or `{ sum: '<numeric field>' }` |
 | `targetField` | Numeric target field |
 
+### `schedule`: sync on a timer instead of on events
+
+Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZone` (IANA, default `Etc/UTC`). Such a rule is never processed on Firestore events; instead `deploy` creates a Cloud Scheduler job `<instance>-<rule>` that calls `POST <service url>/schedule/<rule>` with the trigger service account's OIDC token, and the handler runs `rebuild` for that one rule. Collections used only by scheduled rules get no Eventarc trigger.
+
+| Key | Meaning |
+|---|---|
+| `schedule` | Cloud Scheduler unix-cron, e.g. `'0 3 * * *'`. The rule's `name` must match `[A-Za-z0-9_-]` (it becomes the job name and URL segment) |
+| `timeZone` | IANA time zone for the cron. Default `Etc/UTC` |
+
+- Consistency becomes "eventually, within the cron interval plus one run". Writes are still `update(..., { lastUpdateTime })`, so a scheduled run never overwrites a concurrent event-driven write with stale data.
+- Each run is time-boxed (`schedule.budgetMs` on `createDocSyncHandler`, default 20 minutes; Cloud Scheduler waits at most 30). When the budget runs out the run stops at a page boundary and answers `completed: false` with `lastPath`; the next scheduled run starts from the beginning. For collections too large for one run, split the rule or wait for the resumable version (planned).
+- To run a scheduled rule by hand or against the emulator: `doc-sync rebuild --rule <name>`, or `POST /schedule/<name>` on the function (no CloudEvent headers needed).
+- Schedule or events, never both: a scheduled rule ignores target creation too, so its fields appear on the first run after the target exists.
+- Set the function's `timeoutSeconds` above the budget (the README example uses 1800); otherwise the platform cuts a long run before it can stop cleanly.
+
 ### `defineView`: keep the declared `targetFields` of `target` = the matching paths of `build(...)`
 
 The general form. `defineConnection`, `defineAggregate` and `defineProjection` are shorthands for views of a fixed shape.
@@ -103,7 +118,7 @@ Collection names, field paths, `idParam` and the `build` return type are checked
 ## Handler
 
 ```ts
-createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
+createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule })
 ```
 
 | Option | Default | Meaning |
@@ -112,16 +127,19 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize })
 | `logger` | JSON to stdout | Anything with `info` / `warn` / `error`; `console` works |
 | `maxRetries` | 5 | Redos of a target whose conditional write failed |
 | `pageSize` | 500 | Target query page size |
+| `schedule: { budgetMs, concurrency }` | `budgetMs` 20 minutes, `concurrency` 20 | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page |
 
 The handler is `(req, res) => Promise<void>` and also works with Express or Node's `http`.
+
+`POST /schedule/<rule>` runs that scheduled rule and answers JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` (200), `404` for an unknown or event-driven rule, `500` on failure (Cloud Scheduler retries). Pass `req.url` through (Express does).
 
 ## CLI
 
 | Command | Does |
 |---|---|
 | `validate [--strict]` | Checks the config; prints triggers, cost estimate, write chains, warnings. `--strict` fails on warnings |
-| `setup` | Creates the trigger SA, grants `roles/eventarc.eventReceiver` (project) and `roles/run.invoker` (service), enables APIs. Idempotent; the invoker grant is skipped until the service exists, so rerun after the first deploy |
-| `deploy [--deploy-function <name>]` | Creates missing triggers, updates drifted ones (service, service region, path pattern, SA), deletes stale ones; only triggers labelled `doc-sync-instance=<name>` in `region`. Optionally runs `firebase deploy` first |
+| `setup` | Creates the trigger SA, grants `roles/eventarc.eventReceiver` (project) and `roles/run.invoker` (service), enables APIs; enables the Cloud Scheduler API when a rule is scheduled. Idempotent; the invoker grant is skipped until the service exists, so rerun after the first deploy |
+| `deploy [--deploy-function <name>]` | Creates / updates / deletes the Eventarc triggers of event-driven rules and the Cloud Scheduler jobs of scheduled rules (diff-based; `--dry-run` prints the commands). Jobs need the Cloud Run service URL, so run it after the first function deploy |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | Walks every target and writes what a live event would. Missing sources follow `onSourceDelete` |
 | `verify [--fix] [--rule]... [--start-after]` | Walks every target and reports mismatches (actual vs expected); `--fix` repairs them; exits 1 while a mismatch remains |
 | `dev --url <handler>` | Bridges the Firestore emulator to the handler as CloudEvents. Emulator only |
@@ -160,6 +178,8 @@ One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view sour
 
 `validate` prints per rule the reads and writes one event causes, as formulas over `N` (matching targets) and `M` (source documents per target), and warns about `refField` view sources (fan-out) and many-to-one view sources with neither `limit` nor `patch`. `--strict` turns warnings into exit code 1.
 
+A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with reads `T × (per-target reads)` and writes `≤ T`, T being the number of targets.
+
 ## Known limitations
 
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
@@ -171,6 +191,7 @@ One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view sour
 
 - The handler does not authenticate. Restrict invocation to the trigger SA: `invoker:` in `onRequest`, or `--no-allow-unauthenticated` + `roles/run.invoker` on Cloud Run. Without it the function is public.
 - A forged or replayed request can only force recomputation (reads). Values are re-read from the real sources; `patch` gets a fresh, membership-checked read, never request data.
+- Scheduler jobs call the function with the trigger service account's OIDC token; the same `invoker` restriction covers them. The `/schedule/<rule>` route does no authentication of its own.
 - `setup` grants the trigger SA exactly `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the service.
 - The function's runtime SA needs Firestore read/write (`roles/datastore.user`) and runs your `build` / `patch`; use a dedicated SA, not the default compute one.
 - Fan-out has no per-event cap; control it with `validate` warnings, `maxInstances`, `timeoutSeconds`.
