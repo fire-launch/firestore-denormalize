@@ -950,8 +950,8 @@ export class Processor {
     const redo = () => this.syncView(ref, view, { ...opts, counter, attempt: attempt + 1, target: undefined, sourceCache: undefined })
     let base: DocumentSnapshot | undefined
     if (view.basePattern) {
-      // Always a fresh read, taken after the target above: a page snapshot of the base would be older than the
-      // target read that just happened, and a concurrent update to the base could be overwritten with a stale value.
+      // Read after the target above. A cached base is reused only when it was read no earlier than the target,
+      // so a concurrent update to the base can never be overwritten with a stale value.
       base = await this.readBase(ref.path, view, { attempt, sourceCache: opts.sourceCache, notBefore: target.readTime }, counter)
       if (!base) return 'skip'
       if (!base.exists) {
