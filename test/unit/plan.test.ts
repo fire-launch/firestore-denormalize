@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { defineAggregate, defineConnection, validateConfig } from '../../src/config.js'
+import { defineAggregate, defineConnection, triggerName, validateConfig } from '../../src/config.js'
 import {
   desiredJobs,
   desiredTriggers,
   jobCreateArgs,
   jobDifferences,
+  jobName,
   ownedJobs,
   ownedTriggers,
   planJobs,
@@ -42,20 +43,20 @@ const scheduledConfig = validateConfig({
 
 describe('plan', () => {
   it('derives triggers from event-driven rules only and one job per scheduled rule', () => {
-    expect(desiredTriggers(scheduledConfig).map((t) => t.name).sort()).toEqual(['doc-sync-category', 'doc-sync-post'])
-    expect(desiredJobs(scheduledConfig)).toEqual([{ name: 'doc-sync-daily-likes', rule: 'daily-likes', cron: '0 3 * * *', timeZone: 'Asia/Tokyo' }])
+    expect(desiredTriggers(scheduledConfig).map((t) => t.name).sort()).toEqual([triggerName('doc-sync', 'category'), triggerName('doc-sync', 'post')])
+    expect(desiredJobs(scheduledConfig)).toEqual([{ name: jobName('doc-sync', 'daily-likes'), rule: 'daily-likes', cron: '0 3 * * *', timeZone: 'Asia/Tokyo' }])
   })
 
   it('builds the scheduler job command and diffs existing jobs', () => {
     const [job] = desiredJobs(scheduledConfig)
     const url = 'https://docsync-abc-an.a.run.app'
     expect(formatCommand('gcloud', jobCreateArgs(scheduledConfig, 'my-proj', job!, url))).toBe(
-      "gcloud scheduler jobs create http doc-sync-daily-likes --project=my-proj --location=asia-northeast1 '--schedule=0 3 * * *' --time-zone=Asia/Tokyo --uri=https://docsync-abc-an.a.run.app/schedule/daily-likes --http-method=POST --oidc-service-account-email=doc-sync-trigger@my-proj.iam.gserviceaccount.com --oidc-token-audience=https://docsync-abc-an.a.run.app --attempt-deadline=1800s --max-retry-attempts=3 --min-backoff=60s --description=doc-sync-instance=doc-sync",
+      `gcloud scheduler jobs create http ${jobName('doc-sync', 'daily-likes')} --project=my-proj --location=asia-northeast1 '--schedule=0 3 * * *' --time-zone=Asia/Tokyo --uri=https://docsync-abc-an.a.run.app/schedule/daily-likes --http-method=POST --oidc-service-account-email=doc-sync-trigger@my-proj.iam.gserviceaccount.com --oidc-token-audience=https://docsync-abc-an.a.run.app --attempt-deadline=1800s --max-retry-attempts=3 --min-backoff=60s --description=doc-sync-instance=doc-sync`,
     )
-    const current = { name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-daily-likes', description: 'doc-sync-instance=doc-sync', schedule: '0 4 * * *', timeZone: 'Etc/UTC', httpTarget: { uri: `${url}/schedule/daily-likes`, httpMethod: 'POST', oidcToken: { serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com', audience: url } } }
+    const current = { name: `projects/my-proj/locations/asia-northeast1/jobs/${jobName('doc-sync', 'daily-likes')}`, description: 'doc-sync-instance=doc-sync', schedule: '0 4 * * *', timeZone: 'Etc/UTC', httpTarget: { uri: `${url}/schedule/daily-likes`, httpMethod: 'POST', oidcToken: { serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com', audience: url } } }
     expect(jobDifferences(scheduledConfig, 'my-proj', job!, current, url)).toEqual(['schedule: 0 4 * * * -> 0 3 * * *', 'time zone: Etc/UTC -> Asia/Tokyo'])
     const plan = planJobs(desiredJobs(scheduledConfig), ownedJobs([current, { name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-old', description: 'doc-sync-instance=doc-sync' }, { name: 'projects/my-proj/locations/asia-northeast1/jobs/other', description: 'something else' }], 'doc-sync'), { config: scheduledConfig, project: 'my-proj', serviceUrl: url })
-    expect(plan.update.map((u) => u.job.name)).toEqual(['doc-sync-daily-likes'])
+    expect(plan.update.map((u) => u.job.name)).toEqual([jobName('doc-sync', 'daily-likes')])
     expect(plan.remove).toEqual(['doc-sync-old'])
     expect(plan.create).toEqual([])
   })
@@ -66,7 +67,7 @@ describe('plan', () => {
   })
 
   it('derives one trigger per collection', () => {
-    expect(desiredTriggers(config).map((t) => t.name)).toEqual(['doc-sync-category', 'doc-sync-post', 'doc-sync-user-room'])
+    expect(desiredTriggers(config).map((t) => t.name)).toEqual([triggerName('doc-sync', 'category'), triggerName('doc-sync', 'post'), triggerName('doc-sync', 'user_room')])
   })
 
   it('only touches triggers labelled with the instance', () => {
@@ -82,9 +83,9 @@ describe('plan', () => {
   })
 
   it('diffs desired against existing', () => {
-    const plan = planTriggers(desiredTriggers(config), [{ name: 'doc-sync-post' }, { name: 'doc-sync-old' }])
-    expect(plan.create.map((t) => t.name)).toEqual(['doc-sync-category', 'doc-sync-user-room'])
-    expect(plan.keep.map((t) => t.name)).toEqual(['doc-sync-post'])
+    const plan = planTriggers(desiredTriggers(config), [{ name: triggerName('doc-sync', 'post') }, { name: 'doc-sync-old' }])
+    expect(plan.create.map((t) => t.name)).toEqual([triggerName('doc-sync', 'category'), triggerName('doc-sync', 'user_room')])
+    expect(plan.keep.map((t) => t.name)).toEqual([triggerName('doc-sync', 'post')])
     expect(plan.remove).toEqual(['doc-sync-old'])
   })
 

@@ -8,13 +8,23 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 
 | Key | Meaning |
 |---|---|
-| `name` | Instance name; prefix of trigger names (`[a-z][a-z0-9-]*`) |
+| `name` | Instance name (`[a-z][a-z0-9-]*`). Unique per project and region. |
 | `region` | Eventarc location = Firestore database location (`asia-northeast1`, `nam5`, ...) |
 | `database` | Firestore database ID. Default `(default)` |
 | `service` | Cloud Run service name of the function (for `onRequest`: the function name, lower-cased) |
 | `serviceRegion` | Cloud Run region. Default `region`; required when `region` is a multi-region (`nam5`, `eur3`) |
 | `serviceAccount` | Trigger service account; a bare ID becomes `<id>@<project>.iam.gserviceaccount.com` |
 | `rules[]` | The rules, in any order: `defineConnection(...)`, `defineAggregate(...)`, `defineView(...)`, `defineProjection(...)` (or objects with a `kind`) |
+
+### Resource names
+
+| Resource | Name |
+|---|---|
+| Eventarc trigger | `<instance>-<collection>-<hash>` |
+| Cloud Scheduler job | `<instance>-<rule>-<hash>` |
+| Cloud Tasks queue | `<instance>-schedule` |
+
+`<hash>` is 8 characters derived from the instance and the collection or rule. It keeps names unique across instances and within the 63-character limit. Long names are shortened before the hash. `deploy` finds its own resources by label, not by name, so you never type these names.
 
 ```ts
 export default defineConfig({

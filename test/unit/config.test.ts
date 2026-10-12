@@ -9,7 +9,9 @@ import {
   defineConnection,
   defineProjection,
   defineView,
+  jobName,
   needsCollectionGroupQuery,
+  resourceHash,
   rulesOf,
   scheduledRules,
   triggerCollectionsOf,
@@ -186,12 +188,44 @@ describe('validateConfig', () => {
     ).not.toThrow()
   })
 
-  it('lower-cases camelCase collection ids in trigger names', () => {
+  it('lower-cases camelCase collection ids in trigger names and appends the instance/collection hash', () => {
     const c = base.rules[0] as Connection
     const r = validateConfig({ ...base, rules: [{ ...c, source: 'chatRooms', target: 'users/{uid}/userPosts', idField: 'roomId', targetField: 'room' }] })
-    expect(collectionsOf(r).map((p) => triggerName('doc-sync', p))).toEqual(['doc-sync-chatrooms', 'doc-sync-users-userposts'])
-    // a trigger name may not end with a hyphen
-    expect(problemsOf({ ...base, rules: [{ ...c, source: 'category_' }] })).toContainEqual(expect.stringContaining('trigger name "doc-sync-category-"'))
+    expect(collectionsOf(r).map((p) => triggerName('doc-sync', p))).toEqual([
+      `doc-sync-chatrooms-${resourceHash('doc-sync', 'chatRooms')}`,
+      `doc-sync-users-userposts-${resourceHash('doc-sync', 'users/{}/userPosts')}`,
+    ])
+    // a trailing underscore used to produce a trailing hyphen; the hash suffix makes the name valid
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'category_' }] }).filter((p) => p.includes('trigger name'))).toEqual([])
+    expect(triggerName('doc-sync', 'category_')).toMatch(/^doc-sync-category-[0-9a-f]{8}$/)
+  })
+
+  describe('resource names', () => {
+    it('are unique across instances whose concatenations coincide', () => {
+      expect(jobName('doc-sync', 'admin-x')).not.toBe(jobName('doc-sync-admin', 'x'))
+      expect(jobName('doc-sync', 'admin-x')).toMatch(/^doc-sync-admin-x-[0-9a-f]{8}$/)
+      expect(triggerName('a', 'b-c')).not.toBe(triggerName('a-b', 'c'))
+    })
+
+    it('distinguish a collection from a subcollection with the same slug', () => {
+      expect(triggerName('doc-sync', 'a-b')).not.toBe(triggerName('doc-sync', 'a/{x}/b'))
+      expect(triggerName('doc-sync', 'a/{x}/b')).toBe(triggerName('doc-sync', 'a/{y}/b')) // placeholder names do not matter
+    })
+
+    it('stay within the Eventarc limits for long nested collections', () => {
+      const long = triggerName('my-long-instance-name', 'organisations/{o}/departments/{d}/teams/{t}/members/{m}/badges')
+      expect(long.length).toBeLessThanOrEqual(63)
+      expect(long).toMatch(/^[a-z]([a-z0-9-]*[a-z0-9])?$/)
+      expect(long).not.toMatch(/--[0-9a-f]{8}$/)
+      const other = triggerName('my-long-instance-name', 'organisations/{o}/departments/{d}/teams/{t}/members/{m}/badgez')
+      expect(other.slice(0, -9)).toBe(long.slice(0, -9)) // same truncated prefix…
+      expect(other).not.toBe(long) // …different hash
+    })
+
+    it('are deterministic', () => {
+      expect(resourceHash('doc-sync', 'post')).toBe(resourceHash('doc-sync', 'post'))
+      expect(resourceHash('doc-sync', 'post')).toMatch(/^[0-9a-f]{8}$/)
+    })
   })
 
   it('rejects patterns that can match the same documents', () => {
@@ -217,13 +251,14 @@ describe('validateConfig', () => {
     expect(() => validateConfig({ ...base, rules: [{ ...agg, source: 'users/{uid}/likes', target: 'post' }] })).not.toThrow()
   })
 
-  it('rejects colliding trigger names', () => {
+  it('no longer collides when two collections slugify the same way, thanks to the hash', () => {
     const c = base.rules[0] as Connection
-    const problems = problemsOf({
-      ...base,
-      rules: [c, { ...c, name: 'x', source: 'user_room', target: 'user-room', idField: 'roomId', targetField: 'room' }],
-    })
-    expect(problems).toEqual([expect.stringContaining('both map to trigger "doc-sync-user-room"')])
+    expect(() =>
+      validateConfig({
+        ...base,
+        rules: [c, { ...c, name: 'x', source: 'user_room', target: 'user-room', idField: 'roomId', targetField: 'room' }],
+      }),
+    ).not.toThrow()
   })
 
   describe('views', () => {
@@ -513,8 +548,8 @@ describe('collectionsOf / triggerName', () => {
     expect(collectionsOf(resolved).map((p) => p.raw)).toEqual(['post', 'user'])
   })
   it('replaces underscores and joins subcollection ids', () => {
-    expect(triggerName('doc-sync', 'user_room')).toBe('doc-sync-user-room')
-    expect(triggerName('doc-sync', 'users/{uid}/payments')).toBe('doc-sync-users-payments')
+    expect(triggerName('doc-sync', 'user_room')).toBe(`doc-sync-user-room-${resourceHash('doc-sync', 'user_room')}`)
+    expect(triggerName('doc-sync', 'users/{uid}/payments')).toBe(`doc-sync-users-payments-${resourceHash('doc-sync', 'users/{}/payments')}`)
   })
 })
 

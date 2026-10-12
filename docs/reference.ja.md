@@ -8,13 +8,23 @@
 
 | キー | 意味 |
 |---|---|
-| `name` | インスタンス名。トリガー名の接頭辞（`[a-z][a-z0-9-]*`） |
+| `name` | インスタンス名（`[a-z][a-z0-9-]*`）。プロジェクトとリージョンの中で一意にする |
 | `region` | Eventarc のロケーション = Firestore データベースのロケーション（`asia-northeast1`、`nam5` など） |
 | `database` | Firestore のデータベース ID。既定 `(default)` |
 | `service` | 関数の Cloud Run サービス名（`onRequest` の場合は関数名を小文字化したもの） |
 | `serviceRegion` | Cloud Run のリージョン。既定は `region`。`region` がマルチリージョン（`nam5`、`eur3` など）のときは必須 |
 | `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完される |
 | `rules[]` | ルール。順序は自由: `defineConnection(...)`、`defineAggregate(...)`、`defineView(...)`、`defineProjection(...)`（または `kind` を持つオブジェクト） |
+
+### リソース名
+
+| リソース | 名前 |
+|---|---|
+| Eventarc トリガー | `<instance>-<collection>-<hash>` |
+| Cloud Scheduler ジョブ | `<instance>-<rule>-<hash>` |
+| Cloud Tasks キュー | `<instance>-schedule` |
+
+`<hash>` はインスタンスとコレクション（またはルール）から作る 8 文字です。インスタンス間で名前が衝突せず、63 文字の制限にも収まります。長い名前はハッシュの前で切り詰めます。`deploy` は名前ではなくラベルで自分のリソースを見つけるので、この名前を手で扱うことはありません。
 
 ```ts
 export default defineConfig({

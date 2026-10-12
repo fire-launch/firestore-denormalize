@@ -4,6 +4,13 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.11.0] - 2026-10-13
+
+### Changed
+
+- Trigger and job names now end in a short hash, so two instances can never produce the same name. The next `deploy` creates the new names, then deletes the old ones; no events are lost, a few may be delivered twice. Collection ids ending in `_` are now accepted.
+- `setup` fixes the retry policy of an existing continuation queue when it differs from the expected one.
+
 ## [0.10.0] - 2026-10-12
 
 ### Added

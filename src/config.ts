@@ -4,6 +4,7 @@
  * The same config object is consumed by the Cloud Run handler
  * (`createDocSyncHandler`) and by the CLI (`doc-sync validate|setup|deploy|rebuild|dev`).
  */
+import { createHash } from 'node:crypto'
 import type { DocumentData, DocumentSnapshot, Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
 import { fieldPathsOverlap, isValidFieldPath, setField, splitFieldPath } from './fields.js'
 import { type CollectionPattern, isResolvable, parseCollectionPattern, patternSlug, patternsIntersect } from './paths.js'
@@ -380,6 +381,8 @@ const SERVICE_NAME = /^[a-z]([a-z0-9-]*[a-z0-9])?$/
 /** Firestore multi-region locations (`nam5`, `eur3`, `nam7`, ...), which are not Cloud Run regions. */
 const MULTI_REGION = /^(nam|eur|asia)\d+$/
 const TRIGGER_NAME_MAX = 63
+/** Prefix budget for composite names: `TRIGGER_NAME_MAX` minus `-` and the 8-char hash. */
+const RESOURCE_PREFIX_MAX = TRIGGER_NAME_MAX - 9
 
 const str = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
 
@@ -980,10 +983,25 @@ export function triggerCollectionsOf(config: ResolvedConfig): CollectionPattern[
   return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 }
 
-/** Eventarc trigger name: `<instance>-<collection ids joined by ->`, `_` replaced by `-`. */
+/** 8 hex chars of sha256 over the instance name and a resource key: composite names stay unique across instances and across slugs that coincide. */
+export function resourceHash(instanceName: string, key: string): string {
+  return createHash('sha256').update(`${instanceName}\n${key}`).digest('hex').slice(0, 8)
+}
+
+/** `<instance>-<slug>` cut to the prefix budget, never ending in a hyphen. */
+function resourcePrefix(instanceName: string, slug: string): string {
+  return `${instanceName}-${slug}`.slice(0, RESOURCE_PREFIX_MAX).replace(/-+$/, '')
+}
+
+/** Eventarc trigger name: `<instance>-<collection ids joined by ->-<hash>`, lower-case, `_` replaced by `-`. */
 export function triggerName(instanceName: string, collection: string | CollectionPattern): string {
   const p = typeof collection === 'string' ? parseCollectionPattern(collection) : collection
-  return `${instanceName}-${patternSlug(p)}`
+  return `${resourcePrefix(instanceName, patternSlug(p))}-${resourceHash(instanceName, p.key)}`
+}
+
+/** Cloud Scheduler job name of a scheduled rule: `<instance>-<rule>-<hash>`. */
+export function jobName(instanceName: string, rule: string): string {
+  return `${resourcePrefix(instanceName, rule)}-${resourceHash(instanceName, rule)}`
 }
 
 /** Whether running the rule on a change of its source needs a collection-group query (and the matching index). */

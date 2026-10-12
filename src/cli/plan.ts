@@ -1,13 +1,13 @@
 /**
  * Pure functions that turn a config into gcloud invocations. Kept free of I/O so they can be unit tested.
  */
-import { scheduledRules, serviceAccountEmail, triggerCollectionsOf, triggerName, type ResolvedConfig } from '../config.js'
+import { jobName, scheduledRules, serviceAccountEmail, triggerCollectionsOf, triggerName, type ResolvedConfig } from '../config.js'
 import { type CollectionPattern, eventarcPathPattern, normalizePathPattern } from '../paths.js'
 
 export const INSTANCE_LABEL = 'doc-sync-instance'
 export const EVENT_TYPE = 'google.cloud.firestore.document.v1.written'
 
-export { serviceAccountEmail } from '../config.js'
+export { jobName, serviceAccountEmail } from '../config.js'
 
 export interface TriggerSpec {
   name: string
@@ -126,10 +126,6 @@ export interface JobSpec {
   rule: string
   cron: string
   timeZone: string
-}
-
-export function jobName(instanceName: string, rule: string): string {
-  return `${instanceName}-${rule}`
 }
 
 /** One Cloud Scheduler job per scheduled rule. */
