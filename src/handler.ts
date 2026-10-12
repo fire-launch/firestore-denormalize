@@ -32,7 +32,17 @@ import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollec
 import { forEachLimit } from './walk.js'
 import { rebuild } from './rebuild.js'
 import { SourceCache } from './source-cache.js'
-import { continuationRunId, createCloudTasksEnqueuer, enqueueWithRetry, parseContinuationBody, type ContinuationTask, type Enqueue } from './schedule.js'
+import {
+  continuationRunId,
+  createCloudTasksEnqueuer,
+  deferBucket,
+  deferTaskId,
+  enqueueWithRetry,
+  parseContinuationBody,
+  type ContinuationTask,
+  type DirtyUnit,
+  type Enqueue,
+} from './schedule.js'
 
 export interface DocSyncHandlerOptions {
   /** Firestore instance to use. Defaults to `getFirestore()` (or `getFirestore(database)` for a named database). */
@@ -107,6 +117,8 @@ export interface RuleResult extends ReadCounts {
   writes: number
   /** Number of conditional writes that failed and were redone. */
   retries: number
+  /** Number of dirty units enqueued (only for `action: 'defer'`). */
+  deferred?: number
 }
 
 const DELETE = Symbol('FieldValue.delete')
@@ -114,7 +126,16 @@ const NOTHING = Symbol('nothing')
 /** A value to store in the target field, or `DELETE` for "the field must be absent". */
 type Desired = unknown
 type Computed = Desired | typeof NOTHING
-export type Outcome = 'skip' | 'write' | 'delete' | 'create' | 'remove'
+export type Outcome = 'skip' | 'write' | 'delete' | 'create' | 'remove' | 'defer'
+
+/** Marks one dirty unit instead of recomputing it now; the handler enqueues a Cloud Tasks task that flushes it later. */
+type DeferSink = (unit: DirtyUnit) => Promise<void>
+
+/** Options for the per-event processing methods: a shared read cache and, for a deferred rule, the sink that marks a unit dirty instead of recomputing it now. */
+interface ProcessOptions {
+  cache?: SourceCache
+  defer?: DeferSink
+}
 
 /** One field whose current value differs from what the rule computes. */
 export interface FieldMismatch {
@@ -248,10 +269,69 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     return host ? `https://${host}` : undefined
   }
 
+  /** `undefined` for a rule without `deferred`; otherwise a sink that enqueues a Cloud Tasks task flushing `unit` at the end of its bucket. A rejected enqueue throws, so the rule's own task rejects and the event is retried. */
+  function deferSinkFor(rule: ResolvedRule, req: DocSyncRequest): DeferSink | undefined {
+    if (!rule.deferred) return undefined
+    const everyMs = rule.deferred.everyMs
+    return async (unit: DirtyUnit) => {
+      const project = scheduleProject()
+      const serviceUrl = serviceUrlFrom(req)
+      if (!project || !serviceUrl) throw new Error('cannot enqueue: project or service URL unknown')
+      const { bucket, scheduleTime } = deferBucket(everyMs)
+      const task: ContinuationTask = {
+        id: deferTaskId(rule.name, bucket, unit),
+        rule: rule.name,
+        url: `${serviceUrl}/schedule/${encodeURIComponent(rule.name)}`,
+        body: { flush: unit },
+        scheduleTime,
+        serviceAccountEmail: serviceAccountEmail(resolved, project),
+        audience: serviceUrl,
+        queue: { project, location: resolved.serviceRegion, name: scheduleQueueName(resolved.name) },
+      }
+      await enqueueWithRetry(enqueue, task)
+      logger.info('doc-sync: deferred', { rule: rule.name, unit: unit.unit, path: unit.path, task: task.id })
+    }
+  }
+
+  /** Flushes one dirty unit of a deferred rule: recomputes it now and answers with the result. */
+  async function runFlush(rule: ResolvedRule, flush: DirtyUnit, name: string, startedAt: number, res: DocSyncResponse): Promise<void> {
+    try {
+      let result: RuleResult | { action: Outcome }
+      if (flush.unit === 'target') {
+        const outcome = await processor.sync(db().doc(flush.path), rule, {})
+        result = { action: outcome }
+      } else if (rule.kind === 'connection') {
+        const match = matchDocumentPath(rule.sourcePattern, flush.path)
+        if (!match) return respondJson(res, 400, { error: 'flush path does not match this rule' })
+        result = await processor.connectionSource(rule, match, undefined, undefined, {})
+      } else if (rule.kind === 'view') {
+        let match: DocumentMatch | undefined
+        let foundSource: ResolvedViewSource | undefined
+        for (const s of rule.sources) {
+          if (s.refField === undefined) continue
+          const m = matchDocumentPath(s.pattern, flush.path)
+          if (m) {
+            match = m
+            foundSource = s
+            break
+          }
+        }
+        if (!match || !foundSource) return respondJson(res, 400, { error: 'no refField source matches this flush path' })
+        result = await processor.viewSource(rule, foundSource, match, undefined, undefined, {})
+      } else {
+        return respondJson(res, 400, { error: `rule "${name}" has no source unit to flush` })
+      }
+      return respondJson(res, 200, { rule: name, flush, ...result, durationMs: Date.now() - startedAt })
+    } catch (err) {
+      logger.error('doc-sync schedule: flush failed', { rule: name, flush, error: err })
+      return respondJson(res, 500, { error: 'flush failed' })
+    }
+  }
+
   async function runScheduled(name: string, req: DocSyncRequest, res: DocSyncResponse): Promise<void> {
     const startedAt = Date.now()
     const rule = rules.find((r) => r.name === name)
-    if (!rule || !rule.scheduled) {
+    if (!rule) {
       logger.warn('doc-sync schedule: unknown or unscheduled rule', { rule: name })
       return respondJson(res, 404, { error: `no scheduled rule "${name}"` })
     }
@@ -260,6 +340,19 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       cont = parseContinuationBody(await readBody(req))
     } catch {
       cont = {}
+    }
+    if (rule.deferred) {
+      const flush = cont.flush
+      if (!flush) return respondJson(res, 400, { error: 'deferred rules need a flush body' })
+      return runFlush(rule, flush, name, startedAt, res)
+    }
+    if (cont.flush) {
+      logger.warn('doc-sync schedule: flush body for a non-deferred rule', { rule: name })
+      return respondJson(res, 404, { error: `no scheduled rule "${name}"` })
+    }
+    if (!rule.scheduled) {
+      logger.warn('doc-sync schedule: unknown or unscheduled rule', { rule: name })
+      return respondJson(res, 404, { error: `no scheduled rule "${name}"` })
     }
     const runId = continuationRunId(cont.runId, header(req, 'x-cloudscheduler-scheduletime'))
     const chunk = cont.chunk ?? 0
@@ -374,14 +467,15 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const onSameDoc: Task[] = []
     const { before, after } = event
     for (const rule of eventRules) {
+      const opts: ProcessOptions = { cache, defer: deferSinkFor(rule, req) }
       if (rule.kind === 'view') {
         if (rule.basePattern) {
           const asBase = matchDocumentPath(rule.basePattern, document)
-          if (asBase) parallel.push({ rule: rule.name, run: () => processor.viewBase(rule, asBase, before, after, cache) })
+          if (asBase) parallel.push({ rule: rule.name, run: () => processor.viewBase(rule, asBase, before, after, opts) })
         }
         for (const source of rule.sources) {
           const asSource = matchDocumentPath(source.pattern, document)
-          if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after, cache) })
+          if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after, opts) })
         }
       } else {
         const asSource = matchDocumentPath(rule.sourcePattern, document)
@@ -390,8 +484,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
             rule: rule.name,
             run: () =>
               rule.kind === 'connection'
-                ? processor.connectionSource(rule, asSource, before, after, cache)
-                : processor.aggregateSource(rule, asSource, before, after, cache),
+                ? processor.connectionSource(rule, asSource, before, after, opts)
+                : processor.aggregateSource(rule, asSource, before, after, opts),
           })
         }
       }
@@ -401,10 +495,10 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
           rule: rule.name,
           run: () =>
             rule.kind === 'connection'
-              ? processor.connectionTarget(rule, asTarget, before, after, cache)
+              ? processor.connectionTarget(rule, asTarget, before, after, opts)
               : rule.kind === 'aggregate'
-                ? processor.aggregateTarget(rule, asTarget, before, after, cache)
-                : processor.viewTarget(rule, asTarget, before, after, cache),
+                ? processor.aggregateTarget(rule, asTarget, before, after, opts)
+                : processor.viewTarget(rule, asTarget, before, after, opts),
         })
       }
     }
@@ -521,13 +615,14 @@ export class Processor {
     source: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(conn, 'source')
     if (before && after && conn.fields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
       result.reason = 'fields unchanged'
       return result
     }
+    if (opts.defer) return deferOne(result, opts.defer, { unit: 'source', path: source.path })
 
     const counter = new ReadCounter()
     const firestore = this.db()
@@ -547,7 +642,7 @@ export class Processor {
         result.targets += docs.length
 
         // Read the source only after the targets, so a stale source value can never pass the precondition.
-        const sourceSnap = await this.readSource(source.path, counter, cache, page.readTime)
+        const sourceSnap = await this.readSource(source.path, counter, opts.cache, page.readTime)
         const desired = copyValue(sourceSnap, conn, conn.onSourceDelete)
         if (desired === NOTHING) {
           result.reason = 'source missing and onSourceDelete=nothing'
@@ -593,7 +688,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(conn, 'target')
     result.targets = 1
@@ -605,8 +700,10 @@ export class Processor {
       result.reason = 'idField unchanged'
       return result
     }
+    // A create (no `before`) gives the target its initial value immediately, same as without defer; only an update to an existing target defers.
+    if (before && opts.defer) return deferOne(result, opts.defer, { unit: 'target', path: target.path })
     const counter = new ReadCounter()
-    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter, deleted: { onSourceDelete: conn.onSourceDelete }, sourceCache: cache }))
+    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter, deleted: { onSourceDelete: conn.onSourceDelete }, sourceCache: opts.cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -706,7 +803,7 @@ export class Processor {
     source: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(rule, 'source')
     if (before && after && rule.watchedFields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
@@ -724,10 +821,11 @@ export class Processor {
       result.reason = 'target collection unresolvable'
       return result
     }
+    if (opts.defer) return deferUnits(result, opts.defer, [...ids].map((id) => ({ unit: 'target', path: `${targetCollection}/${id}` })))
     const counter = new ReadCounter()
     for (const id of ids) {
       result.targets++
-      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, { counter, sourceCache: cache }))
+      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, { counter, sourceCache: opts.cache }))
     }
     if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no target id'
     return finish(result, counter)
@@ -739,7 +837,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(rule, 'target')
     result.targets = 1
@@ -751,8 +849,10 @@ export class Processor {
       result.reason = 'not a create'
       return result
     }
+    // A create (no `before`) gives the target its initial value immediately, same as without defer; only a field re-added to an existing target defers.
+    if (before && opts.defer) return deferOne(result, opts.defer, { unit: 'target', path: target.path })
     const counter = new ReadCounter()
-    count(result, await this.syncAggregate(this.db().doc(target.path), rule, { counter, sourceCache: cache }))
+    count(result, await this.syncAggregate(this.db().doc(target.path), rule, { counter, sourceCache: opts.cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -808,7 +908,7 @@ export class Processor {
     match: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(view, 'source')
     result.source = source.key
@@ -819,11 +919,20 @@ export class Processor {
         return result
       }
     }
+    if (opts.defer) {
+      if (source.refField !== undefined) return deferOne(result, opts.defer, { unit: 'source', path: match.path })
+      const { targetCollection, ids } = this.viewTargetIdsFor(view, source, match, before, after)
+      if (!targetCollection) {
+        result.reason = 'target collection unresolvable'
+        return result
+      }
+      return deferUnits(result, opts.defer, [...ids].map((id) => ({ unit: 'target', path: `${targetCollection}/${id}` })))
+    }
     const change: ViewChange = { source: source.key, path: match.path, before: before?.data, after: after?.data }
     const counter = new ReadCounter()
     const resolvable = await this.forEachViewTarget(view, source, match, before, after, counter, async (ref, snapshot, changeCache) => {
       result.targets++
-      count(result, await this.syncView(ref, view, { change, target: snapshot, counter, changeCache, sourceCache: cache }))
+      count(result, await this.syncView(ref, view, { change, target: snapshot, counter, changeCache, sourceCache: opts.cache }))
     })
     if (!resolvable) {
       result.reason = 'target collection unresolvable'
@@ -839,7 +948,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(view, 'target')
     result.targets = 1
@@ -848,9 +957,9 @@ export class Processor {
       return result
     }
     if (!after) {
-      // The target of a base view was deleted by hand: recreate it while the base exists.
+      // The target of a base view was deleted by hand: recreate it while the base exists. Stays immediate under defer.
       const counter = new ReadCounter()
-      count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: cache }))
+      count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: opts.cache }))
       if (result.writes === 0) result.reason = 'nothing to recreate (base missing or unresolvable)'
       return finish(result, counter)
     }
@@ -861,8 +970,10 @@ export class Processor {
         return result
       }
     }
+    // A create (no `before`) writes the target immediately, same as without defer; only an update to an existing target defers.
+    if (before && opts.defer) return deferOne(result, opts.defer, { unit: 'target', path: target.path })
     const counter = new ReadCounter()
-    count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: cache }))
+    count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: opts.cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -873,7 +984,7 @@ export class Processor {
     match: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
-    cache?: SourceCache,
+    opts: ProcessOptions = {},
   ): Promise<RuleResult> {
     const result = newResult(view, 'source')
     result.source = 'base'
@@ -887,8 +998,13 @@ export class Processor {
       return result
     }
     result.targets = 1
+    // Create/delete (the target's lifecycle) stays immediate; only an update of an existing base defers.
+    if (before && after && opts.defer) {
+      const targetPath = targetPathForBase(view, match.path) ?? `${collection}/${match.id}`
+      return deferOne(result, opts.defer, { unit: 'target', path: targetPath })
+    }
     const counter = new ReadCounter()
-    count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter, sourceCache: cache }))
+    count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter, sourceCache: opts.cache }))
     // `after` missing means the base was just deleted: a skip there means the target was already absent, not that it is up to date.
     if (result.writes === 0) result.reason = after ? 'target up to date' : 'target already absent'
     return finish(result, counter)
@@ -1212,6 +1328,20 @@ export class Processor {
       }
       return true
     }
+    const { targetCollection, ids } = this.viewTargetIdsFor(view, source, match, before, after)
+    if (!targetCollection) return false
+    for (const id of ids) await fn(firestore.doc(`${targetCollection}/${id}`), undefined, {})
+    return true
+  }
+
+  /** Target ids of an `idField` / `idParam` source change (and the target collection they belong to): shared by `forEachViewTarget` and `viewSource`'s defer path. */
+  private viewTargetIdsFor(
+    view: ResolvedView,
+    source: ResolvedViewSource,
+    match: DocumentMatch,
+    before: DecodedDocument | undefined,
+    after: DecodedDocument | undefined,
+  ): { targetCollection: string | undefined; ids: Set<string> } {
     const ids = new Set<string>()
     for (const doc of [before, after]) {
       if (!doc) continue
@@ -1219,9 +1349,7 @@ export class Processor {
       if (typeof id === 'string' && isValidDocumentId(id)) ids.add(id)
     }
     const targetCollection = resolveCollectionPath(view.targetPattern, match.params)
-    if (!targetCollection) return false
-    for (const id of ids) await fn(firestore.doc(`${targetCollection}/${id}`), undefined, {})
-    return true
+    return { targetCollection, ids }
   }
 
 }
@@ -1289,6 +1417,19 @@ function count(result: RuleResult, outcome: Outcome): void {
   if (outcome === 'skip') return
   result.writes++
   result.action = outcome
+}
+
+/** Marks every unit dirty via `sink` instead of recomputing it now; the result reports `defer` (or `skip` when there was nothing to mark). */
+async function deferUnits(result: RuleResult, sink: DeferSink, units: DirtyUnit[]): Promise<RuleResult> {
+  for (const u of units) await sink(u)
+  result.action = units.length ? 'defer' : 'skip'
+  result.deferred = units.length
+  if (!units.length) result.reason = 'no target id'
+  return result
+}
+
+function deferOne(result: RuleResult, sink: DeferSink, unit: DirtyUnit): Promise<RuleResult> {
+  return deferUnits(result, sink, [unit])
 }
 
 /** The value `targetField` should have: a map of the copied fields, or the `onSourceDelete` outcome. */

@@ -64,8 +64,8 @@ export function continuationRunId(bodyRunId: unknown, scheduleTimeHeader: string
   return raw.replace(TASK_ID_CHARS, '-')
 }
 
-/** The continuation fields of a request body (JSON text, bytes or an already-parsed object); fields of the wrong type are dropped. */
-export function parseContinuationBody(body: unknown): Partial<ContinuationBody> {
+/** The continuation fields of a request body (JSON text, bytes or an already-parsed object); fields of the wrong type are dropped. Also recognises a well-formed `{ flush: DirtyUnit }` body. */
+export function parseContinuationBody(body: unknown): Partial<ContinuationBody> & { flush?: DirtyUnit } {
   let data: unknown = body
   if (data instanceof Uint8Array) data = Buffer.from(data).toString('utf8')
   if (typeof data === 'string') {
@@ -77,11 +77,17 @@ export function parseContinuationBody(body: unknown): Partial<ContinuationBody> 
   }
   if (data === null || typeof data !== 'object') return {}
   const o = data as Record<string, unknown>
-  const out: Partial<ContinuationBody> = {}
+  const out: Partial<ContinuationBody> & { flush?: DirtyUnit } = {}
   if (typeof o.startAfter === 'string' && o.startAfter.length > 0) out.startAfter = o.startAfter
   if (typeof o.runId === 'string' && o.runId.length > 0) out.runId = o.runId
   if (typeof o.chunk === 'number' && Number.isInteger(o.chunk) && o.chunk >= 0) out.chunk = o.chunk
   if (typeof o.startedAt === 'string' && o.startedAt.length > 0) out.startedAt = o.startedAt
+  if (o.flush !== null && typeof o.flush === 'object') {
+    const f = o.flush as Record<string, unknown>
+    if ((f.unit === 'source' || f.unit === 'target') && typeof f.path === 'string' && f.path.length > 0) {
+      out.flush = { unit: f.unit, path: f.path }
+    }
+  }
   return out
 }
 
