@@ -19,44 +19,7 @@ Keep data in sync between Firestore documents with **one Cloud Run function and 
 
 ## What this library does
 
-**Copy** (`defineConnection`): copies fields of a document into related documents.
-
-```ts
-defineConnection({
-  name: 'post-category',
-  source: 'category',
-  target: 'post',
-  idField: 'categoryId',
-  fields: ['name', 'color'],
-  targetField: 'category',
-  onSourceDelete: 'setNull',
-})
-```
-```
-category/c1   { name: 'News', color: 'red', slug: 'news' }
-post/p1       { title: 'Hello', categoryId: 'c1' }
-                                   ▼
-post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
-```
-
-**Count / sum** (`defineAggregate`): keeps the number of documents in a collection, or the sum of a field, in sync.
-
-```ts
-defineAggregate({
-  name: 'post-likes',
-  source: 'post/{postId}/like',
-  target: 'post',
-  idParam: 'postId',
-  aggregate: 'count', // or { sum: 'amount' }
-  targetField: 'likeCount',
-})
-```
-```
-post/p1/like/u1, post/p1/like/u2
-post/p1       { title: 'Hello' }
-                                   ▼
-post/p1       { title: 'Hello', likeCount: 2 }
-```
+Everything is a **view**: a rule that keeps declared fields of a target document equal to a value computed from other documents. The three other rule kinds are shorthands for views of a fixed shape; use them when they fit and drop down to `defineView` when they do not.
 
 **View** (`defineView`): the general form. Reacts to changes on the target, its sources or its `base`, and writes the field paths you declare in `targetFields`, nested or at the root. For latest-N lists, maps keyed by id, summaries, read models. With `base`, the target document itself is created and deleted along with the same-id base document.
 
@@ -83,7 +46,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
 
-**Projection** (`defineProjection`): a read model in another collection. `userPublicView/{id}` exists exactly when `user/{id}` does and carries the declared paths; add aggregates or views on `userPublicView` for derived fields.
+**Projection** (`defineProjection`): shorthand for a view with `base` and no `build`. A read model in another collection: `userPublicView/{id}` exists exactly when `user/{id}` does and carries the declared paths copied as they are. Add aggregates or views on `userPublicView` for derived fields.
 
 ```ts
 defineProjection({
@@ -97,6 +60,45 @@ defineProjection({
 user/u1             { displayName: 'Ann', avatarUrl: '…', email: 'ann@…', phone: '…' }
                                    ▼
 userPublicView/u1   { displayName: 'Ann', avatarUrl: '…' }
+```
+
+**Copy** (`defineConnection`): shorthand for a view with one `refField` source. Copies fields of a document into the related documents that point at it, under one target field.
+
+```ts
+defineConnection({
+  name: 'post-category',
+  source: 'category',
+  target: 'post',
+  idField: 'categoryId',
+  fields: ['name', 'color'],
+  targetField: 'category',
+  onSourceDelete: 'setNull',
+})
+```
+```
+category/c1   { name: 'News', color: 'red', slug: 'news' }
+post/p1       { title: 'Hello', categoryId: 'c1' }
+                                   ▼
+post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
+```
+
+**Count / sum** (`defineAggregate`): shorthand for a view whose value is a count or a sum. Uses a Firestore aggregation query instead of reading the documents, so it stays cheap for large collections.
+
+```ts
+defineAggregate({
+  name: 'post-likes',
+  source: 'post/{postId}/like',
+  target: 'post',
+  idParam: 'postId',
+  aggregate: 'count', // or { sum: 'amount' }
+  targetField: 'likeCount',
+})
+```
+```
+post/p1/like/u1, post/p1/like/u2
+post/p1       { title: 'Hello' }
+                                   ▼
+post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
 Targets are never created by connections, aggregates or views without `base`: they fill fields of documents that already exist. A view with `base` (and a projection) is the one exception and owns its target's existence.

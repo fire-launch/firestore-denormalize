@@ -18,44 +18,7 @@ Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 �
 
 ## 本ライブラリでできること
 
-**コピー**（`defineConnection`）: ドキュメントのフィールドを、関連ドキュメントにコピーします。
-
-```ts
-defineConnection({
-  name: 'post-category',
-  source: 'category',
-  target: 'post',
-  idField: 'categoryId',
-  fields: ['name', 'color'],
-  targetField: 'category',
-  onSourceDelete: 'setNull',
-})
-```
-```
-category/c1   { name: 'News', color: 'red', slug: 'news' }
-post/p1       { title: 'Hello', categoryId: 'c1' }
-                                   ▼
-post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
-```
-
-**件数・合計**（`defineAggregate`）: コレクション内のドキュメント数や特定フィールドの合計値を同期します
-
-```ts
-defineAggregate({
-  name: 'post-likes',
-  source: 'post/{postId}/like',
-  target: 'post',
-  idParam: 'postId',
-  aggregate: 'count', // または { sum: 'amount' }
-  targetField: 'likeCount',
-})
-```
-```
-post/p1/like/u1, post/p1/like/u2
-post/p1       { title: 'Hello' }
-                                   ▼
-post/p1       { title: 'Hello', likeCount: 2 }
-```
+すべての基本は **ビュー** です。ビューは「ターゲットのドキュメントの宣言したフィールドを、他のドキュメントから計算した値に保つ」ルールです。残りの 3 種類は、形の決まったビューを短く書くための簡易設定（ショートハンド）です。合うときはそれを使い、合わないときは `defineView` に戻ります。
 
 **ビュー**（`defineView`）: 一般形です。ターゲット・ソース・`base` の変更を検知し、`targetFields` で宣言したフィールドパス（ルート直下でもネストでも）を書きます。最新 N 件のリスト、ID をキーにしたマップ、サマリー、読み取りモデルに使います。`base` を付けると、同じ ID の base ドキュメントに合わせてターゲットのドキュメント自体を作成・削除します。
 
@@ -82,7 +45,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', latestComments: [{ id: 'c3', body: 'third' }, { id: 'c2', body: 'second' }] }
 ```
 
-**プロジェクション**（`defineProjection`）: 別コレクションの読み取りモデルです。`user/{id}` があるときだけ `userPublicView/{id}` が存在し、宣言したパスを持ちます。派生フィールドは `userPublicView` に対する aggregate や view で足します。
+**プロジェクション**（`defineProjection`）: `base` 付きで `build` の無いビューの簡易設定です。別コレクションの読み取りモデルで、`user/{id}` があるときだけ `userPublicView/{id}` が存在し、宣言したパスをそのまま写します。派生フィールドは `userPublicView` に対する aggregate や view で足します。
 
 ```ts
 defineProjection({
@@ -96,6 +59,45 @@ defineProjection({
 user/u1             { displayName: 'Ann', avatarUrl: '…', email: 'ann@…', phone: '…' }
                                    ▼
 userPublicView/u1   { displayName: 'Ann', avatarUrl: '…' }
+```
+
+**コピー**（`defineConnection`）: `refField` ソースを 1 つ持つビューの簡易設定です。ドキュメントのフィールドを、それを参照する関連ドキュメントの 1 フィールド配下にコピーします。
+
+```ts
+defineConnection({
+  name: 'post-category',
+  source: 'category',
+  target: 'post',
+  idField: 'categoryId',
+  fields: ['name', 'color'],
+  targetField: 'category',
+  onSourceDelete: 'setNull',
+})
+```
+```
+category/c1   { name: 'News', color: 'red', slug: 'news' }
+post/p1       { title: 'Hello', categoryId: 'c1' }
+                                   ▼
+post/p1       { title: 'Hello', categoryId: 'c1', category: { name: 'News', color: 'red' } }
+```
+
+**件数・合計**（`defineAggregate`）: 値が件数または合計であるビューの簡易設定です。ドキュメントを読まずに Firestore の集計クエリを使うので、大きなコレクションでも安価です。
+
+```ts
+defineAggregate({
+  name: 'post-likes',
+  source: 'post/{postId}/like',
+  target: 'post',
+  idParam: 'postId',
+  aggregate: 'count', // または { sum: 'amount' }
+  targetField: 'likeCount',
+})
+```
+```
+post/p1/like/u1, post/p1/like/u2
+post/p1       { title: 'Hello' }
+                                   ▼
+post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
 connection・aggregate・`base` の無い view はターゲットを作りません。既存ドキュメントのフィールドを埋めるだけです。`base` 付きの view（と projection）だけが例外で、ターゲットの存在を所有します。
