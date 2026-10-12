@@ -296,10 +296,14 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
   /** Flushes one dirty unit of a deferred rule: recomputes it now and answers with the result. */
   async function runFlush(rule: ResolvedRule, flush: DirtyUnit, name: string, startedAt: number, res: DocSyncResponse): Promise<void> {
     try {
-      let result: RuleResult | { action: Outcome }
+      let result: RuleResult
       if (flush.unit === 'target') {
-        const outcome = await processor.sync(db().doc(flush.path), rule, {})
-        result = { action: outcome }
+        result = newResult(rule, 'target')
+        result.targets = 1
+        const counter = new ReadCounter()
+        count(result, await processor.sync(db().doc(flush.path), rule, { counter }))
+        if (result.writes === 0) result.reason = 'target up to date'
+        finish(result, counter)
       } else if (rule.kind === 'connection') {
         const match = matchDocumentPath(rule.sourcePattern, flush.path)
         if (!match) return respondJson(res, 400, { error: 'flush path does not match this rule' })
@@ -321,7 +325,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       } else {
         return respondJson(res, 400, { error: `rule "${name}" has no source unit to flush` })
       }
-      return respondJson(res, 200, { rule: name, flush, ...result, durationMs: Date.now() - startedAt })
+      return respondJson(res, 200, { ...result, flush, durationMs: Date.now() - startedAt })
     } catch (err) {
       logger.error('doc-sync schedule: flush failed', { rule: name, flush, error: err })
       return respondJson(res, 500, { error: 'flush failed' })
