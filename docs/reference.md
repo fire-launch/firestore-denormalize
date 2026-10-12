@@ -59,7 +59,8 @@ Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZon
 - Each run is time-boxed (`schedule.budgetMs` on `createDocSyncHandler`, default 20 minutes; Cloud Scheduler waits at most 30). When the budget runs out the run stops at a page boundary and answers `completed: false` with `lastPath`; the next scheduled run starts from the beginning. For collections too large for one run, split the rule or wait for the resumable version (planned).
 - To run a scheduled rule by hand or against the emulator: `doc-sync rebuild --rule <name>`, or `POST /schedule/<name>` on the function (no CloudEvent headers needed).
 - Schedule or events, never both: a scheduled rule ignores target creation too, so its fields appear on the first run after the target exists.
-- Set the function's `timeoutSeconds` above the budget (the README example uses 1800); otherwise the platform cuts a long run before it can stop cleanly.
+- Set the function's `timeoutSeconds` above the budget: 300 for event-only deployments; ≥ `schedule.budgetMs` (default 20 min → 1800) once a rule is scheduled (see [Recommended function settings](#recommended-function-settings)). Otherwise the platform cuts a long run before it can stop cleanly.
+- The job retries a failed run (HTTP 500) up to 3 times with at least 60 s backoff; runs are idempotent, so retries are safe.
 
 ### `defineView`: keep the declared `targetFields` of `target` = the matching paths of `build(...)`
 
@@ -131,7 +132,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 The handler is `(req, res) => Promise<void>` and also works with Express or Node's `http`.
 
-`POST /schedule/<rule>` runs that scheduled rule and answers JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` (200), `404` for an unknown or event-driven rule, `500` on failure (Cloud Scheduler retries). Pass `req.url` through (Express does).
+`POST /schedule/<rule>` runs that scheduled rule and answers JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` (200), `404` for an unknown or event-driven rule, `405` for a method other than POST, `500` on failure (Cloud Scheduler retries). Pass `req.url` through (Express does).
 
 ## CLI
 
@@ -139,7 +140,7 @@ The handler is `(req, res) => Promise<void>` and also works with Express or Node
 |---|---|
 | `validate [--strict]` | Checks the config; prints triggers, cost estimate, write chains, warnings. `--strict` fails on warnings |
 | `setup` | Creates the trigger SA, grants `roles/eventarc.eventReceiver` (project) and `roles/run.invoker` (service), enables APIs; enables the Cloud Scheduler API when a rule is scheduled. Idempotent; the invoker grant is skipped until the service exists, so rerun after the first deploy |
-| `deploy [--deploy-function <name>]` | Creates / updates / deletes the Eventarc triggers of event-driven rules and the Cloud Scheduler jobs of scheduled rules (diff-based; `--dry-run` prints the commands). Jobs need the Cloud Run service URL, so run it after the first function deploy |
+| `deploy [--deploy-function <name>]` | Creates missing Eventarc triggers (for collections of event-driven rules), updates drifted ones (service, service region, path pattern, SA), deletes stale ones; only triggers labelled `doc-sync-instance=<name>` in `region`. Likewise creates / updates / deletes the Cloud Scheduler jobs of scheduled rules (identified by description `doc-sync-instance=<name>` in `serviceRegion`); jobs need the Cloud Run service URL, so run it after the first function deploy. Optionally runs `firebase deploy` first |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | Walks every target and writes what a live event would. Missing sources follow `onSourceDelete` |
 | `verify [--fix] [--rule]... [--start-after]` | Walks every target and reports mismatches (actual vs expected); `--fix` repairs them; exits 1 while a mismatch remains |
 | `dev --url <handler>` | Bridges the Firestore emulator to the handler as CloudEvents. Emulator only |
@@ -206,5 +207,5 @@ A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with re
 | `concurrency` | 80 | Mostly waiting on Firestore |
 | `minInstances` | 1 | Avoids cold starts (optional) |
 | `maxInstances` | 10 | Caps write bursts |
-| `timeoutSeconds` | 300 | Room for fan-outs; below Eventarc's 600 s ack deadline |
+| `timeoutSeconds` | 300 (≥ `schedule.budgetMs` once a rule is scheduled) | 300 for event-only deployments (below Eventarc's 600 s ack deadline); ≥ `schedule.budgetMs` (default 20 min → 1800) once a rule is scheduled |
 | `invoker` | trigger SA email | Required; otherwise public |

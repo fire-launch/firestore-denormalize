@@ -579,4 +579,17 @@ describe('schedule', () => {
     const onlyScheduled = validateConfig({ ...base, rules: [scheduledAgg] })
     expect(triggerCollectionsOf(onlyScheduled)).toEqual([])
   })
+
+  it('a scheduled rule is not a watcher: writeTriggers has no edge into it', () => {
+    const view = defineView({
+      name: 'category-summary',
+      target: 'categorySummary',
+      targetFields: ['count'],
+      sources: { post: { collection: 'post', refField: 'postId' } },
+      build: () => ({ count: 1 }),
+      schedule: '0 * * * *',
+    })
+    const r = validateConfig({ ...base, rules: [...base.rules, view] })
+    expect(writeTriggers(r)).toEqual([])
+  })
 })

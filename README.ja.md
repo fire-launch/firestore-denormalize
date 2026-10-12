@@ -173,7 +173,7 @@ export const docSync = onRequest(
   {
     region: 'asia-northeast1',
     invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
-    timeoutSeconds: 1800, // 定期実行は schedule.budgetMs（既定 20 分）まで走る
+    timeoutSeconds: 300, // ルールに `schedule` を付けたら 1800（schedule.budgetMs 以上）に上げる
   },
   createDocSyncHandler(config),
 )

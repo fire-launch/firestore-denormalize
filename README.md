@@ -174,7 +174,7 @@ export const docSync = onRequest(
   {
     region: 'asia-northeast1',
     invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
-    timeoutSeconds: 1800, // scheduled runs may take up to schedule.budgetMs (default 20 min)
+    timeoutSeconds: 300, // raise to 1800 (≥ schedule.budgetMs) once a rule has `schedule`
   },
   createDocSyncHandler(config),
 )

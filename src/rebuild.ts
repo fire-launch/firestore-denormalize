@@ -31,7 +31,10 @@ export interface RebuildOptions {
   maxRetries?: number
   /** Called after every page. */
   onProgress?: (progress: RebuildProgress) => void
-  /** Stop at the next page boundary once this many milliseconds have passed; the result then has `completed: false`. */
+  /**
+   * Stop at the next page boundary once this many milliseconds have passed; the result then has
+   * `completed: false`. Rules after the first incomplete one are not run and do not appear in the results.
+   */
   budgetMs?: number
 }
 

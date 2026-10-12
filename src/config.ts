@@ -37,7 +37,7 @@ export interface Connection {
   /**
    * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
    * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
-   * which rebuilds this rule. Events for its collections are ignored.
+   * which rebuilds this rule. This rule ignores events (other rules on the same collections still run on them).
    */
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
@@ -71,7 +71,7 @@ export interface AggregateRule {
   /**
    * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
    * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
-   * which rebuilds this rule. Events for its collections are ignored.
+   * which rebuilds this rule. This rule ignores events (other rules on the same collections still run on them).
    */
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
@@ -183,7 +183,7 @@ export interface ViewRule<S extends Record<string, ViewSource> = Record<string, 
   /**
    * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
    * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
-   * which rebuilds this rule. Events for its collections are ignored.
+   * which rebuilds this rule. This rule ignores events (other rules on the same collections still run on them).
    */
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
@@ -208,7 +208,7 @@ export interface ProjectionRule {
   /**
    * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
    * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
-   * which rebuilds this rule. Events for its collections are ignored.
+   * which rebuilds this rule. This rule ignores events (other rules on the same collections still run on them).
    */
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
@@ -1022,6 +1022,7 @@ export function writeTriggers(config: ResolvedConfig): WriteTrigger[] {
 
 function writeTriggerEdges(rules: ResolvedRule[]): WriteTrigger[] {
   const watchers = (r: ResolvedRule): { key: string; fields: string[] | undefined }[] => {
+    if (r.scheduled) return []
     if (r.kind === 'connection') return [{ key: r.sourcePattern.key, fields: r.fields }]
     if (r.kind === 'aggregate') return [{ key: r.sourcePattern.key, fields: r.watchedFields }]
     return [...(r.basePattern ? [{ key: r.basePattern.key, fields: undefined }] : []), ...r.sources.map((s) => ({ key: s.pattern.key, fields: s.watch }))]

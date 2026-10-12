@@ -88,7 +88,7 @@ describe('deploy', () => {
   ])
 
   it('creates missing, deletes stale, keeps existing, ignores foreign triggers', () => {
-    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': existing })
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': existing, 'gcloud scheduler jobs list': '[]' })
     deploy(ctx(runner), {})
     expect(mutations).toHaveLength(2)
     expect(mutations[0]).toMatch(/^gcloud eventarc triggers create doc-sync-category /)
@@ -98,7 +98,7 @@ describe('deploy', () => {
   it('updates triggers whose settings drifted from the config', () => {
     const drifted = JSON.parse(existing) as { destination?: { cloudRun?: { service?: string } } }[]
     drifted[0]!.destination!.cloudRun!.service = 'old-service'
-    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': JSON.stringify(drifted) })
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': JSON.stringify(drifted), 'gcloud scheduler jobs list': '[]' })
     deploy(ctx(runner), {})
     const update = mutations.find((m) => m.includes('triggers update'))
     expect(update).toMatch(/^gcloud eventarc triggers update doc-sync-post .*--destination-run-service=docsync/)
@@ -106,7 +106,7 @@ describe('deploy', () => {
   })
 
   it('deploys the function first when asked', () => {
-    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]' })
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': '[]' })
     deploy(ctx(runner), { deployFunction: 'docSync' })
     expect(mutations[0]).toBe('firebase deploy --only functions:docSync --project=my-proj')
     expect(mutations.filter((m) => m.includes('triggers create'))).toHaveLength(2)
@@ -143,7 +143,7 @@ describe('validate', () => {
     const lines: string[] = []
     validate(costCtx((l = '') => lines.push(l)))
     const output = lines.join('\n')
-    expect(output).toContain('Cost per event (N = targets matching the changed source, M = source documents of one target):')
+    expect(output).toContain('Cost per event (N = targets matching the changed source, M = source documents of one target, T = targets of a scheduled rule (one run)):')
     expect(output).toContain('Write chains')
     expect(output).toContain('area-category -> post-category')
     expect(output).toContain('source "author" (refField) fans out')
@@ -177,10 +177,32 @@ describe('deploy with scheduled rules', () => {
 
   it('skips job creation with a message when the service does not exist yet', () => {
     const lines: string[] = []
-    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud run services describe docsync': notFound })
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': '[]', 'gcloud run services describe docsync': notFound })
     deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
     expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
     expect(lines.join('\n')).toContain('does not exist yet')
+  })
+
+  it('deletes a stale job even when no rule is scheduled any more, without reading the service URL', () => {
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud scheduler jobs list': JSON.stringify([{ name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-old', description: 'doc-sync-instance=doc-sync' }]),
+    })
+    deploy(ctx(runner), {})
+    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([
+      'gcloud scheduler jobs delete doc-sync-old --project=my-proj --location=asia-northeast1 --quiet',
+    ])
+  })
+
+  it('treats a disabled Cloud Scheduler API as no jobs and hints at `doc-sync setup`', () => {
+    const lines: string[] = []
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud scheduler jobs list': new CommandError('gcloud', 1, 'ERROR: (gcloud.scheduler.jobs.list) FAILED_PRECONDITION: Cloud Scheduler API has not been used in project my-proj before or it is disabled'),
+    })
+    deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
+    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
+    expect(lines.join('\n')).toContain('run `doc-sync setup` first')
   })
 
   it('enables the Cloud Scheduler API in setup only when a rule is scheduled', () => {

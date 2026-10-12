@@ -43,7 +43,7 @@ export interface DocSyncHandlerOptions {
   schedule?: {
     /**
      * Stop at the next page boundary after this long; default 20 minutes (Cloud Scheduler waits at most 30).
-     * The function's `timeoutSeconds` must exceed this budget (the README deployment example uses 1800).
+     * The function's `timeoutSeconds` must exceed this budget (see the reference's recommended function settings).
      */
     budgetMs?: number
     /** Targets processed in parallel within a page. Default 20. */

@@ -15,7 +15,7 @@ export const docSync = onRequest(
     concurrency: 80,
     minInstances: 1,
     maxInstances: 10,
-    timeoutSeconds: 300,
+    timeoutSeconds: 1800, // the config has a scheduled rule: must exceed schedule.budgetMs (default 20 min)
     // Only the trigger service account may call this function.
     invoker: 'doc-sync-trigger@<project>.iam.gserviceaccount.com',
   },

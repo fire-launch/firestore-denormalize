@@ -59,7 +59,8 @@ export default defineConfig({
 - 1 回の実行には時間予算があります（`createDocSyncHandler` の `schedule.budgetMs`、既定 20 分。Cloud Scheduler の応答待ちは最長 30 分）。予算を超えるとページ境界で止まり、`completed: false` と `lastPath` を返します。次の定期実行は先頭からやり直します。1 回で終わらない規模ならルールを分けるか、再開対応版（予定）を待ってください。
 - 手動やエミュレータで実行するには `doc-sync rebuild --rule <name>`、または関数の `POST /schedule/<name>`（CloudEvent ヘッダーは不要）。
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
-- 関数の `timeoutSeconds` は予算より長くしてください（README の例は 1800）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
+- 関数の `timeoutSeconds` は予算より長くしてください。イベントのみなら 300、スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上にします（[推奨する関数の設定](#推奨する関数の設定) を参照）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
+- ジョブは失敗（HTTP 500）した実行を最大 3 回、60 秒以上の間隔で再試行します。実行は冪等なので再試行は安全です。
 
 ### `defineView`: `target` の宣言した `targetFields` = `build(...)` の該当パス、を保つ
 
@@ -131,7 +132,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 ハンドラは `(req, res) => Promise<void>` で、Express や Node の `http` でも使えます。
 
-`POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知のルールやイベント駆動のルールは 404、失敗は 500（Cloud Scheduler が再試行）。`req.url` を渡してください（Express は渡します）。
+`POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知またはイベント駆動のルールは 404、POST 以外は 405、失敗は 500（Cloud Scheduler が再試行）。`req.url` を渡してください（Express は渡します）。
 
 ## CLI
 
@@ -139,7 +140,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 |---|---|
 | `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告を表示します。`--strict` を付けると警告があれば失敗します |
 | `setup` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API も有効化します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
-| `deploy [--deploy-function <name>]` | イベント駆動ルールの Eventarc トリガーと、スケジュールルールの Cloud Scheduler ジョブを差分で作成・更新・削除します（`--dry-run` はコマンド表示のみ）。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください |
+| `deploy [--deploy-function <name>]` | 不足している Eventarc トリガー（イベント駆動ルールのコレクション分）を作成し、ずれたもの（サービス、サービスのリージョン、パスパターン、SA）を更新し、不要なものを削除します。対象は `region` 内でラベル `doc-sync-instance=<name>` を持つトリガーだけです。スケジュールルールの Cloud Scheduler ジョブ（`serviceRegion` 内で description `doc-sync-instance=<name>` を持つもの）も同様に作成・更新・削除します。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください。`firebase deploy` を先に実行することもできます |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | 全ターゲットを巡り、実際のイベントが書き込むはずの値を書き込みます。ソースが存在しない場合は `onSourceDelete` に従います |
 | `verify [--fix] [--rule]... [--start-after]` | 全ターゲットを巡り、不整合（実際の値と期待値の差）を報告します。`--fix` を付けると修復します。不整合が残っていると終了コード 1 になります |
 | `dev --url <handler>` | Firestore エミュレータとハンドラを CloudEvents で橋渡しします。エミュレータ専用です |
@@ -206,5 +207,5 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `concurrency` | 80 | Firestore の応答待ちが中心です |
 | `minInstances` | 1 | コールドスタートを避けます（任意） |
 | `maxInstances` | 10 | 書き込みの急増を抑えます |
-| `timeoutSeconds` | 300 | ファンアウトの余裕を持たせつつ、Eventarc の ack 期限 600 秒より短くします |
+| `timeoutSeconds` | 300（スケジュールルールがあれば `schedule.budgetMs` 以上） | イベントのみなら 300（Eventarc の ack 期限 600 秒未満）。スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上 |
 | `invoker` | トリガー SA のメールアドレス | 必須。これがないと公開状態になります |

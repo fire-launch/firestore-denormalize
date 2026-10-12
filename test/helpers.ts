@@ -41,6 +41,8 @@ export interface InvokeOptions {
   headers?: Record<string, string>
   url?: string
   method?: string
+  /** `invokeRaw` only: use a plain `http.ServerResponse`-like object (`statusCode` + `end`, no `status`/`send`/`setHeader`). */
+  plainResponse?: boolean
 }
 
 /** Sends one CloudEvent (binary content mode) to the handler and returns the HTTP status. */
@@ -78,9 +80,19 @@ export async function invoke(handler: DocSyncHandler, opts: InvokeOptions): Prom
 
 /** Like `invoke`, but returns the status and the response body text (JSON routes). */
 export async function invokeRaw(handler: DocSyncHandler, opts: InvokeOptions): Promise<{ status: number; body: string | undefined }> {
-  let status = 0
   let body: string | undefined
   const req: DocSyncRequest = { headers: { 'content-type': 'application/json', ...opts.headers }, url: opts.url, method: opts.method, body: opts.body ?? {} }
+  if (opts.plainResponse) {
+    const res: DocSyncResponse = {
+      statusCode: 0,
+      end(text?: string) {
+        body = text
+      },
+    }
+    await handler(req, res)
+    return { status: res.statusCode ?? 0, body }
+  }
+  let status = 0
   const res: DocSyncResponse = {
     setHeader() {},
     status(code) {

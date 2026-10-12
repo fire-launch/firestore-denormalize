@@ -83,6 +83,10 @@ export interface TypedConnection<C, S extends Key<C>, T extends Key<C>> {
   /** The field of the target that receives the copy. */
   targetField: FieldPath<C[T]>
   onSourceDelete: OnSourceDelete
+  /** Run on a Cloud Scheduler cron instead of on events (see `Connection.schedule`). */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 export interface TypedAggregate<C, S extends Key<C>, T extends Key<C>> {
@@ -97,6 +101,10 @@ export interface TypedAggregate<C, S extends Key<C>, T extends Key<C>> {
   aggregate: 'count' | { sum: FieldPathOf<C[S], number> }
   /** A numeric field of the target. */
   targetField: FieldPathOf<C[T], number>
+  /** Run on a Cloud Scheduler cron instead of on events (see `Connection.schedule`). */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /** Every (source, target) combination, so the literal `source` / `target` select the field types. */
@@ -164,6 +172,10 @@ export interface TypedViewRule<C, T extends Key<C>, B extends Key<C> | undefined
     change: TypedViewChange<C, S>,
     ctx: TypedPatchContext<C, T, B>,
   ): Declared<C[T], TF> | undefined | Promise<Declared<C[T], TF> | undefined>
+  /** Run on a Cloud Scheduler cron instead of on events (see `Connection.schedule`). */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 export interface TypedProjection<C, B extends Key<C>, T extends Key<C>> {
@@ -173,6 +185,10 @@ export interface TypedProjection<C, B extends Key<C>, T extends Key<C>> {
   target: T
   /** Paths that exist on both the base and the target type. */
   targetFields: (FieldPath<C[B]> & FieldPath<C[T]>)[]
+  /** Run on a Cloud Scheduler cron instead of on events (see `Connection.schedule`). */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /** A rule in a typed config: a typed connection, aggregate or projection, or a view made with the typed `defineView`. */

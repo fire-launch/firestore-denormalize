@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore } from 'firebase-admin/firestore'
-import { createDocSyncHandler, defineAggregate, defineConfig, defineConnection, scheduledRuleFromUrl } from '../src/index.js'
+import { createDocSyncHandler, defineAggregate, defineConfig, defineConnection, defineView, scheduledRuleFromUrl } from '../src/index.js'
 import { change, clearFirestore, firestore, invoke, invokeRaw, silentLogger } from './helpers.js'
 
 let db: Firestore
@@ -90,6 +90,35 @@ describe('scheduled rules: /schedule/<rule>', () => {
     // a run without a budget finishes the rest
     const full = JSON.parse((await invokeRaw(handlerFor({ pageSize: 1 }).handler, { url: '/schedule/daily-likes' })).body!)
     expect(full).toMatchObject({ completed: true, scanned: 3, written: 2 })
+  })
+
+  it('answers 500 and logs when the run throws', async () => {
+    const boom = defineView({
+      name: 'boom',
+      target: 'post',
+      targetFields: ['x'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: () => {
+        throw new Error('boom')
+      },
+      schedule: '0 * * * *',
+    })
+    const boomConfig = defineConfig({ name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger', rules: [boom] })
+    await db.doc('post/p1').set({})
+    const logger = silentLogger()
+    const handler = createDocSyncHandler(boomConfig, { firestore: db, logger, pageSize: 2 })
+    const { status, body } = await invokeRaw(handler, { url: '/schedule/boom', method: 'POST' })
+    expect(status).toBe(500)
+    expect(JSON.parse(body!)).toEqual({ error: 'run failed' })
+    expect(logger.entries.some((l) => l.message === 'doc-sync schedule: run failed, will be retried by Cloud Scheduler')).toBe(true)
+  })
+
+  it('works with a plain http.ServerResponse-like response (statusCode + end only)', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    const { handler } = handlerFor()
+    const { status, body } = await invokeRaw(handler, { url: '/schedule/daily-likes', method: 'POST', plainResponse: true })
+    expect(status).toBe(200)
+    expect(JSON.parse(body!)).toMatchObject({ rule: 'daily-likes' })
   })
 })
 

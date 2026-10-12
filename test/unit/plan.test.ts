@@ -50,7 +50,7 @@ describe('plan', () => {
     const [job] = desiredJobs(scheduledConfig)
     const url = 'https://docsync-abc-an.a.run.app'
     expect(formatCommand('gcloud', jobCreateArgs(scheduledConfig, 'my-proj', job!, url))).toBe(
-      "gcloud scheduler jobs create http doc-sync-daily-likes --project=my-proj --location=asia-northeast1 '--schedule=0 3 * * *' --time-zone=Asia/Tokyo --uri=https://docsync-abc-an.a.run.app/schedule/daily-likes --http-method=POST --oidc-service-account-email=doc-sync-trigger@my-proj.iam.gserviceaccount.com --oidc-token-audience=https://docsync-abc-an.a.run.app --attempt-deadline=1800s --description=doc-sync-instance=doc-sync",
+      "gcloud scheduler jobs create http doc-sync-daily-likes --project=my-proj --location=asia-northeast1 '--schedule=0 3 * * *' --time-zone=Asia/Tokyo --uri=https://docsync-abc-an.a.run.app/schedule/daily-likes --http-method=POST --oidc-service-account-email=doc-sync-trigger@my-proj.iam.gserviceaccount.com --oidc-token-audience=https://docsync-abc-an.a.run.app --attempt-deadline=1800s --max-retry-attempts=3 --min-backoff=60s --description=doc-sync-instance=doc-sync",
     )
     const current = { name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-daily-likes', description: 'doc-sync-instance=doc-sync', schedule: '0 4 * * *', timeZone: 'Etc/UTC', httpTarget: { uri: `${url}/schedule/daily-likes`, httpMethod: 'POST', oidcToken: { serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com', audience: url } } }
     expect(jobDifferences(scheduledConfig, 'my-proj', job!, current, url)).toEqual(['schedule: 0 4 * * * -> 0 3 * * *', 'time zone: Etc/UTC -> Asia/Tokyo'])

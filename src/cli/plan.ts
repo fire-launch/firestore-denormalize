@@ -148,6 +148,7 @@ export interface ExistingJob {
   schedule?: string
   timeZone?: string
   httpTarget?: { uri?: string; httpMethod?: string; oidcToken?: { serviceAccountEmail?: string; audience?: string } }
+  retryConfig?: { retryCount?: number; minBackoffDuration?: string }
 }
 
 /** Jobs have no labels, so ownership is recorded in the description. Strips the resource path from the name. */
@@ -192,6 +193,8 @@ export function jobDifferences(config: ResolvedConfig, project: string, job: Job
   check('http method', current.httpTarget?.httpMethod, 'POST')
   check('service account', current.httpTarget?.oidcToken?.serviceAccountEmail, serviceAccountEmail(config, project))
   check('audience', current.httpTarget?.oidcToken?.audience, serviceUrl)
+  check('retry attempts', current.retryConfig?.retryCount?.toString(), '3')
+  check('min backoff', current.retryConfig?.minBackoffDuration, '60s')
   return diffs
 }
 
@@ -210,6 +213,8 @@ function jobSettingsArgs(config: ResolvedConfig, project: string, job: JobSpec, 
     `--oidc-service-account-email=${serviceAccountEmail(config, project)}`,
     `--oidc-token-audience=${serviceUrl}`,
     '--attempt-deadline=1800s',
+    '--max-retry-attempts=3',
+    '--min-backoff=60s',
     `--description=${INSTANCE_LABEL}=${config.name}`,
   ]
 }

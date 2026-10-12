@@ -92,8 +92,12 @@ export function printSummary(ctx: Context): void {
     log()
   }
   const triggers = desiredTriggers(config)
-  log(`Triggers (one per collection used by event-driven rules):`)
-  for (const t of triggers) log(`  ${t.name}  <-  ${eventarcPathPattern(t.collection)}`)
+  if (triggers.length) {
+    log(`Triggers (one per collection used by event-driven rules):`)
+    for (const t of triggers) log(`  ${t.name}  <-  ${eventarcPathPattern(t.collection)}`)
+  } else {
+    log('Triggers: none (every rule is scheduled)')
+  }
 }
 
 export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
@@ -105,7 +109,7 @@ export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
   const costs = rules.map((r) => estimateCost(r))
   const maxTrigger = Math.max(0, ...costs.flatMap((c) => c.lines.map((l) => l.trigger.length)))
 
-  log('Cost per event (N = targets matching the changed source, M = source documents of one target):')
+  log('Cost per event (N = targets matching the changed source, M = source documents of one target, T = targets of a scheduled rule (one run)):')
   for (const cost of costs) {
     log(`  ${cost.rule}`)
     for (const line of cost.lines) {
@@ -233,50 +237,69 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
   }
 
   const jobs = desiredJobs(config)
+  let existingJobs: ExistingJob[] = []
+  let schedulerDisabled = false
+  try {
+    const rawJobs = runner.read('gcloud', jobListArgs(config, project))
+    existingJobs = ownedJobs(JSON.parse(rawJobs || '[]') as ExistingJob[], config.name)
+  } catch (err) {
+    if (err instanceof CommandError && SCHEDULER_DISABLED.test(err.stderr)) schedulerDisabled = true
+    else throw err
+  }
+
   let jobPlan: JobPlan = { create: [], update: [], keep: [], remove: [] }
-  if (jobs.length) {
+  if (jobs.length || existingJobs.length) {
     log()
     log('# Cloud Scheduler jobs (scheduled rules)')
+  }
+
+  if (schedulerDisabled) {
+    if (jobs.length) log('  Cloud Scheduler API is not enabled; run `doc-sync setup` first.')
+  } else {
+    jobPlan = planJobs(jobs, existingJobs, undefined)
     let serviceUrl: string | undefined
-    try {
-      serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim() || undefined
-    } catch (err) {
-      if (!(err instanceof CommandError && NOT_FOUND.test(err.stderr))) throw err
+    if (jobPlan.create.length || jobPlan.update.length) {
+      try {
+        serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim() || undefined
+      } catch (err) {
+        if (!(err instanceof CommandError && NOT_FOUND.test(err.stderr))) throw err
+      }
+      if (!serviceUrl && runner.dryRun) serviceUrl = 'https://<service-url>'
+      if (serviceUrl) {
+        jobPlan = planJobs(jobs, existingJobs, { config, project, serviceUrl })
+      } else {
+        log(`  Cloud Run service "${config.service}" does not exist yet in ${config.serviceRegion}; jobs need its URL.`)
+        log('  Deploy the function first, then run `doc-sync deploy` again.')
+        jobPlan = { ...jobPlan, create: [], update: [] }
+      }
     }
-    if (!serviceUrl && runner.dryRun) serviceUrl = 'https://<service-url>'
-    if (!serviceUrl) {
-      log(`  Cloud Run service "${config.service}" does not exist yet in ${config.serviceRegion}; jobs need its URL.`)
-      log('  Deploy the function first, then run `doc-sync deploy` again.')
-    } else {
-      const rawJobs = runner.read('gcloud', jobListArgs(config, project))
-      const existingJobs = ownedJobs(JSON.parse(rawJobs || '[]') as ExistingJob[], config.name)
-      jobPlan = planJobs(jobs, existingJobs, { config, project, serviceUrl })
-      for (const j of jobPlan.keep) log(`  = ${j.name} (exists)`)
-      for (const j of jobPlan.create) {
-        log(`  + ${j.name} (${j.cron} ${j.timeZone})`)
-        runner.mutate('gcloud', jobCreateArgs(config, project, j, serviceUrl))
-      }
-      for (const { job, differences } of jobPlan.update) {
-        log(`  ~ ${job.name} (${differences.join(', ')})`)
-        runner.mutate('gcloud', jobUpdateArgs(config, project, job, serviceUrl))
-      }
-      for (const name of jobPlan.remove) {
-        log(`  - ${name}`)
-        runner.mutate('gcloud', jobDeleteArgs(config, project, name))
-      }
+
+    for (const j of jobPlan.keep) log(`  = ${j.name} (exists)`)
+    for (const j of jobPlan.create) {
+      log(`  + ${j.name} (${j.cron} ${j.timeZone})`)
+      runner.mutate('gcloud', jobCreateArgs(config, project, j, serviceUrl!))
+    }
+    for (const { job, differences } of jobPlan.update) {
+      log(`  ~ ${job.name} (${differences.join(', ')})`)
+      runner.mutate('gcloud', jobUpdateArgs(config, project, job, serviceUrl!))
+    }
+    for (const name of jobPlan.remove) {
+      log(`  - ${name}`)
+      runner.mutate('gcloud', jobDeleteArgs(config, project, name))
     }
   }
 
   log()
   log(
     `${runner.dryRun ? '[dry-run] ' : ''}created ${plan.create.length}, updated ${plan.update.length}, deleted ${plan.remove.length}, unchanged ${plan.keep.length}` +
-      (jobs.length > 0
+      (jobs.length || existingJobs.length
         ? `; jobs: created ${jobPlan.create.length}, updated ${jobPlan.update.length}, deleted ${jobPlan.remove.length}, unchanged ${jobPlan.keep.length}`
         : ''),
   )
 }
 
 const NOT_FOUND = /NOT_FOUND|not found|cannot find|does not exist/i
+const SCHEDULER_DISABLED = /(has not been used|is not enabled|SERVICE_DISABLED|API .* not enabled|cloudscheduler\.googleapis\.com)/i
 
 /** Returns true when the read-only command succeeds, false when gcloud reports "not found". Any other failure (auth, permissions, ...) is rethrown. */
 function exists(read: () => string): boolean {

@@ -281,6 +281,23 @@ defineView({ name: 'x', target: 'postPublic', base: 'post', targetFields: ['rest
 const proj = defineProjection({ name: 'user-public', base: 'user', target: 'userPublic', targetFields: ['displayName'] })
 defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [proj] })
 
+// ---------------------------------------------------------------- schedule
+
+const scheduledCount = defineAggregate({
+  name: 'scheduled-count', source: 'post', target: 'category', idField: 'categoryId', aggregate: 'count', targetField: 'postCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo',
+})
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [scheduledCount] })
+
+const scheduledView = defineView({
+  name: 'post-latest-scheduled',
+  target: 'post',
+  targetFields: ['latest'],
+  sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+  build: () => ({ latest: [] }),
+  schedule: '*/30 * * * *',
+})
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [scheduledView] })
+
 defineProjection({
   name: 'x',
   base: 'user',
