@@ -138,7 +138,7 @@ export interface CheckResult {
 
 /** Options for {@link Processor.check}. */
 export interface CheckOptions {
-  /** Shares source reads between targets (e.g. within one page of `verify`). */
+  /** Shares source reads between targets (within one page of `verify`, or one event). */
   sourceCache?: SourceCache
   /** Receives the reads issued. */
   counter?: ReadCounter
@@ -156,7 +156,7 @@ export interface SyncOptions {
   target?: DocumentSnapshot
   /** Compute and compare only; report what would be written without writing. */
   dryRun?: boolean
-  /** Shares source reads between targets (e.g. within one page of `rebuild`). */
+  /** Shares source reads between targets (within one page of `rebuild`, or one event). */
   sourceCache?: SourceCache
   /** Receives the reads issued. */
   counter?: ReadCounter
@@ -669,7 +669,7 @@ export class Processor {
   }
 
   /** Reads a source document, sharing reads across targets of the same page/request when a cache is given, never older than `notBefore` (only actual reads are counted). */
-  private readSource(path: string, counter: ReadCounter, cache?: SourceCache, notBefore?: Timestamp): Promise<DocumentSnapshot> {
+  private readSource(path: string, counter: ReadCounter, cache: SourceCache | undefined, notBefore: Timestamp): Promise<DocumentSnapshot> {
     return cache ? cache.get(path, counter, notBefore) : (counter.doc(), this.db().doc(path).get())
   }
 
@@ -898,7 +898,7 @@ export class Processor {
   private async readBase(
     targetPath: string,
     view: ResolvedView,
-    opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: SourceCache; notBefore?: Timestamp },
+    opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: SourceCache; notBefore: Timestamp },
     counter: ReadCounter,
   ): Promise<DocumentSnapshot | undefined> {
     if (opts.base && (opts.attempt ?? 0) === 0) return opts.base

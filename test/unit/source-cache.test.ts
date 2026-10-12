@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { Timestamp } from 'firebase-admin/firestore'
 import type { DocumentSnapshot, Firestore } from 'firebase-admin/firestore'
-import { ReadCounter, SourceCache } from '../../src/index.js'
+import { ReadCounter } from '../../src/index.js'
+import { SourceCache } from '../../src/source-cache.js'
 
 /** A fake Firestore whose `doc(path).get()` resolves to a snapshot stamped with the current fake clock. */
 function fakeFirestore(clock: { now: number }) {
@@ -23,8 +24,8 @@ describe('SourceCache', () => {
     const { firestore, reads } = fakeFirestore(clock)
     const cache = new SourceCache(() => firestore)
     const counter = new ReadCounter()
-    const a = await cache.get('user/u1', counter)
-    const b = await cache.get('user/u1', counter)
+    const a = await cache.get('user/u1', counter, Timestamp.fromMillis(900))
+    const b = await cache.get('user/u1', counter, Timestamp.fromMillis(900))
     expect(b).toBe(a)
     expect(reads).toEqual(['user/u1'])
     expect(counter.counts().reads).toBe(1)
@@ -50,8 +51,21 @@ describe('SourceCache', () => {
     const { firestore, reads } = fakeFirestore(clock)
     const cache = new SourceCache(() => firestore)
     const counter = new ReadCounter()
-    const [a, b] = await Promise.all([cache.get('x/1', counter), cache.get('x/1', counter, Timestamp.fromMillis(1000))])
+    const [a, b] = await Promise.all([cache.get('x/1', counter, Timestamp.fromMillis(1000)), cache.get('x/1', counter, Timestamp.fromMillis(1000))])
     expect(a).toBe(b)
     expect(reads).toEqual(['x/1'])
+  })
+
+  it('forgets a failed read so the next caller reads again', async () => {
+    let fail = true
+    const firestore = {
+      doc: () => ({ get: async () => { if (fail) throw new Error('unavailable'); return { readTime: Timestamp.fromMillis(5), exists: false } as unknown as DocumentSnapshot } }),
+    } as unknown as Firestore
+    const cache = new SourceCache(() => firestore)
+    const counter = new ReadCounter()
+    await expect(cache.get('x/1', counter, Timestamp.fromMillis(1))).rejects.toThrow('unavailable')
+    fail = false
+    expect((await cache.get('x/1', counter, Timestamp.fromMillis(1))).readTime.toMillis()).toBe(5)
+    expect(counter.counts().reads).toBe(2)
   })
 })
