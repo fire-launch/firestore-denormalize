@@ -33,28 +33,53 @@ export function estimateCost(rule: ResolvedRule): RuleCost {
       lines: [{ trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`, reads: `T × (${perTarget})`, writes: '≤ T' }],
     }
   }
-  if (rule.deferred) return deferCost(perEvent, deferredUnits(rule), rule.deferred.everyMs)
+  if (rule.deferred) return deferCost(rule, perEvent, rule.deferred.everyMs)
   return perEvent
 }
 
-/** For a deferred rule, which dirty unit (`source` or `target`) each of `estimateConnectionCost` / `estimateAggregateCost` / `estimateViewCost`'s lines, in order, marks instead of recomputing. */
-function deferredUnits(rule: ResolvedRule): Array<'source' | 'target'> {
-  if (rule.kind === 'connection') return ['source', 'target']
-  if (rule.kind === 'aggregate') return ['target', 'target']
-  const units: Array<'source' | 'target'> = []
-  if (rule.base) units.push('target')
-  for (const s of rule.sources) units.push(s.refField !== undefined ? 'source' : 'target')
-  units.push('target') // the target-side line
-  return units
-}
-
-/** Replaces every per-event line with a "marks, no recompute" line and a matching flush line that carries the original reads/writes. */
-function deferCost(perEvent: RuleCost, units: Array<'source' | 'target'>, everyMs: number): RuleCost {
+/**
+ * Lines of a deferred rule. An event that only marks costs a task; a flush line carries what the
+ * recompute costs, at most once per interval per marked document. Lifecycle events (a target's
+ * first value, a base created or deleted) keep their immediate cost.
+ */
+function deferCost(rule: ResolvedRule, perEvent: RuleCost, everyMs: number): RuleCost {
   const every = formatDuration(everyMs)
-  const lines: CostLine[] = perEvent.lines.flatMap((line, i) => [
-    { trigger: line.trigger, reads: '0 (+ 1 task)', writes: '0' },
-    { trigger: `flush (≤ 1 per ${every} per ${units[i]})`, reads: line.reads, writes: line.writes },
-  ])
+  const marks = (tasks = '1'): Pick<CostLine, 'reads' | 'writes'> => ({ reads: `0 (+ ${tasks} task${tasks === '1' ? '' : 's'})`, writes: '0' })
+  const flush = (doc: string, reads: string, writes: string): CostLine => ({ trigger: `flush ${doc} (≤ 1 per ${every})`, reads, writes })
+  const lines: CostLine[] = []
+  if (rule.kind === 'connection') {
+    const [source, target] = perEvent.lines as [CostLine, CostLine]
+    lines.push({ trigger: source.trigger, ...marks() }, flush(`${rule.source}/{id}`, source.reads, source.writes))
+    lines.push({ trigger: `${rule.target}/{id} created`, reads: target.reads, writes: target.writes })
+    lines.push({ trigger: `${rule.target}/{id} ${rule.idField} changed`, ...marks() }, flush(`${rule.target}/{id}`, target.reads, target.writes))
+  } else if (rule.kind === 'aggregate') {
+    const [source, target] = perEvent.lines as [CostLine, CostLine]
+    lines.push({ trigger: source.trigger, ...marks(rule.idParam !== undefined ? '1' : '≤ 2') })
+    lines.push(target) // a target's first value is written immediately
+    lines.push(flush(`${rule.target}/{id}`, target.reads, target.writes))
+  } else {
+    const target = perEvent.lines[perEvent.lines.length - 1]!
+    const perTarget = target.reads
+    let i = 0
+    if (rule.base) {
+      i++
+      lines.push({ trigger: `${rule.base}/{id} created or deleted`, reads: perTarget, writes: '≤ 1 (create / remove the target)' })
+      lines.push({ trigger: `${rule.base}/{id} updated`, ...marks() })
+    }
+    const refFieldNames: string[] = []
+    for (const s of rule.sources) {
+      const line = perEvent.lines[i++]!
+      if (s.refField !== undefined) {
+        refFieldNames.push(s.refField)
+        lines.push({ trigger: line.trigger, ...marks() }, flush(`${s.collection}/{id}`, line.reads, line.writes))
+      } else {
+        lines.push({ trigger: line.trigger, ...marks(s.idField !== undefined ? '≤ 2' : '1') })
+      }
+    }
+    lines.push({ trigger: `${rule.target}/{id} ${rule.base ? 'created or deleted' : 'created'}`, reads: perTarget, writes: '≤ 1' })
+    if (refFieldNames.length) lines.push({ trigger: `${rule.target}/{id} ${refFieldNames.join('/')} changed`, ...marks() })
+    lines.push(flush(`${rule.target}/{id}`, perTarget, '≤ 1'))
+  }
   return { ...perEvent, lines }
 }
 

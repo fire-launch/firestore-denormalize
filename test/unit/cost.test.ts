@@ -122,14 +122,54 @@ describe('estimateCost', () => {
     expect(cost.lines).toEqual([{ trigger: 'schedule 0 3 * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation)', writes: '≤ T' }])
   })
 
-  it('a deferred connection: every per-event line answers with a task, a flush line carries the original reads/writes', () => {
+  it('a deferred connection: marks cost a task, flushes carry the recompute, a target\'s first value stays immediate', () => {
     const cfg = validateConfig({ ...base, rules: [defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull', defer: '10m' })] })
     const cost = estimateCost(cfg.connections[0]!)
     expect(cost.lines).toEqual([
       { trigger: 'category/{id} changed', reads: '0 (+ 1 task)', writes: '0' },
-      { trigger: 'flush (≤ 1 per 10m per source)', reads: 'N + 1', writes: '≤ N' },
-      { trigger: 'post/{id} created or categoryId changed', reads: '0 (+ 1 task)', writes: '0' },
-      { trigger: 'flush (≤ 1 per 10m per target)', reads: '2', writes: '≤ 1' },
+      { trigger: 'flush category/{id} (≤ 1 per 10m)', reads: 'N + 1', writes: '≤ N' },
+      { trigger: 'post/{id} created', reads: '2', writes: '≤ 1' },
+      { trigger: 'post/{id} categoryId changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'flush post/{id} (≤ 1 per 10m)', reads: '2', writes: '≤ 1' },
+    ])
+  })
+
+  it('a deferred aggregate marks up to two targets per source event; creates stay immediate', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'user-posts', source: 'post', target: 'user', idField: 'authorId', aggregate: 'count', targetField: 'postCount', defer: '90s' })] })
+    const cost = estimateCost(cfg.aggregates[0]!)
+    expect(cost.lines).toEqual([
+      { trigger: 'post/{id} changed', reads: '0 (+ ≤ 2 tasks)', writes: '0' },
+      { trigger: 'user/{id} created', reads: '1 + 1 aggregation', writes: '≤ 1' },
+      { trigger: 'flush user/{id} (≤ 1 per 90s)', reads: '1 + 1 aggregation', writes: '≤ 1' },
+    ])
+  })
+
+  it('a deferred projection: base create/delete immediate, base update and sources marked', () => {
+    const cfg = validateConfig({
+      ...base,
+      rules: [
+        defineView({
+          name: 'post-public',
+          base: 'post',
+          target: 'postPublic',
+          targetFields: ['title', 'author'],
+          sources: { author: { collection: 'user', refField: 'authorId' }, comments: { collection: 'post/{postId}/comment', idParam: 'postId', limit: 3 } },
+          build: () => ({}),
+          defer: '1h',
+        }),
+      ],
+    })
+    const cost = estimateCost(cfg.views[0]!)
+    const perTarget = '1 target + 1 base + 1 author + ≤ 3 comments (+ reads inside build)'
+    expect(cost.lines).toEqual([
+      { trigger: 'post/{id} created or deleted', reads: perTarget, writes: '≤ 1 (create / remove the target)' },
+      { trigger: 'post/{id} updated', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'user/{id} changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'flush user/{id} (≤ 1 per 1h)', reads: `N + N × (${perTarget})`, writes: '≤ N' },
+      { trigger: 'post/{postId}/comment/{id} changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'postPublic/{id} created or deleted', reads: perTarget, writes: '≤ 1' },
+      { trigger: 'postPublic/{id} authorId changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'flush postPublic/{id} (≤ 1 per 1h)', reads: perTarget, writes: '≤ 1' },
     ])
   })
 })
