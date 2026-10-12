@@ -18,7 +18,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Changed
 
-- `ContinuationBody` gains an optional `flush` field and `ContinuationTask` an optional `scheduleTime`. A custom `schedule.enqueue` must honour `scheduleTime` for deferred rules.
+- `ContinuationBody` gains an optional `flush` field, and its cursor fields become optional. `ContinuationTask` gains an optional `scheduleTime`.
+- A custom `schedule.enqueue` must honour `scheduleTime` for deferred rules and treat a duplicate task id as success.
 - `RuleResult.action` can now be `defer`.
 
 ## [0.11.0] - 2026-10-13
