@@ -28,6 +28,7 @@ import { countingFirestore, ReadCounter, type ReadCounts } from './counter.js'
 import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
+import { rebuild } from './rebuild.js'
 
 export interface DocSyncHandlerOptions {
   /** Firestore instance to use. Defaults to `getFirestore()` (or `getFirestore(database)` for a named database). */
@@ -38,11 +39,20 @@ export interface DocSyncHandlerOptions {
   maxRetries?: number
   /** Page size for the target query (`where idField == sourceId`). Default 500. */
   pageSize?: number
+  /** Scheduled runs (`/schedule/<rule>`). */
+  schedule?: {
+    /** Stop at the next page boundary after this long; default 20 minutes (Cloud Scheduler waits at most 30). */
+    budgetMs?: number
+    /** Targets processed in parallel within a page. Default 20. */
+    concurrency?: number
+  }
 }
 
 /** Request shape accepted by the handler. Express / firebase-functions requests satisfy it. */
 export interface DocSyncRequest {
   headers: Record<string, string | string[] | undefined>
+  /** Request URL (path and query), as Express / Node provide it. `/schedule/<rule>` runs that rule's scheduled sync. */
+  url?: string
   body?: unknown
   rawBody?: Uint8Array
   [Symbol.asyncIterator]?(): AsyncIterator<unknown>
@@ -54,6 +64,7 @@ export interface DocSyncResponse {
   status?(code: number): unknown
   send?(...args: any[]): unknown
   end?(...args: any[]): unknown
+  setHeader?(name: string, value: string): unknown
 }
 
 export type DocSyncHandler = (req: DocSyncRequest, res: DocSyncResponse) => Promise<void>
@@ -152,6 +163,30 @@ export class RetriesExhaustedError extends Error {
   }
 }
 
+export const DEFAULT_SCHEDULE_BUDGET_MS = 20 * 60_000
+
+/** `/schedule/<rule>` → the rule name (URL-decoded); a query string and a trailing slash are ignored. `undefined` for any other path. */
+export function scheduledRuleFromUrl(url: string | undefined): string | undefined {
+  if (!url) return undefined
+  const path = url.split('?')[0]!.replace(/\/+$/, '')
+  const m = /^\/schedule\/([^/]+)$/.exec(path)
+  return m ? decodeURIComponent(m[1]!) : undefined
+}
+
+function respondJson(res: DocSyncResponse, code: number, body: unknown): void {
+  const text = JSON.stringify(body)
+  res.setHeader?.('content-type', 'application/json')
+  if (typeof res.status === 'function') {
+    const r = res.status(code) as DocSyncResponse | undefined
+    const target = r && typeof r === 'object' ? r : res
+    if (typeof target.send === 'function') target.send(text)
+    else if (typeof target.end === 'function') target.end(text)
+    return
+  }
+  res.statusCode = code
+  if (typeof res.end === 'function') res.end(text)
+}
+
 /**
  * Creates the handler. Validates the config and throws {@link ConfigError} if it is invalid.
  */
@@ -167,8 +202,49 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
   }
   const processor = new Processor(db, logger, options.maxRetries ?? 5, options.pageSize ?? 500)
   const rules = rulesOf(resolved)
+  const eventRules = rules.filter((r) => r.scheduled === undefined)
+
+  async function runScheduled(name: string, res: DocSyncResponse): Promise<void> {
+    const startedAt = Date.now()
+    const rule = rules.find((r) => r.name === name)
+    if (!rule || !rule.scheduled) {
+      logger.warn('doc-sync schedule: unknown or unscheduled rule', { rule: name })
+      return respondJson(res, 404, { error: `no scheduled rule "${name}"` })
+    }
+    try {
+      const [result] = await rebuild(resolved, {
+        firestore: db(),
+        logger,
+        rules: [name],
+        pageSize: options.pageSize ?? 500,
+        concurrency: options.schedule?.concurrency,
+        maxRetries: options.maxRetries ?? 5,
+        budgetMs: options.schedule?.budgetMs ?? DEFAULT_SCHEDULE_BUDGET_MS,
+      })
+      const body = {
+        rule: name,
+        scanned: result!.scanned,
+        written: result!.written,
+        completed: result!.completed,
+        lastPath: result!.lastPath,
+        reads: result!.reads,
+        queries: result!.queries,
+        aggregations: result!.aggregations,
+        durationMs: Date.now() - startedAt,
+      }
+      if (!result!.completed) logger.warn('doc-sync schedule: budget exceeded, run stopped early', body)
+      logger.info('doc-sync schedule: run', body)
+      return respondJson(res, 200, body)
+    } catch (err) {
+      logger.error('doc-sync schedule: run failed, will be retried by Cloud Scheduler', { rule: name, error: err })
+      return respondJson(res, 500, { error: 'run failed' })
+    }
+  }
 
   return async function docSyncHandler(req, res) {
+    const scheduledName = scheduledRuleFromUrl(req.url)
+    if (scheduledName !== undefined) return runScheduled(scheduledName, res)
+
     const startedAt = Date.now()
     const eventId = header(req, 'ce-id')
     const eventType = header(req, 'ce-type')
@@ -207,7 +283,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const parallel: Task[] = []
     const onSameDoc: Task[] = []
     const { before, after } = event
-    for (const rule of rules) {
+    for (const rule of eventRules) {
       if (rule.kind === 'view') {
         if (rule.basePattern) {
           const asBase = matchDocumentPath(rule.basePattern, document)

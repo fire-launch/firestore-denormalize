@@ -18,6 +18,8 @@ export interface WalkOptions {
   startAfter?: string
   /** Receives the page queries. */
   counter?: ReadCounter
+  /** Checked after every page; `true` ends the walk early (the result then has `stopped: true`). */
+  shouldStop?: () => boolean
 }
 
 /** Fresh per page: shares source reads between targets of the same page. */
@@ -38,7 +40,7 @@ export async function walkCollection(
   opts: WalkOptions,
   visit: (doc: QueryDocumentSnapshot, page: WalkPage) => Promise<void>,
   onPage?: (progress: { scanned: number; lastPath: string }) => void,
-): Promise<{ scanned: number; lastPath: string | undefined }> {
+): Promise<{ scanned: number; lastPath: string | undefined; stopped: boolean }> {
   const { pageSize, concurrency } = opts
   const base = (pattern.params.length ? firestore.collectionGroup(pattern.collectionId) : firestore.collection(pattern.raw)).orderBy(FieldPath.documentId())
   if (opts.startAfter !== undefined && opts.startAfter.split('/').length % 2 !== 0) {
@@ -60,10 +62,11 @@ export async function walkCollection(
     scanned += docs.length
     lastPath = page.docs[page.docs.length - 1]!.ref.path
     onPage?.({ scanned, lastPath })
+    if (opts.shouldStop?.()) return { scanned, lastPath, stopped: true }
     if (page.size < pageSize) break
     cursor = page.docs[page.docs.length - 1]
   }
-  return { scanned, lastPath }
+  return { scanned, lastPath, stopped: false }
 }
 
 /** {@link walkCollection} over the rule's target collection(s). */
@@ -73,7 +76,7 @@ export function walkTargets(
   opts: WalkOptions,
   visit: (target: QueryDocumentSnapshot, page: WalkPage) => Promise<void>,
   onPage?: (progress: { scanned: number; lastPath: string }) => void,
-): Promise<{ scanned: number; lastPath: string | undefined }> {
+): Promise<{ scanned: number; lastPath: string | undefined; stopped: boolean }> {
   return walkCollection(firestore, rule.targetPattern, opts, visit, onPage)
 }
 

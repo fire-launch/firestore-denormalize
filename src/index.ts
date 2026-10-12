@@ -38,6 +38,8 @@ export {
 export {
   createDocSyncHandler,
   RetriesExhaustedError,
+  scheduledRuleFromUrl,
+  DEFAULT_SCHEDULE_BUDGET_MS,
   type DocSyncHandler,
   type DocSyncHandlerOptions,
   type DocSyncRequest,

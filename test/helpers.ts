@@ -39,6 +39,7 @@ export interface InvokeOptions {
   body?: Uint8Array | string | object
   contentType?: string
   headers?: Record<string, string>
+  url?: string
 }
 
 /** Sends one CloudEvent (binary content mode) to the handler and returns the HTTP status. */
@@ -58,6 +59,7 @@ export async function invoke(handler: DocSyncHandler, opts: InvokeOptions): Prom
   }
   const req: DocSyncRequest = {
     headers,
+    url: opts.url,
     rawBody: typeof body === 'object' && body instanceof Uint8Array ? body : undefined,
     body: body instanceof Uint8Array ? undefined : body,
   }
@@ -71,6 +73,28 @@ export async function invoke(handler: DocSyncHandler, opts: InvokeOptions): Prom
   }
   await handler(req, res)
   return status
+}
+
+/** Like `invoke`, but returns the status and the response body text (JSON routes). */
+export async function invokeRaw(handler: DocSyncHandler, opts: InvokeOptions): Promise<{ status: number; body: string | undefined }> {
+  let status = 0
+  let body: string | undefined
+  const req: DocSyncRequest = { headers: { 'content-type': 'application/json', ...opts.headers }, url: opts.url, body: opts.body ?? {} }
+  const res: DocSyncResponse = {
+    setHeader() {},
+    status(code) {
+      status = code
+      return res
+    },
+    send(text?: string) {
+      body = text
+    },
+    end(text?: string) {
+      body = text
+    },
+  }
+  await handler(req, res)
+  return { status, body }
 }
 
 /** Captures before/after snapshots around a mutation, like Eventarc would. */
