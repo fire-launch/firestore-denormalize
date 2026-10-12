@@ -5,7 +5,7 @@
  */
 import { createHash } from 'node:crypto'
 
-/** A base or target document a deferred rule has not yet recomputed for. */
+/** What a deferred rule still has to recompute: one source document (its fan-out) or one target document. */
 export interface DirtyUnit {
   unit: 'source' | 'target'
   path: string
