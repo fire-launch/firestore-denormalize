@@ -41,7 +41,8 @@
   },
   "files": [
     "dist",
-    "docs",
+    "docs/reference.md",
+    "docs/reference.ja.md",
     "README.md",
     "README.ja.md",
     "CHANGELOG.md",

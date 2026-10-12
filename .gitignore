@@ -8,3 +8,12 @@ pglite-debug.log
 
 # superpowers plan workspaces (scratch)
 .superpowers/
+
+# local env and editor/tooling folders
+.env
+.env.*
+*.local
+*.local.*
+.claude/
+.vscode/
+.idea/
