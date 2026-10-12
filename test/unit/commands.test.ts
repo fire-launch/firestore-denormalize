@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { defineConnection, defineView, validateConfig } from '../../src/config.js'
+import { defineAggregate, defineConnection, defineView, validateConfig } from '../../src/config.js'
 import { deploy, setup, validate, type Context } from '../../src/cli/commands.js'
 import { CommandError, formatCommand, type Runner } from '../../src/cli/exec.js'
 
@@ -151,5 +151,44 @@ describe('validate', () => {
 
   it('throws with --strict when there is a warning', () => {
     expect(() => validate(costCtx(() => {}), { strict: true })).toThrow(/1 warning\(s\); failing because of --strict/)
+  })
+})
+
+describe('deploy with scheduled rules', () => {
+  const scheduled = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })],
+  })
+  const sctx = (runner: Runner): Context => ({ ...ctx(runner), config: scheduled })
+
+  it('creates the job once the service URL is known, and no trigger for a scheduled-only collection', () => {
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud run services describe docsync': 'https://docsync-abc-an.a.run.app\n',
+      'gcloud scheduler jobs list': '[]',
+    })
+    deploy(sctx(runner), {})
+    expect(mutations.filter((m) => m.startsWith('gcloud eventarc'))).toEqual([])
+    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([expect.stringMatching(/^gcloud scheduler jobs create http doc-sync-daily-likes .*--uri=https:\/\/docsync-abc-an\.a\.run\.app\/schedule\/daily-likes /)])
+  })
+
+  it('skips job creation with a message when the service does not exist yet', () => {
+    const lines: string[] = []
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud run services describe docsync': notFound })
+    deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
+    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
+    expect(lines.join('\n')).toContain('does not exist yet')
+  })
+
+  it('enables the Cloud Scheduler API in setup only when a rule is scheduled', () => {
+    const plain = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
+    setup(ctx(plain.runner))
+    expect(plain.mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com --project=my-proj')
+    const withJobs = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
+    setup(sctx(withJobs.runner))
+    expect(withJobs.mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com cloudscheduler.googleapis.com --project=my-proj')
   })
 })

@@ -115,6 +115,12 @@ describe('estimateCost', () => {
     expect(cost.lines[1]).toEqual({ trigger: 'post/{postId}/comment/{id} changed', reads: '1 target + 1 base + ≤ 3 comments (+ reads inside build)', writes: '≤ 1' })
     expect(cost.lines[2]!.trigger).toBe('postPublic/{id} created or deleted')
   })
+
+  it('estimates a scheduled rule per run instead of per event', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })] })
+    const cost = estimateCost(cfg.aggregates[0]!)
+    expect(cost.lines).toEqual([{ trigger: 'schedule 0 3 * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation)', writes: '≤ T' }])
+  })
 })
 
 describe('writeTriggers / formatChains', () => {

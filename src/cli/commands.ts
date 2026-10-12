@@ -1,4 +1,4 @@
-import { collectionGroupQueries, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
+import { collectionGroupQueries, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
 import { estimateCost, formatChains } from '../cost.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
@@ -7,11 +7,21 @@ import type { Logger } from '../logger.js'
 import { eventarcPathPattern } from '../paths.js'
 import { CommandError, type Runner } from './exec.js'
 import {
+  desiredJobs,
   desiredTriggers,
+  type ExistingJob,
   type ExistingTrigger,
+  type JobPlan,
+  jobCreateArgs,
+  jobDeleteArgs,
+  jobListArgs,
+  jobUpdateArgs,
+  ownedJobs,
   ownedTriggers,
+  planJobs,
   planTriggers,
   serviceAccountEmail,
+  serviceUrlArgs,
   triggerCreateArgs,
   triggerDeleteArgs,
   triggerListArgs,
@@ -75,8 +85,14 @@ export function printSummary(ctx: Context): void {
     for (const e of groupEntries) log(`  ${e.rule}: ${e.collection}.${e.field}`)
     log()
   }
+  const scheduled = scheduledRules(config)
+  if (scheduled.length) {
+    log(`Scheduled rules (${scheduled.length}) — synced by Cloud Scheduler via /schedule/<rule>, not by events:`)
+    for (const r of scheduled) log(`  ${r.name}: ${r.scheduled!.cron} (${r.scheduled!.timeZone})`)
+    log()
+  }
   const triggers = desiredTriggers(config)
-  log(`Triggers (${triggers.length}, one per collection):`)
+  log(`Triggers (one per collection used by event-driven rules):`)
   for (const t of triggers) log(`  ${t.name}  <-  ${eventarcPathPattern(t.collection)}`)
 }
 
@@ -125,7 +141,8 @@ export function setup(ctx: Context): void {
   const saId = email.split('@')[0]!
 
   log('# 1/4 Enable APIs')
-  runner.mutate('gcloud', ['services', 'enable', 'eventarc.googleapis.com', 'run.googleapis.com', `--project=${project}`])
+  const apis = ['eventarc.googleapis.com', 'run.googleapis.com', ...(scheduledRules(config).length ? ['cloudscheduler.googleapis.com'] : [])]
+  runner.mutate('gcloud', ['services', 'enable', ...apis, `--project=${project}`])
 
   log('# 2/4 Trigger service account')
   if (exists(() => runner.read('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${project}`]))) {
@@ -214,9 +231,48 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
     log(`  - ${name}`)
     runner.mutate('gcloud', triggerDeleteArgs(config, project, name))
   }
+
+  const jobs = desiredJobs(config)
+  let jobPlan: JobPlan = { create: [], update: [], keep: [], remove: [] }
+  if (jobs.length) {
+    log()
+    log('# Cloud Scheduler jobs (scheduled rules)')
+    let serviceUrl: string | undefined
+    try {
+      serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim() || undefined
+    } catch (err) {
+      if (!(err instanceof CommandError && NOT_FOUND.test(err.stderr))) throw err
+    }
+    if (!serviceUrl && runner.dryRun) serviceUrl = 'https://<service-url>'
+    if (!serviceUrl) {
+      log(`  Cloud Run service "${config.service}" does not exist yet in ${config.serviceRegion}; jobs need its URL.`)
+      log('  Deploy the function first, then run `doc-sync deploy` again.')
+    } else {
+      const rawJobs = runner.read('gcloud', jobListArgs(config, project))
+      const existingJobs = ownedJobs(JSON.parse(rawJobs || '[]') as ExistingJob[], config.name)
+      jobPlan = planJobs(jobs, existingJobs, { config, project, serviceUrl })
+      for (const j of jobPlan.keep) log(`  = ${j.name} (exists)`)
+      for (const j of jobPlan.create) {
+        log(`  + ${j.name} (${j.cron} ${j.timeZone})`)
+        runner.mutate('gcloud', jobCreateArgs(config, project, j, serviceUrl))
+      }
+      for (const { job, differences } of jobPlan.update) {
+        log(`  ~ ${job.name} (${differences.join(', ')})`)
+        runner.mutate('gcloud', jobUpdateArgs(config, project, job, serviceUrl))
+      }
+      for (const name of jobPlan.remove) {
+        log(`  - ${name}`)
+        runner.mutate('gcloud', jobDeleteArgs(config, project, name))
+      }
+    }
+  }
+
   log()
   log(
-    `${runner.dryRun ? '[dry-run] ' : ''}created ${plan.create.length}, updated ${plan.update.length}, deleted ${plan.remove.length}, unchanged ${plan.keep.length}`,
+    `${runner.dryRun ? '[dry-run] ' : ''}created ${plan.create.length}, updated ${plan.update.length}, deleted ${plan.remove.length}, unchanged ${plan.keep.length}` +
+      (jobs.length > 0
+        ? `; jobs: created ${jobPlan.create.length}, updated ${jobPlan.update.length}, deleted ${jobPlan.remove.length}, unchanged ${jobPlan.keep.length}`
+        : ''),
   )
 }
 

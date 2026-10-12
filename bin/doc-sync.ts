@@ -19,8 +19,9 @@ Usage:
 Commands:
   validate   Check the config and list the collections and trigger names
   setup      Create the trigger service account, grant roles, enable APIs (idempotent)
-  deploy     Create missing / update drifted / delete stale Eventarc triggers for this instance
+  deploy     Create / update / delete the Eventarc triggers and the Cloud Scheduler jobs (scheduled rules)
   rebuild    Bring every existing target in line with its source (backfill); --dry-run only reports
+             Also the way to run a scheduled rule by hand or against the emulator: rebuild --rule <name>
   verify     Recompute every derived value and report mismatches; --fix repairs them
   dev        Forward Firestore emulator changes to the handler as CloudEvents (local development)
 

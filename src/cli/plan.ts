@@ -1,7 +1,7 @@
 /**
  * Pure functions that turn a config into gcloud invocations. Kept free of I/O so they can be unit tested.
  */
-import { collectionsOf, triggerName, type ResolvedConfig } from '../config.js'
+import { scheduledRules, triggerCollectionsOf, triggerName, type ResolvedConfig } from '../config.js'
 import { type CollectionPattern, eventarcPathPattern, normalizePathPattern } from '../paths.js'
 
 export const INSTANCE_LABEL = 'doc-sync-instance'
@@ -19,7 +19,7 @@ export interface TriggerSpec {
 }
 
 export function desiredTriggers(config: ResolvedConfig): TriggerSpec[] {
-  return collectionsOf(config).map((collection) => ({ name: triggerName(config.name, collection), collection }))
+  return triggerCollectionsOf(config).map((collection) => ({ name: triggerName(config.name, collection), collection }))
 }
 
 /** Subset of the Eventarc Trigger resource as printed by `gcloud eventarc triggers list --format=json`. */
@@ -119,4 +119,118 @@ export function triggerDeleteArgs(config: ResolvedConfig, project: string, name:
 
 export function triggerListArgs(config: ResolvedConfig, project: string): string[] {
   return ['eventarc', 'triggers', 'list', `--project=${project}`, `--location=${config.region}`, '--format=json']
+}
+
+// ---------------------------------------------------------------- Cloud Scheduler jobs (scheduled rules)
+
+export const SCHEDULE_PATH = '/schedule/'
+
+export interface JobSpec {
+  name: string
+  rule: string
+  cron: string
+  timeZone: string
+}
+
+export function jobName(instanceName: string, rule: string): string {
+  return `${instanceName}-${rule}`
+}
+
+/** One Cloud Scheduler job per scheduled rule. */
+export function desiredJobs(config: ResolvedConfig): JobSpec[] {
+  return scheduledRules(config).map((r) => ({ name: jobName(config.name, r.name), rule: r.name, cron: r.scheduled!.cron, timeZone: r.scheduled!.timeZone }))
+}
+
+/** Subset of the Scheduler Job resource as printed by `gcloud scheduler jobs list --format=json`. */
+export interface ExistingJob {
+  name: string
+  description?: string
+  schedule?: string
+  timeZone?: string
+  httpTarget?: { uri?: string; httpMethod?: string; oidcToken?: { serviceAccountEmail?: string; audience?: string } }
+}
+
+/** Jobs have no labels, so ownership is recorded in the description. Strips the resource path from the name. */
+export function ownedJobs(all: ExistingJob[], instanceName: string): ExistingJob[] {
+  return all
+    .filter((j) => j.description === `${INSTANCE_LABEL}=${instanceName}`)
+    .map((j) => ({ ...j, name: j.name.split('/').pop() ?? j.name }))
+}
+
+export interface JobPlan {
+  create: JobSpec[]
+  update: { job: JobSpec; differences: string[] }[]
+  remove: string[]
+  keep: JobSpec[]
+}
+
+export function planJobs(desired: JobSpec[], existing: ExistingJob[], expected?: { config: ResolvedConfig; project: string; serviceUrl: string }): JobPlan {
+  const byName = new Map(existing.map((j) => [j.name, j]))
+  const desiredNames = new Set(desired.map((j) => j.name))
+  const plan: JobPlan = { create: [], update: [], keep: [], remove: [] }
+  for (const job of desired) {
+    const current = byName.get(job.name)
+    if (!current) plan.create.push(job)
+    else {
+      const differences = expected ? jobDifferences(expected.config, expected.project, job, current, expected.serviceUrl) : []
+      if (differences.length) plan.update.push({ job, differences })
+      else plan.keep.push(job)
+    }
+  }
+  plan.remove = [...byName.keys()].filter((n) => !desiredNames.has(n)).sort()
+  return plan
+}
+
+export function jobDifferences(config: ResolvedConfig, project: string, job: JobSpec, current: ExistingJob, serviceUrl: string): string[] {
+  const diffs: string[] = []
+  const check = (label: string, actual: string | undefined, wanted: string) => {
+    if (actual !== undefined && actual !== wanted) diffs.push(`${label}: ${actual} -> ${wanted}`)
+  }
+  check('schedule', current.schedule, job.cron)
+  check('time zone', current.timeZone, job.timeZone)
+  check('uri', current.httpTarget?.uri, jobUri(serviceUrl, job))
+  check('http method', current.httpTarget?.httpMethod, 'POST')
+  check('service account', current.httpTarget?.oidcToken?.serviceAccountEmail, serviceAccountEmail(config, project))
+  check('audience', current.httpTarget?.oidcToken?.audience, serviceUrl)
+  return diffs
+}
+
+function jobUri(serviceUrl: string, job: JobSpec): string {
+  return `${serviceUrl.replace(/\/+$/, '')}${SCHEDULE_PATH}${encodeURIComponent(job.rule)}`
+}
+
+function jobSettingsArgs(config: ResolvedConfig, project: string, job: JobSpec, serviceUrl: string): string[] {
+  return [
+    `--project=${project}`,
+    `--location=${config.serviceRegion}`,
+    `--schedule=${job.cron}`,
+    `--time-zone=${job.timeZone}`,
+    `--uri=${jobUri(serviceUrl, job)}`,
+    '--http-method=POST',
+    `--oidc-service-account-email=${serviceAccountEmail(config, project)}`,
+    `--oidc-token-audience=${serviceUrl}`,
+    '--attempt-deadline=1800s',
+    `--description=${INSTANCE_LABEL}=${config.name}`,
+  ]
+}
+
+export function jobCreateArgs(config: ResolvedConfig, project: string, job: JobSpec, serviceUrl: string): string[] {
+  return ['scheduler', 'jobs', 'create', 'http', job.name, ...jobSettingsArgs(config, project, job, serviceUrl)]
+}
+
+export function jobUpdateArgs(config: ResolvedConfig, project: string, job: JobSpec, serviceUrl: string): string[] {
+  return ['scheduler', 'jobs', 'update', 'http', job.name, ...jobSettingsArgs(config, project, job, serviceUrl)]
+}
+
+export function jobDeleteArgs(config: ResolvedConfig, project: string, name: string): string[] {
+  return ['scheduler', 'jobs', 'delete', name, `--project=${project}`, `--location=${config.serviceRegion}`, '--quiet']
+}
+
+export function jobListArgs(config: ResolvedConfig, project: string): string[] {
+  return ['scheduler', 'jobs', 'list', `--project=${project}`, `--location=${config.serviceRegion}`, '--format=json']
+}
+
+/** Prints the Cloud Run service URL (empty / NOT_FOUND before the first deploy). */
+export function serviceUrlArgs(config: ResolvedConfig, project: string): string[] {
+  return ['run', 'services', 'describe', config.service, `--region=${config.serviceRegion}`, `--project=${project}`, '--format=value(status.url)']
 }

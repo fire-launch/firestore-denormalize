@@ -24,9 +24,14 @@ export interface RuleCost {
 }
 
 export function estimateCost(rule: ResolvedRule): RuleCost {
-  if (rule.kind === 'connection') return estimateConnectionCost(rule)
-  if (rule.kind === 'aggregate') return estimateAggregateCost(rule)
-  return estimateViewCost(rule)
+  const perEvent = rule.kind === 'connection' ? estimateConnectionCost(rule) : rule.kind === 'aggregate' ? estimateAggregateCost(rule) : estimateViewCost(rule)
+  if (!rule.scheduled) return perEvent
+  // A scheduled rule runs `rebuild`: every target once per run. The per-target reads are the target-side line's reads.
+  const perTarget = perEvent.lines[perEvent.lines.length - 1]!.reads
+  return {
+    ...perEvent,
+    lines: [{ trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`, reads: `T × (${perTarget})`, writes: '≤ T' }],
+  }
 }
 
 function estimateConnectionCost(rule: ResolvedConnection): RuleCost {
