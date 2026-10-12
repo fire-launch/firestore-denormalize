@@ -231,3 +231,37 @@ export function jobListArgs(config: ResolvedConfig, project: string): string[] {
 export function serviceUrlArgs(config: ResolvedConfig, project: string): string[] {
   return ['run', 'services', 'describe', config.service, `--region=${config.serviceRegion}`, `--project=${project}`, '--format=value(status.url)']
 }
+
+// ---------------------------------------------------------------- Cloud Tasks continuation queue
+
+export const QUEUE_RETRY = { maxAttempts: 5, minBackoffSeconds: 60 } as const
+
+/** Subset of the Cloud Tasks Queue resource as printed by `gcloud tasks queues describe --format=json`. */
+export interface ExistingQueue {
+  name: string
+  retryConfig?: { maxAttempts?: number; minBackoff?: string }
+}
+
+export function queueDescribeArgs(config: ResolvedConfig, project: string, queue: string): string[] {
+  return ['tasks', 'queues', 'describe', queue, `--location=${config.serviceRegion}`, `--project=${project}`, '--format=json']
+}
+
+/** Human-readable list of fields where the existing queue's retry policy does not match QUEUE_RETRY. Fields gcloud did not return count as matching. */
+export function queueDifferences(current: ExistingQueue): string[] {
+  const diffs: string[] = []
+  const rc = current.retryConfig
+  if (rc?.maxAttempts !== undefined && rc.maxAttempts !== QUEUE_RETRY.maxAttempts) diffs.push(`max attempts: ${rc.maxAttempts} -> ${QUEUE_RETRY.maxAttempts}`)
+  if (rc?.minBackoff !== undefined) {
+    const seconds = parseFloat(rc.minBackoff.replace(/s$/, ''))
+    if (!(Math.abs(seconds - QUEUE_RETRY.minBackoffSeconds) < 1e-9)) diffs.push(`min backoff: ${rc.minBackoff} -> ${QUEUE_RETRY.minBackoffSeconds}s`)
+  }
+  return diffs
+}
+
+export function queueCreateArgs(config: ResolvedConfig, project: string, queue: string): string[] {
+  return ['tasks', 'queues', 'create', queue, `--location=${config.serviceRegion}`, `--project=${project}`, `--max-attempts=${QUEUE_RETRY.maxAttempts}`, `--min-backoff=${QUEUE_RETRY.minBackoffSeconds}s`]
+}
+
+export function queueUpdateArgs(config: ResolvedConfig, project: string, queue: string): string[] {
+  return ['tasks', 'queues', 'update', queue, `--location=${config.serviceRegion}`, `--project=${project}`, `--max-attempts=${QUEUE_RETRY.maxAttempts}`, `--min-backoff=${QUEUE_RETRY.minBackoffSeconds}s`]
+}

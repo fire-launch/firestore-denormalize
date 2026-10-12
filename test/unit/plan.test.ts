@@ -10,6 +10,8 @@ import {
   ownedTriggers,
   planJobs,
   planTriggers,
+  queueDifferences,
+  queueUpdateArgs,
   serviceAccountEmail,
   triggerCreateArgs,
   triggerDifferences,
@@ -59,6 +61,14 @@ describe('plan', () => {
     expect(plan.update.map((u) => u.job.name)).toEqual([jobName('doc-sync', 'daily-likes')])
     expect(plan.remove).toEqual(['doc-sync-old'])
     expect(plan.create).toEqual([])
+  })
+
+  it('reports a queue whose retry policy drifted and accepts matching or missing fields', () => {
+    expect(queueDifferences({ name: 'q', retryConfig: { maxAttempts: 100, minBackoff: '0.100s' } })).toEqual(['max attempts: 100 -> 5', 'min backoff: 0.100s -> 60s'])
+    expect(queueDifferences({ name: 'q', retryConfig: { maxAttempts: 5, minBackoff: '60s' } })).toEqual([])
+    expect(queueDifferences({ name: 'q', retryConfig: { maxAttempts: 5, minBackoff: '60.000s' } })).toEqual([])
+    expect(queueDifferences({ name: 'q' })).toEqual([])
+    expect(formatCommand('gcloud', queueUpdateArgs(scheduledConfig, 'my-proj', 'doc-sync-schedule'))).toBe('gcloud tasks queues update doc-sync-schedule --location=asia-northeast1 --project=my-proj --max-attempts=5 --min-backoff=60s')
   })
 
   it('expands a bare service account id', () => {

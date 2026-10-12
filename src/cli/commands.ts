@@ -10,6 +10,7 @@ import {
   desiredJobs,
   desiredTriggers,
   type ExistingJob,
+  type ExistingQueue,
   type ExistingTrigger,
   type JobPlan,
   jobCreateArgs,
@@ -20,6 +21,10 @@ import {
   ownedTriggers,
   planJobs,
   planTriggers,
+  queueCreateArgs,
+  queueDescribeArgs,
+  queueDifferences,
+  queueUpdateArgs,
   serviceAccountEmail,
   serviceUrlArgs,
   triggerCreateArgs,
@@ -209,20 +214,20 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
   if (scheduledCount) {
     const queue = scheduleQueueName(config.name)
     log(`# 5/5 Cloud Tasks queue "${queue}" for scheduled-run continuation`)
-    const queueExists = exists(() => runner.read('gcloud', ['tasks', 'queues', 'describe', queue, `--location=${config.serviceRegion}`, `--project=${project}`]))
-    if (queueExists) {
-      log(`  ${queue} already exists, skipped`)
+    let current: ExistingQueue | undefined
+    try {
+      current = (JSON.parse(runner.read('gcloud', queueDescribeArgs(config, project, queue)) || 'null') as ExistingQueue | null) ?? undefined
+    } catch (err) {
+      if (!(err instanceof CommandError && NOT_FOUND.test(err.stderr))) throw err
+    }
+    if (!current) {
+      runner.mutate('gcloud', queueCreateArgs(config, project, queue))
     } else {
-      runner.mutate('gcloud', [
-        'tasks',
-        'queues',
-        'create',
-        queue,
-        `--location=${config.serviceRegion}`,
-        `--project=${project}`,
-        '--max-attempts=5',
-        '--min-backoff=60s',
-      ])
+      const differences = queueDifferences(current)
+      if (differences.length) {
+        log(`  ~ ${queue} (${differences.join(', ')})`)
+        runner.mutate('gcloud', queueUpdateArgs(config, project, queue))
+      } else log(`  ${queue} already exists, skipped`)
     }
     const rt = opts.runtimeServiceAccount
     if (rt) {

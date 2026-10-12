@@ -87,7 +87,7 @@ describe('deploy', () => {
     { name: 'projects/my-proj/locations/asia-northeast1/triggers/someone-elses', labels: { 'doc-sync-instance': 'other' } },
   ])
 
-  it('creates missing, deletes stale, keeps existing, ignores foreign triggers', () => {
+  it('creates missing, deletes stale, ignores foreign triggers', () => {
     const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': existing, 'gcloud scheduler jobs list': '[]' })
     deploy(ctx(runner), {})
     expect(mutations).toHaveLength(4)
@@ -280,7 +280,7 @@ describe('deploy with scheduled rules', () => {
     const { runner, mutations } = fakeRunner({
       'gcloud iam service-accounts describe': '',
       'gcloud run services describe docsync': 'docsync',
-      'gcloud tasks queues describe doc-sync-schedule': 'doc-sync-schedule',
+      'gcloud tasks queues describe doc-sync-schedule': JSON.stringify({ name: 'projects/my-proj/locations/asia-northeast1/queues/doc-sync-schedule' }),
     })
     setup(sctx(runner), { runtimeServiceAccount: 'fn-runtime@my-proj.iam.gserviceaccount.com' })
     expect(mutations.some((m) => m.startsWith('gcloud tasks queues create'))).toBe(false)
@@ -290,6 +290,24 @@ describe('deploy with scheduled rules', () => {
     expect(mutations).toContain(
       'gcloud iam service-accounts add-iam-policy-binding doc-sync-trigger@my-proj.iam.gserviceaccount.com --project=my-proj --member=serviceAccount:fn-runtime@my-proj.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --format=none',
     )
+  })
+
+  it('setup updates an existing queue whose retry policy drifted, and leaves a matching one alone', () => {
+    const drifted = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': JSON.stringify({ name: 'projects/my-proj/locations/asia-northeast1/queues/doc-sync-schedule', retryConfig: { maxAttempts: 100, minBackoff: '0.100s' } }),
+    })
+    setup(sctx(drifted.runner))
+    expect(drifted.mutations.filter((m) => m.startsWith('gcloud tasks queues'))).toEqual(['gcloud tasks queues update doc-sync-schedule --location=asia-northeast1 --project=my-proj --max-attempts=5 --min-backoff=60s'])
+
+    const matching = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': JSON.stringify({ name: 'projects/my-proj/locations/asia-northeast1/queues/doc-sync-schedule', retryConfig: { maxAttempts: 5, minBackoff: '60s' } }),
+    })
+    setup(sctx(matching.runner))
+    expect(matching.mutations.some((m) => m.startsWith('gcloud tasks queues'))).toBe(false)
   })
 
   it('setup without scheduled rules touches neither the Tasks API nor a queue', () => {
