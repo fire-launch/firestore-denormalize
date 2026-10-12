@@ -351,3 +351,35 @@ describe('deploy with scheduled rules', () => {
     expect(lines.join('\n')).toContain('continuation queue: doc-sync-schedule (asia-northeast1)')
   })
 })
+
+describe('deferred rules', () => {
+  const deferred = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    rules: [
+      defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull', defer: '10m' }),
+    ],
+  })
+  const dctx = (runner: Runner): Context => ({ ...ctx(runner), config: deferred })
+
+  it('setup enables the Tasks API (not Scheduler) and creates the queue for a deferred rule', () => {
+    const { runner, mutations } = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': notFound,
+    })
+    setup(dctx(runner))
+    expect(mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com cloudtasks.googleapis.com --project=my-proj')
+    expect(mutations).toContain('gcloud tasks queues create doc-sync-schedule --location=asia-northeast1 --project=my-proj --max-attempts=5 --min-backoff=60s')
+  })
+
+  it('validate summary lists deferred rules with their interval', () => {
+    const lines: string[] = []
+    validate({ ...dctx(fakeRunner({}).runner), log: (l = '') => lines.push(l) })
+    const output = lines.join('\n')
+    expect(output).toContain('Deferred rules (1) — events mark, a task recomputes once per interval:')
+    expect(output).toContain('post-category: every 10m')
+  })
+})

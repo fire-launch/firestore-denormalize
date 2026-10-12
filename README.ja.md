@@ -16,6 +16,7 @@ Firestore のドキュメント間のデータ同期を、**Cloud Run 関数 1 �
 - 👍 `verify` により保存データに同期漏れがないかの確認も可能です。
 - 👍 `validate` により、デプロイ前に 1 イベントあたりの読み書き量を見積もれます
 - 👍 どのルールもイベントの代わりに Cloud Scheduler の cron で実行できます（`schedule: '0 3 * * *'`）。関数は 1 つのままです。
+- 👍 どのルールも再計算を遅延できます（`defer: '10m'`）。イベントは変更に印をつけるだけで、Cloud Tasks のタスクが 1 区切りに 1 回まとめて追いつきます。
 
 ## 本ライブラリでできること
 
@@ -106,6 +107,8 @@ post/p1       { title: 'Hello', likeCount: 2 }
 ```ts
 defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })
 ```
+
+`schedule` の代わりに `defer` を付けると、ルールはイベント駆動のままバッチ処理になります。イベントは変更に印をつけるだけで、Cloud Tasks のタスクが 1 区切りに 1 回まとめて再計算するので、同じドキュメントへの書き込みのバーストを均せます。
 
 connection・aggregate・`base` の無い view はターゲットを作りません。既存ドキュメントのフィールドを埋めるだけです。`base` 付きの view（と projection）だけが例外で、ターゲットの存在を所有します。
 

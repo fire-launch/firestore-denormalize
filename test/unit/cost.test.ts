@@ -121,6 +121,17 @@ describe('estimateCost', () => {
     const cost = estimateCost(cfg.aggregates[0]!)
     expect(cost.lines).toEqual([{ trigger: 'schedule 0 3 * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation)', writes: '≤ T' }])
   })
+
+  it('a deferred connection: every per-event line answers with a task, a flush line carries the original reads/writes', () => {
+    const cfg = validateConfig({ ...base, rules: [defineConnection({ name: 'post-category', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull', defer: '10m' })] })
+    const cost = estimateCost(cfg.connections[0]!)
+    expect(cost.lines).toEqual([
+      { trigger: 'category/{id} changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'flush (≤ 1 per 10m per source)', reads: 'N + 1', writes: '≤ N' },
+      { trigger: 'post/{id} created or categoryId changed', reads: '0 (+ 1 task)', writes: '0' },
+      { trigger: 'flush (≤ 1 per 10m per target)', reads: '2', writes: '≤ 1' },
+    ])
+  })
 })
 
 describe('writeTriggers / formatChains', () => {

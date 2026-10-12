@@ -17,6 +17,7 @@ Keep data in sync between Firestore documents with **one Cloud Run function and 
 - 👍 `verify` checks stored data for anything the sync missed.
 - 👍 `validate` estimates the reads and writes per event before you deploy.
 - 👍 Any rule can run on a Cloud Scheduler cron instead of on events (`schedule: '0 3 * * *'`), still with one function.
+- 👍 Any rule can defer its recompute instead (`defer: '10m'`): events just mark what changed, and a Cloud Tasks task catches up once per interval.
 
 ## What this library does
 
@@ -107,6 +108,8 @@ post/p1       { title: 'Hello', likeCount: 2 }
 ```ts
 defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })
 ```
+
+`defer` instead of `schedule` keeps a rule event-driven but batches its recomputes: an event only marks what changed, and a Cloud Tasks task recomputes it once per interval, which smooths out bursty writes to the same documents.
 
 Targets are never created by connections, aggregates or views without `base`: they fill fields of documents that already exist. A view with `base` (and a projection) is the one exception and owns its target's existence.
 

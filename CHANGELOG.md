@@ -4,6 +4,18 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.12.0] - 2026-10-13
+
+### Added
+
+- `defer: '<duration>'` on any rule (`'90s'`, `'10m'`, `'1h'`; not with `schedule`).
+- Under `defer`, an event only marks the changed source or target document. A Cloud Tasks task recomputes each marked document once per interval.
+- Lifecycle stays immediate under `defer`: a base created or deleted, a target's first value, a hand-deleted base-view target.
+- If the mark cannot be queued, the event answers 500 and Eventarc retries it.
+- `POST /schedule/<rule>` with `{ flush: { unit, path } }` recomputes one marked document by hand.
+- `setup` enables the Cloud Tasks API and creates the continuation queue for deferred rules too. `validate` lists deferred rules and their flush cost.
+- Within one event, a source document is read once and shared across rules. A read older than the target it is combined with is never reused.
+
 ## [0.11.0] - 2026-10-13
 
 ### Changed

@@ -58,6 +58,14 @@ export default defineConfig({
 | `aggregate` | `'count'` または `{ sum: '<numeric field>' }` |
 | `targetField` | 数値のターゲットフィールド |
 
+### ルールが動く 3 つの方式
+
+| 方式 | きっかけ | 遅延 | 向いている場面 |
+|---|---|---|---|
+| 即時（既定） | マッチする Firestore イベントのたびに | なし | 大半のルール |
+| `defer` | Cloud Tasks のタスクが 1 区切りに 1 回 | 最大 1 区切り | ホットなドキュメント、書き込みのバースト |
+| `schedule` | Cloud Scheduler の cron | 最大 1 cron 間隔 | 大きなファンアウト、夜間の集計、遅れてよい読み取りモデル |
+
 ### `schedule`: イベントではなく定期的に同期する
 
 どのルールにも `schedule: '<unix-cron>'`（5 フィールド）と任意の `timeZone`（IANA 名、既定 `Etc/UTC`）を付けられます。付けたルールは Firestore のイベントでは処理されません。代わりに `deploy` が Cloud Scheduler のジョブ `<instance>-<rule>-<hash>` を作り、トリガー用サービスアカウントの OIDC トークンで `POST <サービス URL>/schedule/<rule>` を呼び、ハンドラがそのルールだけ `rebuild` を実行します。スケジュールルールだけが使うコレクションには Eventarc トリガーを作りません。
@@ -77,6 +85,26 @@ export default defineConfig({
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
 - 関数の `timeoutSeconds` は予算より長くしてください。イベントのみなら 300、スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上にします（[推奨する関数の設定](#推奨する関数の設定) を参照）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
 - ジョブは失敗（HTTP 500）した実行を最大 3 回、60 秒以上の間隔で再試行します。実行は冪等なので再試行は安全です。
+
+### `defer`: イベントでは印をつけるだけにし、1 区切りに 1 回だけ再計算する
+
+どのルールにも、`schedule` の代わりに `defer: '<duration>'`（`'90s'`、`'10m'`、`'1h'`、`'1h30m'`。10 秒以上 24 時間以下）を付けられます。イベントは再計算せず、何が変わったかに印をつけるだけにし、Cloud Tasks のタスクが 1 区切りに 1 回まとめて再計算します。
+
+| キー | 意味 |
+|---|---|
+| `defer` | 印をつけた単位を再計算する間隔。例 `'10m'`。`schedule` とは併用不可 |
+
+| 汚れた単位 | 印がつく条件 | 再計算される対象 |
+|---|---|---|
+| `source` | connection のソース、または view の `refField` ソースが変わったとき（ファンアウト全体を 1 タスクでまとめる） | そのソースを参照する全ターゲット、読み直して |
+| `target` | aggregate のソース、view の `idField` / `idParam` ソース、または既存のターゲット・base が変わったとき | そのターゲット 1 件、読み直して |
+| （即時。defer されない） | base の作成・削除、ターゲットの最初の値、base 付き view のターゲットの手動削除 | `defer` の無いルールと同じく、すぐに |
+
+- skip 判定（フィールド未変更、`watch` 未変更など）が先に効くので、関係ない書き込みには何も印をつけません。
+- タスクを積めなかった場合、イベントは 500 を返し Eventarc が再送するので、印を失うことはありません。
+- 上の schedule の継続と同じ Cloud Tasks キューと権限が必要です。`setup` は、いずれかのルールが `schedule` または `defer` を持つときにキューを作成します。
+- フラッシュ: `POST /schedule/<rule>` に本文 `{ "flush": { "unit": "source" | "target", "path": "..." } }` を送ると、その単位だけを再計算し、処理済みイベントと同じ JSON に `flush` と `durationMs` を加えて返します。`defer` の無いルールへの `flush` は 404、`flush` の無い本文で `defer` ルールを呼んだ場合は 400 です。
+- エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` を `createDocSyncHandler` に渡し、各タスクの `body` を自分で `/schedule/<rule>` に POST してください（テストスイートがそうしています）。
 
 ### `defineView`: `target` の宣言した `targetFields` = `build(...)` の該当パス、を保つ
 
@@ -146,6 +174,8 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `pageSize` | 500 | ターゲット検索のページサイズ |
 | `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true` | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤） |
 
+同じイベントの中では、ソースドキュメントは 1 回だけ読みます。組み合わせるターゲットより古い読み取りは使い回しません。
+
 ハンドラは `(req, res) => Promise<void>` で、Express や Node の `http` でも使えます。
 
 `POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, runId, chunk, scanned, written, completed, continued, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知またはイベント駆動のルールは 404、POST 以外は 405、失敗は 500（`{ error, runId, chunk }`。先頭チャンクは Cloud Scheduler が、継続チャンクは Cloud Tasks が再試行）。本文には予算で止まったパスを再開するための継続 `{ startAfter, runId, chunk, startedAt }` を渡せます。`runId` は 1 回のパスを識別し、`chunk` は Scheduler 自身の呼び出しが `0`、以降 `1`、`2`、... と増え、`continued` はこの実行が次のチャンクを積んだかどうかを示します。`req.url` を渡してください（Express は渡します）。
@@ -154,8 +184,8 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 | コマンド | 内容 |
 |---|---|
-| `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告、（スケジュールルールがあれば）`continuation queue: <instance>-schedule (<serviceRegion>)` を表示します。`--strict` を付けると警告があれば失敗します |
-| `setup [--runtime-service-account <email>]` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API と Cloud Tasks API も有効化し、継続用キューを作成し、再試行設定がずれていれば更新します（`--max-attempts=5 --min-backoff=60s`）。`--runtime-service-account <email>` を付けると、そのサービスアカウントにキューへの `roles/cloudtasks.enqueuer` とトリガー用サービスアカウントへの `roles/iam.serviceAccountUser`（継続を積むのに必要）も付与します。付けない場合は、手動で実行する 2 つの `gcloud` コマンドを表示します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
+| `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告、（スケジュールまたは defer のルールがあれば）`continuation queue: <instance>-schedule (<serviceRegion>)` を表示します。`--strict` を付けると警告があれば失敗します |
+| `setup [--runtime-service-account <email>]` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API を、スケジュールまたは defer のルールがあれば Cloud Tasks API も有効化し、継続用キューを作成し、再試行設定がずれていれば更新します（`--max-attempts=5 --min-backoff=60s`）。`--runtime-service-account <email>` を付けると、そのサービスアカウントにキューへの `roles/cloudtasks.enqueuer` とトリガー用サービスアカウントへの `roles/iam.serviceAccountUser`（継続とフラッシュを積むのに必要）も付与します。付けない場合は、手動で実行する 2 つの `gcloud` コマンドを表示します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
 | `deploy [--deploy-function <name>]` | 不足している Eventarc トリガー（イベント駆動ルールのコレクション分）を作成し、ずれたもの（サービス、サービスのリージョン、パスパターン、SA）を更新し、不要なものを削除します。対象は `region` 内でラベル `doc-sync-instance=<name>` を持つトリガーだけです。スケジュールルールの Cloud Scheduler ジョブ（`serviceRegion` 内で description `doc-sync-instance=<name>` を持つもの）も同様に作成・更新・削除します。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください。`firebase deploy` を先に実行することもできます |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | 全ターゲットを巡り、実際のイベントが書き込むはずの値を書き込みます。ソースが存在しない場合は `onSourceDelete` に従います |
 | `verify [--fix] [--rule]... [--start-after]` | 全ターゲットを巡り、不整合（実際の値と期待値の差）を報告します。`--fix` を付けると修復します。不整合が残っていると終了コード 1 になります |
@@ -196,6 +226,8 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 `validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（マッチするターゲット数）と `M`（ターゲット 1 件あたりのソース文書数）の式で表示し、`refField` のビューのソース（ファンアウト）と、`limit` も `patch` も無い多対一のビューのソースを警告します。`--strict` で警告を終了コード 1 にできます。
 
 スケジュールルールは `schedule <cron> (<tz>): every <target>` の 1 行で、reads は `T × (ターゲット 1 件あたりの読み取り)`、writes は `≤ T`（T はターゲット数）です。
+
+defer ルールは、1 イベントあたりの各行が reads `0 (+ 1 task)`、writes `0` になり、それぞれに元の reads/writes を持つ `flush (≤ 1 per <interval> per <unit>)` 行が加わります。
 
 ## 既知の制約
 

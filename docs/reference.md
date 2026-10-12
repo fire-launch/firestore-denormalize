@@ -58,6 +58,14 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 | `aggregate` | `'count'` or `{ sum: '<numeric field>' }` |
 | `targetField` | Numeric target field |
 
+### Three ways a rule runs
+
+| Mode | Trigger | Delay | Best for |
+|---|---|---|---|
+| Immediate (default) | Every matching Firestore event | None | Most rules |
+| `defer` | A Cloud Tasks task, once per interval | Up to one interval | Hot documents, bursty writes |
+| `schedule` | A Cloud Scheduler cron | Up to one cron interval | Large fan-outs, nightly aggregates, lag-tolerant reads |
+
 ### `schedule`: sync on a timer instead of on events
 
 Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZone` (IANA, default `Etc/UTC`). Such a rule is never processed on Firestore events; instead `deploy` creates a Cloud Scheduler job `<instance>-<rule>-<hash>` that calls `POST <service url>/schedule/<rule>` with the trigger service account's OIDC token, and the handler runs `rebuild` for that one rule. Collections used only by scheduled rules get no Eventarc trigger.
@@ -77,6 +85,26 @@ Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZon
 - Schedule or events, never both: a scheduled rule ignores target creation too, so its fields appear on the first run after the target exists.
 - Set the function's `timeoutSeconds` above the budget: 300 for event-only deployments; ≥ `schedule.budgetMs` (default 20 min → 1800) once a rule is scheduled (see [Recommended function settings](#recommended-function-settings)). Otherwise the platform cuts a long run before it can stop cleanly.
 - The job retries a failed run (HTTP 500) up to 3 times with at least 60 s backoff; runs are idempotent, so retries are safe.
+
+### `defer`: mark on events, recompute once per interval
+
+Any rule may carry `defer: '<duration>'` (`'90s'`, `'10m'`, `'1h'`, `'1h30m'`; 10 seconds to 24 hours) instead of `schedule`. An event marks what changed instead of recomputing it; a Cloud Tasks task recomputes it once per interval.
+
+| Key | Meaning |
+|---|---|
+| `defer` | How often a marked unit is recomputed, e.g. `'10m'`. Not with `schedule` |
+
+| Dirty unit | Marked by | Recomputed |
+|---|---|---|
+| `source` | A connection source, or a view `refField` source, changing (one task covers the whole fan-out) | That source's targets, fresh |
+| `target` | An aggregate source, a view `idField` / `idParam` source, or an existing target or base, changing | That one target, fresh |
+| (immediate, not deferred) | A base created or deleted, a target's first value, or a hand-deleted base-view target | Right away, same as a rule without `defer` |
+
+- Skip checks (unchanged fields, unchanged `watch` fields, ...) run first, so an irrelevant write marks nothing.
+- If the task cannot be queued, the event answers 500 and Eventarc retries it, so a mark is never lost.
+- Needs the same Cloud Tasks queue and grants as the schedule continuation above; `setup` creates the queue when any rule has `schedule` or `defer`.
+- Flush: `POST /schedule/<rule>` with body `{ "flush": { "unit": "source" | "target", "path": "..." } }` recomputes that one unit and answers the same JSON as a processed event, plus `flush` and `durationMs`. A `flush` for a rule without `defer` gets 404; a `defer` rule called without `flush` gets 400.
+- Emulator: there is no Cloud Tasks emulator. Pass `schedule.enqueue` to `createDocSyncHandler` and post each task's `body` to `/schedule/<rule>` yourself (the test suite does this).
 
 ### `defineView`: keep the declared `targetFields` of `target` = the matching paths of `build(...)`
 
@@ -146,6 +174,8 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `pageSize` | 500 | Target query page size |
 | `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` 20 minutes, `concurrency` 20, `continue` `true` | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page. A budget-stopped run enqueues a Cloud Tasks continuation unless `continue: false`; `project` / `serviceUrl` override the GCP project of the queue and this service's public URL (defaults: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client's project; the request's `host` header); `enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms) |
 
+Within one event, a source document is read once; a read older than the target it is combined with is never reused.
+
 The handler is `(req, res) => Promise<void>` and also works with Express or Node's `http`.
 
 `POST /schedule/<rule>` runs that scheduled rule and answers JSON `{ rule, runId, chunk, scanned, written, completed, continued, lastPath, reads, queries, aggregations, durationMs }` (200), `404` for an unknown or event-driven rule, `405` for a method other than POST, `500` on failure with `{ error, runId, chunk }` (Cloud Scheduler retries the first chunk, Cloud Tasks retries a continuation chunk). The body may carry a continuation `{ startAfter, runId, chunk, startedAt }` to resume a budget-stopped pass; `runId` identifies the pass, `chunk` is `0` for the Scheduler's own call then `1`, `2`, ..., and `continued` says whether this run enqueued a further chunk. Pass `req.url` through (Express does).
@@ -154,8 +184,8 @@ The handler is `(req, res) => Promise<void>` and also works with Express or Node
 
 | Command | Does |
 |---|---|
-| `validate [--strict]` | Checks the config; prints triggers, cost estimate, write chains, warnings, and (when a rule is scheduled) `continuation queue: <instance>-schedule (<serviceRegion>)`. `--strict` fails on warnings |
-| `setup [--runtime-service-account <email>]` | Creates the trigger SA, grants `roles/eventarc.eventReceiver` (project) and `roles/run.invoker` (service), enables APIs; enables the Cloud Scheduler and Cloud Tasks APIs when a rule is scheduled, and creates the continuation queue or updates its retry policy when it drifted (`--max-attempts=5 --min-backoff=60s`). With `--runtime-service-account <email>`, also grants that SA `roles/cloudtasks.enqueuer` on the queue and `roles/iam.serviceAccountUser` on the trigger SA (needed to enqueue continuations); without it, prints the two `gcloud` commands to run by hand. Idempotent; the invoker grant is skipped until the service exists, so rerun after the first deploy |
+| `validate [--strict]` | Checks the config; prints triggers, cost estimate, write chains, warnings, and (when a rule is scheduled or deferred) `continuation queue: <instance>-schedule (<serviceRegion>)`. `--strict` fails on warnings |
+| `setup [--runtime-service-account <email>]` | Creates the trigger SA, grants `roles/eventarc.eventReceiver` (project) and `roles/run.invoker` (service), enables APIs; enables the Cloud Scheduler API when a rule is scheduled, the Cloud Tasks API when a rule is scheduled or deferred, and creates the continuation queue or updates its retry policy when it drifted (`--max-attempts=5 --min-backoff=60s`). With `--runtime-service-account <email>`, also grants that SA `roles/cloudtasks.enqueuer` on the queue and `roles/iam.serviceAccountUser` on the trigger SA (needed to enqueue continuations and deferred flushes); without it, prints the two `gcloud` commands to run by hand. Idempotent; the invoker grant is skipped until the service exists, so rerun after the first deploy |
 | `deploy [--deploy-function <name>]` | Creates missing Eventarc triggers (for collections of event-driven rules), updates drifted ones (service, service region, path pattern, SA), deletes stale ones; only triggers labelled `doc-sync-instance=<name>` in `region`. Likewise creates / updates / deletes the Cloud Scheduler jobs of scheduled rules (identified by description `doc-sync-instance=<name>` in `serviceRegion`); jobs need the Cloud Run service URL, so run it after the first function deploy. Optionally runs `firebase deploy` first |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | Walks every target and writes what a live event would. Missing sources follow `onSourceDelete` |
 | `verify [--fix] [--rule]... [--start-after]` | Walks every target and reports mismatches (actual vs expected); `--fix` repairs them; exits 1 while a mismatch remains |
@@ -196,6 +226,8 @@ One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view sour
 `validate` prints per rule the reads and writes one event causes, as formulas over `N` (matching targets) and `M` (source documents per target), and warns about `refField` view sources (fan-out) and many-to-one view sources with neither `limit` nor `patch`. `--strict` turns warnings into exit code 1.
 
 A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with reads `T × (per-target reads)` and writes `≤ T`, T being the number of targets.
+
+A deferred rule's per-event lines become `0 (+ 1 task)` reads and `0` writes, each with a matching `flush (≤ 1 per <interval> per <unit>)` line carrying the reads and writes that line would otherwise have.
 
 ## Known limitations
 

@@ -1,5 +1,5 @@
-import { collectionGroupQueries, scheduleQueueName, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
-import { estimateCost, formatChains } from '../cost.js'
+import { collectionGroupQueries, deferredRules, scheduleQueueName, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
+import { estimateCost, formatChains, formatDuration } from '../cost.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
 import { verify as runVerify } from '../verify.js'
@@ -91,9 +91,18 @@ export function printSummary(ctx: Context): void {
     log()
   }
   const scheduled = scheduledRules(config)
+  const deferred = deferredRules(config)
   if (scheduled.length) {
     log(`Scheduled rules (${scheduled.length}) — synced by Cloud Scheduler via /schedule/<rule>, not by events:`)
     for (const r of scheduled) log(`  ${r.name}: ${r.scheduled!.cron} (${r.scheduled!.timeZone})`)
+    log()
+  }
+  if (deferred.length) {
+    log(`Deferred rules (${deferred.length}) — events mark, a task recomputes once per interval:`)
+    for (const r of deferred) log(`  ${r.name}: every ${formatDuration(r.deferred!.everyMs)}`)
+    log()
+  }
+  if (scheduled.length || deferred.length) {
     log(`  continuation queue: ${scheduleQueueName(config.name)} (${config.serviceRegion})`)
     log()
   }
@@ -150,10 +159,17 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
   const email = serviceAccountEmail(config, project)
   const saId = email.split('@')[0]!
   const scheduledCount = scheduledRules(config).length
-  const total = scheduledCount ? 5 : 4
+  const deferredCount = deferredRules(config).length
+  const queueNeeded = scheduledCount || deferredCount
+  const total = queueNeeded ? 5 : 4
 
   log(`# 1/${total} Enable APIs`)
-  const apis = ['eventarc.googleapis.com', 'run.googleapis.com', ...(scheduledCount ? ['cloudscheduler.googleapis.com', 'cloudtasks.googleapis.com'] : [])]
+  const apis = [
+    'eventarc.googleapis.com',
+    'run.googleapis.com',
+    ...(scheduledCount ? ['cloudscheduler.googleapis.com'] : []),
+    ...(queueNeeded ? ['cloudtasks.googleapis.com'] : []),
+  ]
   runner.mutate('gcloud', ['services', 'enable', ...apis, `--project=${project}`])
 
   log(`# 2/${total} Trigger service account`)
@@ -211,7 +227,7 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
     log(`  \`invoker: '${email}'\` in onRequest() so firebase deploy grants it.`)
   }
 
-  if (scheduledCount) {
+  if (queueNeeded) {
     const queue = scheduleQueueName(config.name)
     log(`# 5/5 Cloud Tasks queue "${queue}" for scheduled-run continuation`)
     let current: ExistingQueue | undefined

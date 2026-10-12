@@ -25,13 +25,47 @@ export interface RuleCost {
 
 export function estimateCost(rule: ResolvedRule): RuleCost {
   const perEvent = rule.kind === 'connection' ? estimateConnectionCost(rule) : rule.kind === 'aggregate' ? estimateAggregateCost(rule) : estimateViewCost(rule)
-  if (!rule.scheduled) return perEvent
-  // A scheduled rule runs `rebuild`: every target once per run. The per-target reads are the target-side line's reads.
-  const perTarget = perEvent.lines[perEvent.lines.length - 1]!.reads
-  return {
-    ...perEvent,
-    lines: [{ trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`, reads: `T × (${perTarget})`, writes: '≤ T' }],
+  if (rule.scheduled) {
+    // A scheduled rule runs `rebuild`: every target once per run. The per-target reads are the target-side line's reads.
+    const perTarget = perEvent.lines[perEvent.lines.length - 1]!.reads
+    return {
+      ...perEvent,
+      lines: [{ trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`, reads: `T × (${perTarget})`, writes: '≤ T' }],
+    }
   }
+  if (rule.deferred) return deferCost(perEvent, deferredUnits(rule), rule.deferred.everyMs)
+  return perEvent
+}
+
+/** For a deferred rule, which dirty unit (`source` or `target`) each of `estimateConnectionCost` / `estimateAggregateCost` / `estimateViewCost`'s lines, in order, marks instead of recomputing. */
+function deferredUnits(rule: ResolvedRule): Array<'source' | 'target'> {
+  if (rule.kind === 'connection') return ['source', 'target']
+  if (rule.kind === 'aggregate') return ['target', 'target']
+  const units: Array<'source' | 'target'> = []
+  if (rule.base) units.push('target')
+  for (const s of rule.sources) units.push(s.refField !== undefined ? 'source' : 'target')
+  units.push('target') // the target-side line
+  return units
+}
+
+/** Replaces every per-event line with a "marks, no recompute" line and a matching flush line that carries the original reads/writes. */
+function deferCost(perEvent: RuleCost, units: Array<'source' | 'target'>, everyMs: number): RuleCost {
+  const every = formatDuration(everyMs)
+  const lines: CostLine[] = perEvent.lines.flatMap((line, i) => [
+    { trigger: line.trigger, reads: '0 (+ 1 task)', writes: '0' },
+    { trigger: `flush (≤ 1 per ${every} per ${units[i]})`, reads: line.reads, writes: line.writes },
+  ])
+  return { ...perEvent, lines }
+}
+
+/** Inverse of `parseDuration`: milliseconds back to `'90s'`, `'10m'`, `'1h'`, `'1h30m'`. */
+export function formatDuration(ms: number): string {
+  const totalSeconds = ms / 1000
+  if (totalSeconds % 60 !== 0) return `${totalSeconds}s`
+  const totalMinutes = totalSeconds / 60
+  const hours = Math.floor(totalMinutes / 60)
+  const minutes = totalMinutes % 60
+  return `${hours ? `${hours}h` : ''}${minutes ? `${minutes}m` : ''}` || '0m'
 }
 
 function estimateConnectionCost(rule: ResolvedConnection): RuleCost {
