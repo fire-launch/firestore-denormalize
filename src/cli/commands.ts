@@ -331,9 +331,10 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
     } else {
       jobPlan = planJobs(jobs, existingJobs, undefined)
       if (jobs.length) {
-        jobPlan = { ...jobPlan, create: [], update: [] }
+        jobPlan = { ...jobPlan, create: [], update: [], remove: [] }
         log(`  Cloud Run service "${config.service}" does not exist yet in ${config.serviceRegion}; jobs need its URL.`)
         log('  Deploy the function first, then run `doc-sync deploy` again.')
+        log('  (no changes applied until the service exists)')
       }
     }
 

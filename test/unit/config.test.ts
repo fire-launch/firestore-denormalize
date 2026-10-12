@@ -200,6 +200,11 @@ describe('validateConfig', () => {
     expect(triggerName('doc-sync', 'category_')).toMatch(/^doc-sync-category-[0-9a-f]{8}$/)
   })
 
+  it('still rejects a collection id with a dot, which the hash suffix cannot fix', () => {
+    const c = base.rules[0] as Connection
+    expect(problemsOf({ ...base, rules: [{ ...c, source: 'post.v2' }] })).toContainEqual(expect.stringContaining('trigger name'))
+  })
+
   describe('resource names', () => {
     it('are unique across instances whose concatenations coincide', () => {
       expect(jobName('doc-sync', 'admin-x')).not.toBe(jobName('doc-sync-admin', 'x'))
@@ -225,6 +230,11 @@ describe('validateConfig', () => {
     it('are deterministic', () => {
       expect(resourceHash('doc-sync', 'post')).toBe(resourceHash('doc-sync', 'post'))
       expect(resourceHash('doc-sync', 'post')).toMatch(/^[0-9a-f]{8}$/)
+    })
+
+    it('pins golden names so an accidental change to the hash input is caught', () => {
+      expect(triggerName('doc-sync', 'post')).toBe('doc-sync-post-977db971')
+      expect(jobName('doc-sync', 'daily-likes')).toBe('doc-sync-daily-likes-0640de01')
     })
   })
 

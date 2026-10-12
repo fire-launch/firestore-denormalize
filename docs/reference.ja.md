@@ -24,7 +24,9 @@
 | Cloud Scheduler ジョブ | `<instance>-<rule>-<hash>` |
 | Cloud Tasks キュー | `<instance>-schedule` |
 
-`<hash>` はインスタンスとコレクション（またはルール）から作る 8 文字です。インスタンス間で名前が衝突せず、63 文字の制限にも収まります。長い名前はハッシュの前で切り詰めます。`deploy` は名前ではなくラベルで自分のリソースを見つけるので、この名前を手で扱うことはありません。
+`<hash>` はインスタンスとコレクション（またはルール）から作る 8 文字です。インスタンス間で名前が衝突せず、63 文字の制限にも収まります。長い名前はハッシュの前で切り詰めます。`deploy` は名前ではなく所有者の印で自分のリソースを見つけるので、この名前を手で扱うことはありません。
+
+0.10 からの移行: 次の `deploy` でトリガーとジョブの名前が変わります。切り替えの 1 分前後のイベントを取りこぼすことがあるので、その後に `doc-sync verify --fix` を実行してください。
 
 ```ts
 export default defineConfig({
@@ -58,7 +60,7 @@ export default defineConfig({
 
 ### `schedule`: イベントではなく定期的に同期する
 
-どのルールにも `schedule: '<unix-cron>'`（5 フィールド）と任意の `timeZone`（IANA 名、既定 `Etc/UTC`）を付けられます。付けたルールは Firestore のイベントでは処理されません。代わりに `deploy` が Cloud Scheduler のジョブ `<instance>-<rule>` を作り、トリガー用サービスアカウントの OIDC トークンで `POST <サービス URL>/schedule/<rule>` を呼び、ハンドラがそのルールだけ `rebuild` を実行します。スケジュールルールだけが使うコレクションには Eventarc トリガーを作りません。
+どのルールにも `schedule: '<unix-cron>'`（5 フィールド）と任意の `timeZone`（IANA 名、既定 `Etc/UTC`）を付けられます。付けたルールは Firestore のイベントでは処理されません。代わりに `deploy` が Cloud Scheduler のジョブ `<instance>-<rule>-<hash>` を作り、トリガー用サービスアカウントの OIDC トークンで `POST <サービス URL>/schedule/<rule>` を呼び、ハンドラがそのルールだけ `rebuild` を実行します。スケジュールルールだけが使うコレクションには Eventarc トリガーを作りません。
 
 | キー | 意味 |
 |---|---|

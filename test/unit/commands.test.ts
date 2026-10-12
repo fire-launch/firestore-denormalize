@@ -97,16 +97,6 @@ describe('deploy', () => {
     expect(mutations[3]).toBe('gcloud eventarc triggers delete doc-sync-post --project=my-proj --location=asia-northeast1 --quiet')
   })
 
-  it('renames an old-style trigger: creates the hashed name before deleting the old one', () => {
-    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': existing, 'gcloud scheduler jobs list': '[]' })
-    deploy(ctx(runner), {})
-    const creates = mutations.filter((m) => m.startsWith('gcloud eventarc triggers create'))
-    const deletes = mutations.filter((m) => m.startsWith('gcloud eventarc triggers delete'))
-    expect(creates.some((m) => m.includes(triggerName('doc-sync', 'post')))).toBe(true)
-    expect(deletes.some((m) => m.includes('doc-sync-post '))).toBe(true)
-    expect(mutations.findIndex((m) => m.startsWith('gcloud eventarc triggers create')) < mutations.findIndex((m) => m.startsWith('gcloud eventarc triggers delete'))).toBe(true)
-  })
-
   it('updates triggers whose settings drifted from the config', () => {
     const drifted = JSON.parse(existing) as { name: string; destination?: { cloudRun?: { service?: string } } }[]
     drifted[0]!.name = `projects/my-proj/locations/asia-northeast1/triggers/${triggerName('doc-sync', 'post')}`
@@ -222,6 +212,37 @@ describe('deploy with scheduled rules', () => {
     deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
     expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
     expect(lines.join('\n')).toContain('does not exist yet')
+  })
+
+  it('does not delete existing jobs when the service does not exist yet', () => {
+    const lines: string[] = []
+    const existingJob = JSON.stringify([
+      { name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-daily-likes', description: 'doc-sync-instance=doc-sync' },
+    ])
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud scheduler jobs list': existingJob,
+      'gcloud run services describe docsync': notFound,
+    })
+    deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
+    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
+    expect(lines.join('\n')).toContain('does not exist yet')
+  })
+
+  it('migrates an old-style job: creates the hashed name before deleting the old one', () => {
+    const existingJob = JSON.stringify([
+      { name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-daily-likes', description: 'doc-sync-instance=doc-sync' },
+    ])
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud scheduler jobs list': existingJob,
+      'gcloud run services describe docsync': 'https://docsync-abc-an.a.run.app\n',
+    })
+    deploy(sctx(runner), {})
+    const scheduler = mutations.filter((m) => m.startsWith('gcloud scheduler'))
+    expect(scheduler).toHaveLength(2)
+    expect(scheduler[0]).toMatch(new RegExp(`^gcloud scheduler jobs create http ${jobName('doc-sync', 'daily-likes')} `))
+    expect(scheduler[1]).toBe('gcloud scheduler jobs delete doc-sync-daily-likes --project=my-proj --location=asia-northeast1 --quiet')
   })
 
   it('deletes a stale job even when no rule is scheduled any more, without reading the service URL', () => {

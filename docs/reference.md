@@ -24,7 +24,9 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 | Cloud Scheduler job | `<instance>-<rule>-<hash>` |
 | Cloud Tasks queue | `<instance>-schedule` |
 
-`<hash>` is 8 characters derived from the instance and the collection or rule. It keeps names unique across instances and within the 63-character limit. Long names are shortened before the hash. `deploy` finds its own resources by label, not by name, so you never type these names.
+`<hash>` is 8 characters derived from the instance and the collection or rule. It keeps names unique across instances and within the 63-character limit. Long names are shortened before the hash. `deploy` finds its own resources by an ownership marker, not by name, so you never type these names.
+
+Upgrading from 0.10: the next `deploy` renames triggers and jobs. Run `doc-sync verify --fix` afterwards, because events in the switch-over minute may be missed.
 
 ```ts
 export default defineConfig({
@@ -58,7 +60,7 @@ Collections are paths with placeholders for parent IDs: `users/{uid}/posts`. Fie
 
 ### `schedule`: sync on a timer instead of on events
 
-Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZone` (IANA, default `Etc/UTC`). Such a rule is never processed on Firestore events; instead `deploy` creates a Cloud Scheduler job `<instance>-<rule>` that calls `POST <service url>/schedule/<rule>` with the trigger service account's OIDC token, and the handler runs `rebuild` for that one rule. Collections used only by scheduled rules get no Eventarc trigger.
+Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZone` (IANA, default `Etc/UTC`). Such a rule is never processed on Firestore events; instead `deploy` creates a Cloud Scheduler job `<instance>-<rule>-<hash>` that calls `POST <service url>/schedule/<rule>` with the trigger service account's OIDC token, and the handler runs `rebuild` for that one rule. Collections used only by scheduled rules get no Eventarc trigger.
 
 | Key | Meaning |
 |---|---|
