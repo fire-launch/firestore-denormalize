@@ -284,6 +284,13 @@ describe('deploy with scheduled rules', () => {
     expect(mutations.some((m) => m.includes('tasks'))).toBe(false)
   })
 
+  it('notes that --runtime-service-account is ignored when no rule has a schedule', () => {
+    const lines: string[] = []
+    const { runner } = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
+    setup({ ...ctx(runner), log: (l = '') => lines.push(l) }, { runtimeServiceAccount: 'fn-runtime@my-proj.iam.gserviceaccount.com' })
+    expect(lines.join('\n')).toContain('--runtime-service-account ignored: no rule has a schedule.')
+  })
+
   it('validate summary shows the continuation queue for scheduled rules', () => {
     const lines: string[] = []
     validate({ ...sctx(fakeRunner({}).runner), log: (l = '') => lines.push(l) })

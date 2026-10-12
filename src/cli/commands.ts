@@ -254,6 +254,8 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
       log(`    gcloud iam service-accounts add-iam-policy-binding ${email} --project=${project} --member=serviceAccount:<runtime-sa> --role=roles/iam.serviceAccountUser`)
       log('  (the default runtime SA is <project-number>-compute@developer.gserviceaccount.com)')
     }
+  } else if (opts.runtimeServiceAccount) {
+    log('  --runtime-service-account ignored: no rule has a schedule.')
   }
 
   log()

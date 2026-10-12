@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest'
-import { buildContinuationRequest, continuationRunId, parseContinuationBody, scheduleQueueName, type ContinuationTask } from '../../src/index.js'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { buildContinuationRequest, continuationRunId, createCloudTasksEnqueuer, enqueueWithRetry, parseContinuationBody, scheduleQueueName, type ContinuationTask, type Enqueue } from '../../src/index.js'
+
+const requestMock = vi.fn()
+vi.mock('google-auth-library', () => ({
+  GoogleAuth: vi.fn().mockImplementation(() => ({
+    getClient: async () => ({ request: requestMock }),
+  })),
+}))
 
 describe('schedule continuation helpers', () => {
   it('derives the run id from the body, then the Scheduler header, then the clock', () => {
@@ -44,5 +51,78 @@ describe('schedule continuation helpers', () => {
       },
     })
     expect(scheduleQueueName('doc-sync')).toBe('doc-sync-schedule')
+  })
+})
+
+describe('enqueueWithRetry', () => {
+  const task: ContinuationTask = {
+    id: 'daily-likes-r1-1',
+    rule: 'daily-likes',
+    url: 'https://docsync-abc-an.a.run.app/schedule/daily-likes',
+    body: { startAfter: 'post/p1', runId: 'r1', chunk: 1, startedAt: '2026-10-12T03:00:00.000Z' },
+    serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com',
+    audience: 'https://docsync-abc-an.a.run.app',
+    queue: { project: 'my-proj', location: 'asia-northeast1', name: 'doc-sync-schedule' },
+  }
+  const noWait = () => 0
+
+  it('retries a failing enqueue and resolves once it succeeds', async () => {
+    let calls = 0
+    const enqueue: Enqueue = async () => {
+      calls++
+      if (calls < 3) throw new Error('503')
+    }
+    await enqueueWithRetry(enqueue, task, 3, noWait)
+    expect(calls).toBe(3)
+  })
+
+  it('rethrows after exhausting its attempts', async () => {
+    let calls = 0
+    const enqueue: Enqueue = async () => {
+      calls++
+      throw new Error('503')
+    }
+    await expect(enqueueWithRetry(enqueue, task, 3, noWait)).rejects.toThrow('503')
+    expect(calls).toBe(3)
+  })
+})
+
+describe('createCloudTasksEnqueuer', () => {
+  const task: ContinuationTask = {
+    id: 'daily-likes-r1-1',
+    rule: 'daily-likes',
+    url: 'https://docsync-abc-an.a.run.app/schedule/daily-likes',
+    body: { startAfter: 'post/p1', runId: 'r1', chunk: 1, startedAt: '2026-10-12T03:00:00.000Z' },
+    serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com',
+    audience: 'https://docsync-abc-an.a.run.app',
+    queue: { project: 'my-proj', location: 'asia-northeast1', name: 'doc-sync-schedule' },
+  }
+
+  beforeEach(() => {
+    requestMock.mockReset()
+  })
+
+  it('treats a 409 (task already exists) as success', async () => {
+    requestMock.mockRejectedValueOnce({ response: { status: 409 } })
+    const enqueue = createCloudTasksEnqueuer()
+    await expect(enqueue(task)).resolves.toBeUndefined()
+  })
+
+  it('rejects on any other error', async () => {
+    requestMock.mockRejectedValueOnce({ response: { status: 500 } })
+    const enqueue = createCloudTasksEnqueuer()
+    await expect(enqueue(task)).rejects.toMatchObject({ response: { status: 500 } })
+  })
+
+  it('calls the Cloud Tasks REST API with a POST and a 30s timeout', async () => {
+    requestMock.mockResolvedValueOnce({})
+    const enqueue = createCloudTasksEnqueuer()
+    await enqueue(task)
+    expect(requestMock).toHaveBeenCalledWith({
+      url: 'https://cloudtasks.googleapis.com/v2/projects/my-proj/locations/asia-northeast1/queues/doc-sync-schedule/tasks',
+      method: 'POST',
+      data: expect.anything(),
+      timeout: 30_000,
+    })
   })
 })

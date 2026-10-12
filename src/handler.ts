@@ -31,7 +31,7 @@ import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
 import { rebuild } from './rebuild.js'
-import { continuationRunId, createCloudTasksEnqueuer, parseContinuationBody, type ContinuationTask, type Enqueue } from './schedule.js'
+import { continuationRunId, createCloudTasksEnqueuer, enqueueWithRetry, parseContinuationBody, type ContinuationTask, type Enqueue } from './schedule.js'
 
 export interface DocSyncHandlerOptions {
   /** Firestore instance to use. Defaults to `getFirestore()` (or `getFirestore(database)` for a named database). */
@@ -53,7 +53,7 @@ export interface DocSyncHandlerOptions {
     concurrency?: number
     /** GCP project of the Cloud Tasks queue. Default: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`, else the Firestore client's project. */
     project?: string
-    /** Public URL of this service (`https://…run.app`), used for the continuation task. Default: `https://<x-forwarded-host | host header>`. */
+    /** Public URL of this service (`https://…run.app`), used for the continuation task. Default: `https://<host header>`. */
     serviceUrl?: string
     /** Replaces the Cloud Tasks call (tests, emulator, other platforms). Receives the fully built task. */
     enqueue?: Enqueue
@@ -243,7 +243,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
 
   function serviceUrlFrom(req: DocSyncRequest): string | undefined {
     if (options.schedule?.serviceUrl) return options.schedule.serviceUrl.replace(/\/+$/, '')
-    const host = header(req, 'x-forwarded-host') ?? header(req, 'host')
+    const host = header(req, 'host')
     return host ? `https://${host}` : undefined
   }
 
@@ -291,7 +291,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
             queue: { project, location: resolved.serviceRegion, name: scheduleQueueName(resolved.name) },
           }
           try {
-            await enqueue(task)
+            await enqueueWithRetry(enqueue, task)
             continued = true
             logger.info('doc-sync schedule: continuation enqueued', { rule: name, runId, chunk: chunk + 1, startAfter: result!.lastPath, task: task.id })
           } catch (err) {

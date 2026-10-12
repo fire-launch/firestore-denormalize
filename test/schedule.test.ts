@@ -120,6 +120,32 @@ describe('scheduled rules: /schedule/<rule>', () => {
     expect(status).toBe(200)
     expect(JSON.parse(body!)).toMatchObject({ rule: 'daily-likes' })
   })
+
+  it('answers 500 and logs a Cloud Tasks retry message when a continuation chunk fails', async () => {
+    const boom = defineView({
+      name: 'boom',
+      target: 'post',
+      targetFields: ['x'],
+      sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+      build: () => {
+        throw new Error('boom')
+      },
+      schedule: '0 * * * *',
+    })
+    const boomConfig = defineConfig({ name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger', rules: [boom] })
+    await db.doc('post/p1').set({})
+    await db.doc('post/p2').set({})
+    const logger = silentLogger()
+    const handler = createDocSyncHandler(boomConfig, { firestore: db, logger, pageSize: 2 })
+    const { status, body } = await invokeRaw(handler, {
+      url: '/schedule/boom',
+      method: 'POST',
+      body: { chunk: 1, runId: 'r', startAfter: 'post/p1', startedAt: '2026-10-12T03:00:00.000Z' },
+    })
+    expect(status).toBe(500)
+    expect(JSON.parse(body!)).toMatchObject({ error: 'run failed' })
+    expect(logger.entries.some((l) => l.message === 'doc-sync schedule: continuation chunk failed, will be retried by Cloud Tasks')).toBe(true)
+  })
 })
 
 describe('scheduled rules: continuation', () => {
@@ -199,6 +225,44 @@ describe('scheduled rules: continuation', () => {
     const body = { startAfter: 'post/p1', runId: 'r', chunk: 1, startedAt: '2026-10-12T03:00:00.000Z' }
     const result = JSON.parse((await invokeRaw(handler, { url: '/schedule/daily-likes', headers: { host }, body: Buffer.from(JSON.stringify(body)) })).body!)
     expect(result).toMatchObject({ completed: true, chunk: 1, runId: 'r', scanned: 1, written: 1, lastPath: 'post/p2' })
+  })
+
+  it('uses schedule.serviceUrl, stripped of trailing slashes, instead of the host header when configured', async () => {
+    await seed(1)
+    const tasks: ContinuationTask[] = []
+    const { handler } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, serviceUrl: 'https://custom.example/', enqueue: async (t) => { tasks.push(t) } } })
+    await invokeRaw(handler, { url: '/schedule/daily-likes', headers: { host } })
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({ url: 'https://custom.example/schedule/daily-likes', audience: 'https://custom.example' })
+  })
+
+  it('derives the service URL from the host header, never x-forwarded-host', async () => {
+    await seed(1)
+    const tasks: ContinuationTask[] = []
+    const { handler } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, enqueue: async (t) => { tasks.push(t) } } })
+    await invokeRaw(handler, { url: '/schedule/daily-likes', headers: { host, 'x-forwarded-host': 'evil.example' } })
+    expect(tasks).toHaveLength(1)
+    expect(tasks[0]).toMatchObject({ url: `https://${host}/schedule/daily-likes`, audience: `https://${host}` })
+  })
+
+  it('reuses the Cloud Scheduler schedule time as the run id, so two chunk-0 calls dedupe to the same task', async () => {
+    await seed(2)
+    const tasks: ContinuationTask[] = []
+    const { handler } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, enqueue: async (t) => { tasks.push(t) } } })
+    const headers = { host, 'x-cloudscheduler-scheduletime': '2026-10-12T03:00:00Z' }
+    await invokeRaw(handler, { url: '/schedule/daily-likes', headers })
+    await invokeRaw(handler, { url: '/schedule/daily-likes', headers })
+    expect(tasks).toHaveLength(2)
+    expect(tasks[0]!.id).toBe(tasks[1]!.id)
+  })
+
+  it('answers 200 with continued: false and reason "project unknown" when schedule.project is the empty string', async () => {
+    await seed(1)
+    const { handler, logs } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, project: '', enqueue: async () => {} } })
+    const result = JSON.parse((await invokeRaw(handler, { url: '/schedule/daily-likes', headers: { host } })).body!)
+    expect(result).toMatchObject({ completed: false, continued: false })
+    const failure = logs.find((l) => l.message === 'doc-sync schedule: could not enqueue continuation; the next scheduled run starts over')
+    expect(failure?.fields).toMatchObject({ reason: 'project unknown' })
   })
 })
 

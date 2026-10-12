@@ -91,6 +91,7 @@ export {
   parseContinuationBody,
   buildContinuationRequest,
   createCloudTasksEnqueuer,
+  enqueueWithRetry,
   type ContinuationBody,
   type ContinuationTask,
   type Enqueue,

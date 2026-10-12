@@ -59,7 +59,7 @@ export default defineConfig({
 - 1 回の実行には時間予算があります（`createDocSyncHandler` の `schedule.budgetMs`、既定 20 分。Cloud Scheduler の応答待ちは最長 30 分）。予算を超えるとページ境界で止まり、**継続**を積みます。キュー `<instance>-schedule`（`serviceRegion`）の Cloud Tasks タスクが同じ `/schedule/<rule>` を本文 `{ startAfter, runId, chunk, startedAt }` 付きで呼び、止まった場所から続けます。タスク ID は `<rule>-<runId>-<chunk>` で、重複（再試行されたチャンク）は無視されます。タスクを積めなかった場合は `continued: false` を返し、次の定期実行は先頭からやり直します。
 - 継続に必要なもの: キュー（`setup` が作成）と、関数の実行サービスアカウントに対する `roles/cloudtasks.enqueuer`（キュー）および トリガー用サービスアカウントに対する `roles/iam.serviceAccountUser`（`setup --runtime-service-account <email>` が両方を付与）。プロジェクトは `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントから、サービス URL はリクエストの `host` ヘッダーから求めます。`schedule.project` / `schedule.serviceUrl` で上書きできます。`schedule.continue: false` で継続を無効化、`schedule.enqueue` で Cloud Tasks 呼び出しを置き換えられます（テスト、エミュレータ、他基盤）。
 - キューは失敗した継続を最大 5 回、60 秒以上の間隔で再試行します。スケジュールを外したルールへの継続は 404 になり、その回数で止まります。
-- 前の一周が終わる前に次の cron が来ると 2 本が並走します。書き込みは条件付きなので壊れませんが、読み取りが無駄になります。
+- 一周が cron 間隔より長いと次の一周と重なります。定常状態では（一周の所要時間 ÷ cron 間隔）本の連鎖が同時に走り、読み取りが倍増して `maxInstances` を奪い合います。cron 間隔は一周より長くしてください（実行ログの `durationMs` と `chunk` で測れます）。関数が 429/503 を返すと Cloud Tasks はチャンクを最大 5 回（60 秒以上の間隔）再試行してから捨て、連鎖は静かに終わります。Cloud Tasks のログにしか残らず、次の cron で先頭からやり直します。
 - エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` に「タスクの `body` を本文にしてハンドラをもう一度呼ぶ関数」を渡す（テストスイートがそうしています）か、予算の無い `doc-sync rebuild --rule <name>` を使ってください。
 - 手動やエミュレータで実行するには `doc-sync rebuild --rule <name>`、または関数の `POST /schedule/<name>`（CloudEvent ヘッダーは不要）。
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。

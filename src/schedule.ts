@@ -81,6 +81,33 @@ export function buildContinuationRequest(task: ContinuationTask): { url: string;
   }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+/**
+ * Retries a transient `enqueue` failure (e.g. a Cloud Tasks 503 or timeout) up to `attempts`
+ * times, waiting `waitMs(attempt)` between tries. The 409-as-success case is already handled
+ * inside `enqueue` (see {@link createCloudTasksEnqueuer}), so every rejection here is a real
+ * failure; the last one is rethrown once `attempts` is exhausted.
+ */
+export async function enqueueWithRetry(
+  enqueue: Enqueue,
+  task: ContinuationTask,
+  attempts = 3,
+  waitMs: (attempt: number) => number = (n) => n * 1000,
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await enqueue(task)
+      return
+    } catch (err) {
+      if (attempt >= attempts) throw err
+      await sleep(waitMs(attempt))
+    }
+  }
+}
+
 /**
  * The default enqueuer: Cloud Tasks REST with Application Default Credentials (the function's
  * runtime service account on Cloud Run). A task that already exists (HTTP 409) counts as enqueued.
