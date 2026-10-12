@@ -10,7 +10,7 @@ const HELP = `doc-sync — sync denormalized Firestore documents with one functi
 
 Usage:
   doc-sync validate [--config <path>] [--strict]
-  doc-sync setup    [--config <path>] [--project <id>] [--dry-run]
+  doc-sync setup    [--config <path>] [--project <id>] [--dry-run] [--runtime-service-account <email>]
   doc-sync deploy   [--config <path>] [--project <id>] [--dry-run] [--deploy-function <name>]
   doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
@@ -31,6 +31,7 @@ Options:
   --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then gcloud's active project)
   --dry-run                 setup/deploy: print gcloud commands; rebuild: report without writing
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
+  --runtime-service-account <email>  setup: grant the function's runtime SA the roles it needs to enqueue continuation tasks
   --fix                     verify: repair mismatches with conditional writes
   --rule <name>             rebuild/verify: limit to this rule (repeatable)
   --start-after <path>      rebuild/verify: resume after this target document path (use with --rule)
@@ -54,6 +55,7 @@ async function main(argv: string[]): Promise<number> {
       strict: { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       'deploy-function': { type: 'string' },
+      'runtime-service-account': { type: 'string' },
       fix: { type: 'boolean', default: false },
       rule: { type: 'string', multiple: true },
       'start-after': { type: 'string' },
@@ -103,7 +105,7 @@ async function main(argv: string[]): Promise<number> {
       validate(ctx, { strict: values.strict })
       break
     case 'setup':
-      setup(ctx)
+      setup(ctx, { runtimeServiceAccount: values['runtime-service-account'] })
       break
     case 'deploy':
       deploy(ctx, { deployFunction: values['deploy-function'] })

@@ -1,4 +1,4 @@
-import { collectionGroupQueries, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
+import { collectionGroupQueries, scheduleQueueName, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
 import { estimateCost, formatChains } from '../cost.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
@@ -89,6 +89,7 @@ export function printSummary(ctx: Context): void {
   if (scheduled.length) {
     log(`Scheduled rules (${scheduled.length}) — synced by Cloud Scheduler via /schedule/<rule>, not by events:`)
     for (const r of scheduled) log(`  ${r.name}: ${r.scheduled!.cron} (${r.scheduled!.timeZone})`)
+    log(`  continuation queue: ${scheduleQueueName(config.name)} (${config.serviceRegion})`)
     log()
   }
   const triggers = desiredTriggers(config)
@@ -139,16 +140,18 @@ export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
   }
 }
 
-export function setup(ctx: Context): void {
+export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {}): void {
   const { config, project, runner, log } = ctx
   const email = serviceAccountEmail(config, project)
   const saId = email.split('@')[0]!
+  const scheduledCount = scheduledRules(config).length
+  const total = scheduledCount ? 5 : 4
 
-  log('# 1/4 Enable APIs')
-  const apis = ['eventarc.googleapis.com', 'run.googleapis.com', ...(scheduledRules(config).length ? ['cloudscheduler.googleapis.com'] : [])]
+  log(`# 1/${total} Enable APIs`)
+  const apis = ['eventarc.googleapis.com', 'run.googleapis.com', ...(scheduledCount ? ['cloudscheduler.googleapis.com', 'cloudtasks.googleapis.com'] : [])]
   runner.mutate('gcloud', ['services', 'enable', ...apis, `--project=${project}`])
 
-  log('# 2/4 Trigger service account')
+  log(`# 2/${total} Trigger service account`)
   if (exists(() => runner.read('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${project}`]))) {
     log(`  ${email} already exists, skipped`)
   } else {
@@ -162,7 +165,7 @@ export function setup(ctx: Context): void {
     ])
   }
 
-  log('# 3/4 Grant roles/eventarc.eventReceiver on the project')
+  log(`# 3/${total} Grant roles/eventarc.eventReceiver on the project`)
   runner.mutate('gcloud', [
     'projects',
     'add-iam-policy-binding',
@@ -173,7 +176,7 @@ export function setup(ctx: Context): void {
     '--format=none',
   ])
 
-  log(`# 4/4 Grant roles/run.invoker on Cloud Run service "${config.service}"`)
+  log(`# 4/${total} Grant roles/run.invoker on Cloud Run service "${config.service}"`)
   const serviceExists = exists(() =>
     runner.read('gcloud', [
       'run',
@@ -202,6 +205,57 @@ export function setup(ctx: Context): void {
     log(`  Deploy the function first, then run \`doc-sync setup\` again, or set`)
     log(`  \`invoker: '${email}'\` in onRequest() so firebase deploy grants it.`)
   }
+
+  if (scheduledCount) {
+    const queue = scheduleQueueName(config.name)
+    log(`# 5/5 Cloud Tasks queue "${queue}" for scheduled-run continuation`)
+    const queueExists = exists(() => runner.read('gcloud', ['tasks', 'queues', 'describe', queue, `--location=${config.serviceRegion}`, `--project=${project}`]))
+    if (queueExists) {
+      log(`  ${queue} already exists, skipped`)
+    } else {
+      runner.mutate('gcloud', [
+        'tasks',
+        'queues',
+        'create',
+        queue,
+        `--location=${config.serviceRegion}`,
+        `--project=${project}`,
+        '--max-attempts=5',
+        '--min-backoff=60s',
+      ])
+    }
+    const rt = opts.runtimeServiceAccount
+    if (rt) {
+      runner.mutate('gcloud', [
+        'tasks',
+        'queues',
+        'add-iam-policy-binding',
+        queue,
+        `--location=${config.serviceRegion}`,
+        `--project=${project}`,
+        `--member=serviceAccount:${rt}`,
+        '--role=roles/cloudtasks.enqueuer',
+        '--format=none',
+      ])
+      runner.mutate('gcloud', [
+        'iam',
+        'service-accounts',
+        'add-iam-policy-binding',
+        email,
+        `--project=${project}`,
+        `--member=serviceAccount:${rt}`,
+        '--role=roles/iam.serviceAccountUser',
+        '--format=none',
+      ])
+    } else {
+      log('  The function enqueues continuation tasks with its runtime service account, which needs two grants.')
+      log('  Re-run with --runtime-service-account <email> to apply them, or run:')
+      log(`    gcloud tasks queues add-iam-policy-binding ${queue} --location=${config.serviceRegion} --project=${project} --member=serviceAccount:<runtime-sa> --role=roles/cloudtasks.enqueuer`)
+      log(`    gcloud iam service-accounts add-iam-policy-binding ${email} --project=${project} --member=serviceAccount:<runtime-sa> --role=roles/iam.serviceAccountUser`)
+      log('  (the default runtime SA is <project-number>-compute@developer.gserviceaccount.com)')
+    }
+  }
+
   log()
   log('Setup complete.')
 }

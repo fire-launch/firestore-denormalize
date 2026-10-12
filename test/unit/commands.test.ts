@@ -235,8 +235,58 @@ describe('deploy with scheduled rules', () => {
     const plain = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
     setup(ctx(plain.runner))
     expect(plain.mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com --project=my-proj')
-    const withJobs = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
+    const withJobs = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': notFound,
+    })
     setup(sctx(withJobs.runner))
-    expect(withJobs.mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com cloudscheduler.googleapis.com --project=my-proj')
+    expect(withJobs.mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com cloudscheduler.googleapis.com cloudtasks.googleapis.com --project=my-proj')
+  })
+
+  it('setup enables the Tasks API, creates the continuation queue when missing, and prints the runtime grants as hints', () => {
+    const lines: string[] = []
+    const { runner, mutations } = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': notFound,
+    })
+    setup({ ...sctx(runner), log: (l = '') => lines.push(l) })
+    expect(mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com cloudscheduler.googleapis.com cloudtasks.googleapis.com --project=my-proj')
+    expect(mutations).toContain('gcloud tasks queues create doc-sync-schedule --location=asia-northeast1 --project=my-proj --max-attempts=5 --min-backoff=60s')
+    expect(mutations.some((m) => m.includes('roles/cloudtasks.enqueuer'))).toBe(false)
+    const text = lines.join('\n')
+    expect(text).toContain('--runtime-service-account')
+    expect(text).toContain('roles/cloudtasks.enqueuer')
+    expect(text).toContain('roles/iam.serviceAccountUser')
+  })
+
+  it('setup grants the runtime service account when given, and skips an existing queue', () => {
+    const { runner, mutations } = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': 'doc-sync-schedule',
+    })
+    setup(sctx(runner), { runtimeServiceAccount: 'fn-runtime@my-proj.iam.gserviceaccount.com' })
+    expect(mutations.some((m) => m.startsWith('gcloud tasks queues create'))).toBe(false)
+    expect(mutations).toContain(
+      'gcloud tasks queues add-iam-policy-binding doc-sync-schedule --location=asia-northeast1 --project=my-proj --member=serviceAccount:fn-runtime@my-proj.iam.gserviceaccount.com --role=roles/cloudtasks.enqueuer --format=none',
+    )
+    expect(mutations).toContain(
+      'gcloud iam service-accounts add-iam-policy-binding doc-sync-trigger@my-proj.iam.gserviceaccount.com --project=my-proj --member=serviceAccount:fn-runtime@my-proj.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --format=none',
+    )
+  })
+
+  it('setup without scheduled rules touches neither the Tasks API nor a queue', () => {
+    const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': '', 'gcloud run services describe docsync': 'docsync' })
+    setup(ctx(runner))
+    expect(mutations[0]).toBe('gcloud services enable eventarc.googleapis.com run.googleapis.com --project=my-proj')
+    expect(mutations.some((m) => m.includes('tasks'))).toBe(false)
+  })
+
+  it('validate summary shows the continuation queue for scheduled rules', () => {
+    const lines: string[] = []
+    validate({ ...sctx(fakeRunner({}).runner), log: (l = '') => lines.push(l) })
+    expect(lines.join('\n')).toContain('continuation queue: doc-sync-schedule (asia-northeast1)')
   })
 })
