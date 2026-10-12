@@ -404,6 +404,22 @@ describe('views: refField sources', () => {
     expect((await post.get()).get('summary')).toBeUndefined()
     expect(processed(logs, 'post-summary')).toMatchObject({ action: 'delete', writes: 1 })
   })
+
+  it('shares one read when two refField sources of a target point at the same document', async () => {
+    const twoRefs = defineView({
+      name: 'post-people',
+      target: 'post',
+      targetFields: ['people'],
+      sources: { author: { collection: 'user', refField: 'authorId' }, editor: { collection: 'user', refField: 'editorId' } },
+      build: ({ sources }) => ({ people: [sources.author[0]?.get('name'), sources.editor[0]?.get('name')] }),
+    })
+    await db.doc('user/u1').set({ name: 'Ann' })
+    const post = db.doc('post/p1')
+    const { handler, logs } = handlerFor(defineConfig({ ...config, rules: [twoRefs] }))
+    await invoke(handler, await change(post, () => post.set({ authorId: 'u1', editorId: 'u1' })))
+    expect((await post.get()).get('people')).toEqual(['Ann', 'Ann'])
+    expect(processed(logs, 'post-people')).toMatchObject({ action: 'write', reads: 2 }) // target + user/u1 once, not twice
+  })
 })
 
 describe('views: nested targets and collection groups', () => {

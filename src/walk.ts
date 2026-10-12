@@ -8,6 +8,7 @@ import { FieldPath } from 'firebase-admin/firestore'
 import { type ResolvedConfig, type ResolvedRule, rulesOf } from './config.js'
 import type { ReadCounter } from './counter.js'
 import { type CollectionPattern, matchDocumentPath } from './paths.js'
+import { SourceCache } from './source-cache.js'
 
 export interface WalkOptions {
   /** Documents per query page. */
@@ -24,7 +25,7 @@ export interface WalkOptions {
 
 /** Fresh per page: shares source reads between targets of the same page. */
 export interface WalkPage {
-  sourceCache: Map<string, Promise<DocumentSnapshot>>
+  sourceCache: SourceCache
 }
 
 /**
@@ -55,7 +56,7 @@ export async function walkCollection(
     opts.counter?.query(page.size)
     if (page.empty) break
     const docs = page.docs.filter((d) => matchDocumentPath(pattern, d.ref.path))
-    const sourceCache = new Map<string, Promise<DocumentSnapshot>>()
+    const sourceCache = new SourceCache(() => firestore)
 
     await forEachLimit(docs, concurrency, (doc) => visit(doc, { sourceCache }))
 

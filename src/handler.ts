@@ -6,7 +6,7 @@
  * aggregation query), and every write is conditional on the target's `updateTime`
  * observed before the source was read.
  */
-import type { DocumentData, DocumentReference, DocumentSnapshot, Firestore, Query, QueryDocumentSnapshot } from 'firebase-admin/firestore'
+import type { DocumentData, DocumentReference, DocumentSnapshot, Firestore, Query, QueryDocumentSnapshot, Timestamp } from 'firebase-admin/firestore'
 import { AggregateField, FieldValue, getFirestore } from 'firebase-admin/firestore'
 import {
   type DocSyncConfig,
@@ -31,6 +31,7 @@ import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
 import { rebuild } from './rebuild.js'
+import { SourceCache } from './source-cache.js'
 import { continuationRunId, createCloudTasksEnqueuer, enqueueWithRetry, parseContinuationBody, type ContinuationTask, type Enqueue } from './schedule.js'
 
 export interface DocSyncHandlerOptions {
@@ -138,7 +139,7 @@ export interface CheckResult {
 /** Options for {@link Processor.check}. */
 export interface CheckOptions {
   /** Shares source reads between targets (e.g. within one page of `verify`). */
-  sourceCache?: Map<string, Promise<DocumentSnapshot>>
+  sourceCache?: SourceCache
   /** Receives the reads issued. */
   counter?: ReadCounter
   /** Already-read base snapshot to use for the first attempt instead of reading again (views with `base`). */
@@ -156,7 +157,7 @@ export interface SyncOptions {
   /** Compute and compare only; report what would be written without writing. */
   dryRun?: boolean
   /** Shares source reads between targets (e.g. within one page of `rebuild`). */
-  sourceCache?: Map<string, Promise<DocumentSnapshot>>
+  sourceCache?: SourceCache
   /** Receives the reads issued. */
   counter?: ReadCounter
   /** Views with `base`: only remove the target when its base is gone; do nothing when the base exists (second pass of `rebuild` / `verify`). */
@@ -366,6 +367,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       return respond(res, 204)
     }
 
+    // Shares single-document reads across the rules processing this event, never older than the target that reads them.
+    const cache = new SourceCache(db)
     type Task = { rule: string; run: () => Promise<RuleResult> }
     const parallel: Task[] = []
     const onSameDoc: Task[] = []
@@ -374,11 +377,11 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       if (rule.kind === 'view') {
         if (rule.basePattern) {
           const asBase = matchDocumentPath(rule.basePattern, document)
-          if (asBase) parallel.push({ rule: rule.name, run: () => processor.viewBase(rule, asBase, before, after) })
+          if (asBase) parallel.push({ rule: rule.name, run: () => processor.viewBase(rule, asBase, before, after, cache) })
         }
         for (const source of rule.sources) {
           const asSource = matchDocumentPath(source.pattern, document)
-          if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after) })
+          if (asSource) parallel.push({ rule: rule.name, run: () => processor.viewSource(rule, source, asSource, before, after, cache) })
         }
       } else {
         const asSource = matchDocumentPath(rule.sourcePattern, document)
@@ -387,8 +390,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
             rule: rule.name,
             run: () =>
               rule.kind === 'connection'
-                ? processor.connectionSource(rule, asSource, before, after)
-                : processor.aggregateSource(rule, asSource, before, after),
+                ? processor.connectionSource(rule, asSource, before, after, cache)
+                : processor.aggregateSource(rule, asSource, before, after, cache),
           })
         }
       }
@@ -398,10 +401,10 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
           rule: rule.name,
           run: () =>
             rule.kind === 'connection'
-              ? processor.connectionTarget(rule, asTarget, before, after)
+              ? processor.connectionTarget(rule, asTarget, before, after, cache)
               : rule.kind === 'aggregate'
-                ? processor.aggregateTarget(rule, asTarget, before, after)
-                : processor.viewTarget(rule, asTarget, before, after),
+                ? processor.aggregateTarget(rule, asTarget, before, after, cache)
+                : processor.viewTarget(rule, asTarget, before, after, cache),
         })
       }
     }
@@ -480,12 +483,12 @@ export class Processor {
     const counter = opts.counter ?? new ReadCounter()
     let base: DocumentSnapshot | undefined
     if (view.basePattern) {
-      base = await this.readBase(target.ref.path, view, { base: opts.base, sourceCache: opts.sourceCache }, counter)
+      base = await this.readBase(target.ref.path, view, { base: opts.base, sourceCache: opts.sourceCache, notBefore: target.readTime }, counter)
       if (!base) return { status: 'skip', reason: 'base unresolvable' }
       if (!base.exists) return target.exists ? { status: 'mismatch', issue: 'orphan' } : { status: 'skip', reason: 'base and target missing' }
       if (opts.orphansOnly) return { status: 'ok' }
     } else if (!target.exists) return { status: 'skip', reason: 'target missing' }
-    const { plan, reason } = await this.computeView(target, view, { counter, base })
+    const { plan, reason } = await this.computeView(target, view, { counter, base, sourceCache: opts.sourceCache })
     if (plan === NOTHING) return { status: 'skip', reason }
     if (!target.exists) {
       const fields: FieldMismatch[] = [...plan].filter(([, d]) => d !== DELETE).map(([field, expected]) => ({ field, actual: undefined, expected }))
@@ -518,6 +521,7 @@ export class Processor {
     source: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(conn, 'source')
     if (before && after && conn.fields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
@@ -527,7 +531,6 @@ export class Processor {
 
     const counter = new ReadCounter()
     const firestore = this.db()
-    const sourceRef = firestore.doc(source.path)
     const query = this.targetsOf(conn, source).limit(this.pageSize)
     const writer = firestore.bulkWriter()
     const pending: Promise<void>[] = []
@@ -544,8 +547,7 @@ export class Processor {
         result.targets += docs.length
 
         // Read the source only after the targets, so a stale source value can never pass the precondition.
-        const sourceSnap = await sourceRef.get()
-        counter.doc()
+        const sourceSnap = await this.readSource(source.path, counter, cache, page.readTime)
         const desired = copyValue(sourceSnap, conn, conn.onSourceDelete)
         if (desired === NOTHING) {
           result.reason = 'source missing and onSourceDelete=nothing'
@@ -591,6 +593,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(conn, 'target')
     result.targets = 1
@@ -603,7 +606,7 @@ export class Processor {
       return result
     }
     const counter = new ReadCounter()
-    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter, deleted: { onSourceDelete: conn.onSourceDelete } }))
+    count(result, await this.syncCopy(this.db().doc(target.path), conn, { counter, deleted: { onSourceDelete: conn.onSourceDelete }, sourceCache: cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -643,7 +646,7 @@ export class Processor {
   private async computeCopy(
     target: DocumentSnapshot,
     conn: ResolvedConnection,
-    opts: { sourceCache?: Map<string, Promise<DocumentSnapshot>>; deleted?: DeletedSource; counter: ReadCounter },
+    opts: { sourceCache?: SourceCache; deleted?: DeletedSource; counter: ReadCounter },
   ): Promise<{ value: Computed; reason?: string }> {
     const currentId: unknown = target.get(conn.idField)
     if (currentId === undefined || currentId === null || currentId === '') return { value: DELETE }
@@ -658,22 +661,16 @@ export class Processor {
     }
     const sourcePath = this.sourcePathFor(conn, target.ref.path, currentId)
     if (!sourcePath) return { value: NOTHING, reason: 'cannot locate source' }
-    const sourceSnap = await this.readSource(sourcePath, opts.counter, opts.sourceCache)
+    const sourceSnap = await this.readSource(sourcePath, opts.counter, opts.sourceCache, target.readTime)
     const { deleted } = opts
     const applies = deleted && (deleted.sourcePath === undefined || deleted.sourcePath === sourcePath)
     const value = copyValue(sourceSnap, conn, applies ? deleted.onSourceDelete : 'nothing')
     return value === NOTHING ? { value, reason: 'source missing' } : { value }
   }
 
-  /** Reads a source document, sharing reads across targets of the same page when a cache is given (only actual reads are counted). */
-  private readSource(path: string, counter: ReadCounter, cache?: Map<string, Promise<DocumentSnapshot>>): Promise<DocumentSnapshot> {
-    let p = cache?.get(path)
-    if (!p) {
-      counter.doc()
-      p = this.db().doc(path).get()
-      cache?.set(path, p)
-    }
-    return p
+  /** Reads a source document, sharing reads across targets of the same page/request when a cache is given, never older than `notBefore` (only actual reads are counted). */
+  private readSource(path: string, counter: ReadCounter, cache?: SourceCache, notBefore?: Timestamp): Promise<DocumentSnapshot> {
+    return cache ? cache.get(path, counter, notBefore) : (counter.doc(), this.db().doc(path).get())
   }
 
   /** Query for the targets of a source document: a concrete collection when the path allows it, else a collection group. */
@@ -709,6 +706,7 @@ export class Processor {
     source: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(rule, 'source')
     if (before && after && rule.watchedFields.every((f) => isEqual(getField(before.data, f), getField(after.data, f)))) {
@@ -729,7 +727,7 @@ export class Processor {
     const counter = new ReadCounter()
     for (const id of ids) {
       result.targets++
-      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, { counter }))
+      count(result, await this.syncAggregate(this.db().doc(`${targetCollection}/${id}`), rule, { counter, sourceCache: cache }))
     }
     if (result.writes === 0) result.reason = result.targets ? 'targets up to date' : 'no target id'
     return finish(result, counter)
@@ -741,6 +739,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(rule, 'target')
     result.targets = 1
@@ -753,7 +752,7 @@ export class Processor {
       return result
     }
     const counter = new ReadCounter()
-    count(result, await this.syncAggregate(this.db().doc(target.path), rule, { counter }))
+    count(result, await this.syncAggregate(this.db().doc(target.path), rule, { counter, sourceCache: cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
@@ -809,6 +808,7 @@ export class Processor {
     match: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(view, 'source')
     result.source = source.key
@@ -823,7 +823,7 @@ export class Processor {
     const counter = new ReadCounter()
     const resolvable = await this.forEachViewTarget(view, source, match, before, after, counter, async (ref, snapshot, changeCache) => {
       result.targets++
-      count(result, await this.syncView(ref, view, { change, target: snapshot, counter, changeCache }))
+      count(result, await this.syncView(ref, view, { change, target: snapshot, counter, changeCache, sourceCache: cache }))
     })
     if (!resolvable) {
       result.reason = 'target collection unresolvable'
@@ -839,6 +839,7 @@ export class Processor {
     target: DocumentMatch,
     before: DecodedDocument | undefined,
     after: DecodedDocument | undefined,
+    cache?: SourceCache,
   ): Promise<RuleResult> {
     const result = newResult(view, 'target')
     result.targets = 1
@@ -849,7 +850,7 @@ export class Processor {
     if (!after) {
       // The target of a base view was deleted by hand: recreate it while the base exists.
       const counter = new ReadCounter()
-      count(result, await this.syncView(this.db().doc(target.path), view, { counter }))
+      count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: cache }))
       if (result.writes === 0) result.reason = 'nothing to recreate (base missing or unresolvable)'
       return finish(result, counter)
     }
@@ -861,13 +862,19 @@ export class Processor {
       }
     }
     const counter = new ReadCounter()
-    count(result, await this.syncView(this.db().doc(target.path), view, { counter }))
+    count(result, await this.syncView(this.db().doc(target.path), view, { counter, sourceCache: cache }))
     if (result.writes === 0) result.reason = 'target up to date'
     return finish(result, counter)
   }
 
   /** The base document of a view changed: the target with the same ID is created, updated or removed. */
-  async viewBase(view: ResolvedView, match: DocumentMatch, before: DecodedDocument | undefined, after: DecodedDocument | undefined): Promise<RuleResult> {
+  async viewBase(
+    view: ResolvedView,
+    match: DocumentMatch,
+    before: DecodedDocument | undefined,
+    after: DecodedDocument | undefined,
+    cache?: SourceCache,
+  ): Promise<RuleResult> {
     const result = newResult(view, 'source')
     result.source = 'base'
     if (before && after && isEqual(before.data, after.data)) {
@@ -881,21 +888,26 @@ export class Processor {
     }
     result.targets = 1
     const counter = new ReadCounter()
-    count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter }))
+    count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter, sourceCache: cache }))
     // `after` missing means the base was just deleted: a skip there means the target was already absent, not that it is up to date.
     if (result.writes === 0) result.reason = after ? 'target up to date' : 'target already absent'
     return finish(result, counter)
   }
 
   /** The base for this attempt: `opts.base` on a first try when given (`checkView` only), else a fresh (counted) read. `undefined` when the target path does not match the view. */
-  private async readBase(targetPath: string, view: ResolvedView, opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: Map<string, Promise<DocumentSnapshot>> }, counter: ReadCounter): Promise<DocumentSnapshot | undefined> {
+  private async readBase(
+    targetPath: string,
+    view: ResolvedView,
+    opts: { base?: DocumentSnapshot; attempt?: number; sourceCache?: SourceCache; notBefore?: Timestamp },
+    counter: ReadCounter,
+  ): Promise<DocumentSnapshot | undefined> {
     if (opts.base && (opts.attempt ?? 0) === 0) return opts.base
     const path = basePathForTarget(view, targetPath)
     if (!path) {
       this.logger.warn('doc-sync: cannot locate base for target, skipped', { rule: view.name, document: targetPath })
       return undefined
     }
-    return this.readSource(path, counter, opts.sourceCache)
+    return this.readSource(path, counter, opts.sourceCache, opts.notBefore)
   }
 
   /** Creates the target with the plan's values. `ALREADY_EXISTS` means someone else created it meanwhile: `redo` from a fresh read. */
@@ -940,7 +952,7 @@ export class Processor {
     if (view.basePattern) {
       // Always a fresh read, taken after the target above: a page snapshot of the base would be older than the
       // target read that just happened, and a concurrent update to the base could be overwritten with a stale value.
-      base = await this.readBase(ref.path, view, { attempt, sourceCache: opts.sourceCache }, counter)
+      base = await this.readBase(ref.path, view, { attempt, sourceCache: opts.sourceCache, notBefore: target.readTime }, counter)
       if (!base) return 'skip'
       if (!base.exists) {
         if (!target.exists) return 'skip'
@@ -962,9 +974,9 @@ export class Processor {
   private async computeView(
     target: DocumentSnapshot,
     view: ResolvedView,
-    opts: { change?: ViewChange; changeCache?: ChangeCache; base?: DocumentSnapshot; counter: ReadCounter },
+    opts: { change?: ViewChange; changeCache?: ChangeCache; base?: DocumentSnapshot; counter: ReadCounter; sourceCache?: SourceCache },
   ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
-    const { counter } = opts
+    const { counter, sourceCache } = opts
     const firestore = countingFirestore(this.db(), counter)
     const source = opts.change && view.sources.find((s) => s.key === opts.change!.source)
     if (opts.change && source && view.patch && target.exists) {
@@ -976,11 +988,11 @@ export class Processor {
         counter.doc()
         const read = this.db().doc(path).get()
         if (cache) cache.doc = read
-        else return this.patchWith(target, view, source, opts.change, await read, counter, firestore, opts.base)
+        else return this.patchWith(target, view, source, opts.change, await read, counter, firestore, opts.base, sourceCache)
       }
-      return this.patchWith(target, view, source, opts.change, await cache.doc!, counter, firestore, opts.base)
+      return this.patchWith(target, view, source, opts.change, await cache.doc!, counter, firestore, opts.base, sourceCache)
     }
-    return this.buildValue(target, view, counter, firestore, opts.base)
+    return this.buildValue(target, view, counter, firestore, opts.base, sourceCache)
   }
 
   private async patchWith(
@@ -992,12 +1004,13 @@ export class Processor {
     counter: ReadCounter,
     firestore: Firestore,
     base: DocumentSnapshot | undefined,
+    sourceCache?: SourceCache,
   ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const belongs = current.exists && this.belongsToTarget(view, source, target, current)
     const fresh: ViewChange = { ...change, after: belongs ? current.data() : undefined }
     const patched = await view.patch!(this.currentValues(view, target), fresh, { target, base, firestore })
     if (patched !== undefined) return { plan: this.planOf(view, target, stripUndefined(patched)) }
-    return this.buildValue(target, view, counter, firestore, base)
+    return this.buildValue(target, view, counter, firestore, base, sourceCache)
   }
 
   private async buildValue(
@@ -1006,10 +1019,11 @@ export class Processor {
     counter: ReadCounter,
     firestore: Firestore,
     base: DocumentSnapshot | undefined,
+    sourceCache?: SourceCache,
   ): Promise<{ plan: FieldPlan | typeof NOTHING; reason?: string }> {
     const sources: Record<string, QueryDocumentSnapshot[]> = {}
     for (const source of view.sources) {
-      const docs = await this.viewSourceDocs(view, source, target, counter)
+      const docs = await this.viewSourceDocs(view, source, target, counter, sourceCache)
       if (docs === undefined) return { plan: NOTHING, reason: `source "${source.key}" unresolvable for this target` }
       sources[source.key] = docs
     }
@@ -1113,6 +1127,7 @@ export class Processor {
     source: ResolvedViewSource,
     target: DocumentSnapshot,
     counter: ReadCounter,
+    cache?: SourceCache,
   ): Promise<QueryDocumentSnapshot[] | undefined> {
     const m = matchDocumentPath(view.targetPattern, target.ref.path)
     if (!m) return undefined
@@ -1125,8 +1140,7 @@ export class Processor {
       }
       const collection = resolveCollectionPath(source.pattern, m.params)
       if (!collection) return undefined
-      counter.doc()
-      const snap = await this.db().doc(`${collection}/${id}`).get()
+      const snap = await this.readSource(`${collection}/${id}`, counter, cache, target.readTime)
       return snap.exists ? [snap as QueryDocumentSnapshot] : []
     }
     let query: Query
