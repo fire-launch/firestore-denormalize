@@ -75,6 +75,12 @@ describe('schedule continuation helpers', () => {
     expect(deferTaskId('post-category', bucket, { unit: 'target', path: 'category/c1' })).not.toBe(id)
   })
 
+  it('lags the bucket boundary by the clock margin, so a slightly-behind clock never reuses an already-run bucket', () => {
+    const everyMs = 600_000
+    const { bucket } = deferBucket(everyMs, everyMs * 7 - 500)
+    expect(bucket).toBe(8)
+  })
+
   it('puts scheduleTime and a flush body into the task request', () => {
     const task: ContinuationTask = { id: 'r-d1-abc', rule: 'r', url: 'https://h/schedule/r', body: { flush: { unit: 'target', path: 'post/p1' } }, scheduleTime: '2026-10-13T03:10:00.000Z', serviceAccountEmail: 'sa@p.iam.gserviceaccount.com', audience: 'https://h', queue: { project: 'p', location: 'l', name: 'q' } }
     const { payload } = buildContinuationRequest(task)

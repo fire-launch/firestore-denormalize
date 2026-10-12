@@ -298,6 +298,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     try {
       let result: RuleResult
       if (flush.unit === 'target') {
+        if (!matchDocumentPath(rule.targetPattern, flush.path)) return respondJson(res, 400, { error: 'flush path does not match this rule' })
         result = newResult(rule, 'target')
         result.targets = 1
         const counter = new ReadCounter()
@@ -310,21 +311,13 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
         result = await processor.connectionSource(rule, match, undefined, undefined, {})
       } else if (rule.kind === 'view') {
         let match: DocumentMatch | undefined
-        let foundSource: ResolvedViewSource | undefined
-        for (const s of rule.sources) {
-          if (s.refField === undefined) continue
-          const m = matchDocumentPath(s.pattern, flush.path)
-          if (m) {
-            match = m
-            foundSource = s
-            break
-          }
-        }
-        if (!match || !foundSource) return respondJson(res, 400, { error: 'no refField source matches this flush path' })
+        const foundSource = rule.sources.find((s) => s.refField !== undefined && (match = matchDocumentPath(s.pattern, flush.path)) !== undefined)
+        if (!foundSource || !match) return respondJson(res, 400, { error: 'no refField source matches this flush path' })
         result = await processor.viewSource(rule, foundSource, match, undefined, undefined, {})
       } else {
         return respondJson(res, 400, { error: `rule "${name}" has no source unit to flush` })
       }
+      logger.info('doc-sync: flushed', { rule: name, flush, action: result.action, writes: result.writes, reads: result.reads, durationMs: Date.now() - startedAt })
       return respondJson(res, 200, { ...result, flush, durationMs: Date.now() - startedAt })
     } catch (err) {
       logger.error('doc-sync schedule: flush failed', { rule: name, flush, error: err })
@@ -1004,8 +997,7 @@ export class Processor {
     result.targets = 1
     // Create/delete (the target's lifecycle) stays immediate; only an update of an existing base defers.
     if (before && after && opts.defer) {
-      const targetPath = targetPathForBase(view, match.path) ?? `${collection}/${match.id}`
-      return deferOne(result, opts.defer, { unit: 'target', path: targetPath })
+      return deferOne(result, opts.defer, { unit: 'target', path: `${collection}/${match.id}` })
     }
     const counter = new ReadCounter()
     count(result, await this.syncView(this.db().doc(`${collection}/${match.id}`), view, { counter, sourceCache: opts.cache }))

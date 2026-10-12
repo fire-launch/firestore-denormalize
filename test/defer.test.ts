@@ -10,6 +10,20 @@ const category = defineConnection({ name: 'post-category', source: 'category', t
 const likes = defineAggregate({ name: 'post-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', defer: '10m' })
 const pub = defineProjection({ name: 'post-public', base: 'post', target: 'postPublic', targetFields: ['title'], defer: '10m' })
 const config = defineConfig({ name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger', rules: [category, likes, pub] })
+// Not deferred: used to check a flush body against a rule that has no `deferred`.
+const plainTag = defineConnection({ name: 'post-plain-tag', source: 'tag', target: 'tagPost', idField: 'tagId', fields: ['label'], targetField: 'tag', onSourceDelete: 'setNull' })
+// Deferred view with one refField source (author) and one idParam source (comments), to exercise both of viewSource's defer branches.
+const postInfo = defineView({
+  name: 'post-info',
+  target: 'post',
+  targetFields: ['authorName', 'commentCount'],
+  sources: {
+    author: { collection: 'author', refField: 'authorId' },
+    comments: { collection: 'post/{postId}/comment', idParam: 'postId' },
+  },
+  build: ({ sources }) => ({ authorName: sources.author[0]?.get('name'), commentCount: sources.comments.length }),
+  defer: '10m',
+})
 
 function handlerFor(rules = config.rules, enqueue?: (t: ContinuationTask) => Promise<void>) {
   const logger = silentLogger()
@@ -94,5 +108,58 @@ describe('defer: events mark, tasks flush', () => {
     expect((await invokeRaw(handler, { url: '/schedule/post-category', headers: { host } })).status).toBe(400)
     expect((await invokeRaw(handler, { url: '/schedule/post-likes', headers: { host }, body: { flush: { unit: 'source', path: 'post/p1/like/u1' } } })).status).toBe(400)
     expect((await invokeRaw(handler, { url: '/schedule/nope', headers: { host }, body: { flush: { unit: 'target', path: 'post/p1' } } })).status).toBe(404)
+    // the target unit's path must match this rule's own target collection
+    expect((await invokeRaw(handler, { url: '/schedule/post-category', headers: { host }, body: { flush: { unit: 'target', path: 'user/u1' } } })).status).toBe(400)
+  })
+
+  it('a flush body for a rule without `deferred` answers 404', async () => {
+    const { handler } = handlerFor([plainTag])
+    expect((await invokeRaw(handler, { url: '/schedule/post-plain-tag', headers: { host }, body: { flush: { unit: 'target', path: 'tagPost/t1' } } })).status).toBe(404)
+  })
+
+  it('connectionTarget defers an update to an existing target but writes immediately when the post is created with categoryId already set', async () => {
+    await db.doc('category/c1').set({ name: 'News' })
+    await db.doc('category/c2').set({ name: 'Sports' })
+    const { handler, tasks } = handlerFor([category])
+    const post = db.doc('post/p10')
+    await invoke(handler, { ...(await change(post, () => post.set({ title: 'x', categoryId: 'c1' }))), headers: { host } })
+    expect((await post.get()).get('category')).toEqual({ name: 'News' }) // create: written immediately
+    expect(tasks).toEqual([])
+    await invoke(handler, { ...(await change(post, () => post.update({ categoryId: 'c2' }))), headers: { host } })
+    expect((await post.get()).get('category')).toEqual({ name: 'News' }) // update: deferred, not yet written
+    expect(tasks[0]!.body).toEqual({ flush: { unit: 'target', path: 'post/p10' } })
+    await flush(handler, tasks[0]!)
+    expect((await post.get()).get('category')).toEqual({ name: 'Sports' })
+  })
+})
+
+describe('defer: view sources (refField and idParam)', () => {
+  it('a refField source update enqueues a source unit; the flush rebuilds the target through viewSource', async () => {
+    await db.doc('author/a1').set({ name: 'Ann' })
+    await db.doc('post/p1').set({ authorId: 'a1' })
+    const { handler, tasks } = handlerFor([postInfo])
+    const author = db.doc('author/a1')
+    await invoke(handler, { ...(await change(author, () => author.update({ name: 'Annie' }))), headers: { host } })
+    expect(tasks[0]!.body).toEqual({ flush: { unit: 'source', path: 'author/a1' } })
+    expect((await db.doc('post/p1').get()).get('authorName')).toBeUndefined()
+    const { status } = await flush(handler, tasks[0]!)
+    expect(status).toBe(200)
+    expect((await db.doc('post/p1').get()).get('authorName')).toBe('Annie')
+  })
+
+  it('an idParam source change enqueues the target unit; the flush recomputes it', async () => {
+    await db.doc('post/p1').set({})
+    const { handler, tasks } = handlerFor([postInfo])
+    const comment = db.doc('post/p1/comment/c1')
+    await invoke(handler, { ...(await change(comment, () => comment.set({ body: 'hi' }))), headers: { host } })
+    expect(tasks[0]!.body).toEqual({ flush: { unit: 'target', path: 'post/p1' } })
+    expect((await db.doc('post/p1').get()).get('commentCount')).toBeUndefined()
+    await flush(handler, tasks[0]!)
+    expect((await db.doc('post/p1').get()).get('commentCount')).toBe(1)
+  })
+
+  it('a flush source unit whose path matches no refField source answers 400', async () => {
+    const { handler } = handlerFor([postInfo])
+    expect((await invokeRaw(handler, { url: '/schedule/post-info', headers: { host }, body: { flush: { unit: 'source', path: 'wrong/x1' } } })).status).toBe(400)
   })
 })

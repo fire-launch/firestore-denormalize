@@ -37,13 +37,16 @@ export interface ContinuationTask {
   queue: { project: string; location: string; name: string }
 }
 
+/** Bucket boundaries lag `now` by this much, so a clock that runs behind Cloud Tasks' never reuses a bucket that already ran. */
+export const DEFER_CLOCK_MARGIN_MS = 1000
+
 /**
  * The defer bucket a dirty unit falls into at `now`: the interval `[bucket - 1, bucket) * everyMs`
  * has just closed, so the recompute runs at `bucket * everyMs`. `bucket` groups units that should
  * be recomputed together; `scheduleTime` is when the Cloud Tasks task should run.
  */
 export function deferBucket(everyMs: number, now: number = Date.now()): { bucket: number; scheduleTime: string } {
-  const bucket = Math.floor(now / everyMs) + 1
+  const bucket = Math.floor((now + DEFER_CLOCK_MARGIN_MS) / everyMs) + 1
   return { bucket, scheduleTime: new Date(bucket * everyMs).toISOString() }
 }
 
