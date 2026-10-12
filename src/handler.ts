@@ -39,9 +39,12 @@ export interface DocSyncHandlerOptions {
   maxRetries?: number
   /** Page size for the target query (`where idField == sourceId`). Default 500. */
   pageSize?: number
-  /** Scheduled runs (`/schedule/<rule>`). */
+  /** Scheduled runs (`/schedule/<rule>`). The route does no authentication of its own; restrict invocation with Cloud Run IAM (`invoker`) as for events. */
   schedule?: {
-    /** Stop at the next page boundary after this long; default 20 minutes (Cloud Scheduler waits at most 30). */
+    /**
+     * Stop at the next page boundary after this long; default 20 minutes (Cloud Scheduler waits at most 30).
+     * The function's `timeoutSeconds` must exceed this budget (the README deployment example uses 1800).
+     */
     budgetMs?: number
     /** Targets processed in parallel within a page. Default 20. */
     concurrency?: number
@@ -51,8 +54,14 @@ export interface DocSyncHandlerOptions {
 /** Request shape accepted by the handler. Express / firebase-functions requests satisfy it. */
 export interface DocSyncRequest {
   headers: Record<string, string | string[] | undefined>
-  /** Request URL (path and query), as Express / Node provide it. `/schedule/<rule>` runs that rule's scheduled sync. */
+  /**
+   * Request URL (path and query), as Express / Node provide it. `/schedule/<rule>` runs that rule's
+   * scheduled sync. The route does no authentication of its own; restrict invocation with Cloud Run
+   * IAM (`invoker`) as for events.
+   */
   url?: string
+  /** HTTP method, when the framework provides it. */
+  method?: string
   body?: unknown
   rawBody?: Uint8Array
   [Symbol.asyncIterator]?(): AsyncIterator<unknown>
@@ -170,7 +179,12 @@ export function scheduledRuleFromUrl(url: string | undefined): string | undefine
   if (!url) return undefined
   const path = url.split('?')[0]!.replace(/\/+$/, '')
   const m = /^\/schedule\/([^/]+)$/.exec(path)
-  return m ? decodeURIComponent(m[1]!) : undefined
+  if (!m) return undefined
+  try {
+    return decodeURIComponent(m[1]!)
+  } catch {
+    return m[1]!
+  }
 }
 
 function respondJson(res: DocSyncResponse, code: number, body: unknown): void {
@@ -243,7 +257,10 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
 
   return async function docSyncHandler(req, res) {
     const scheduledName = scheduledRuleFromUrl(req.url)
-    if (scheduledName !== undefined) return runScheduled(scheduledName, res)
+    if (scheduledName !== undefined) {
+      if (req.method !== undefined && req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
+      return runScheduled(scheduledName, res)
+    }
 
     const startedAt = Date.now()
     const eventId = header(req, 'ce-id')

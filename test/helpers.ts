@@ -40,6 +40,7 @@ export interface InvokeOptions {
   contentType?: string
   headers?: Record<string, string>
   url?: string
+  method?: string
 }
 
 /** Sends one CloudEvent (binary content mode) to the handler and returns the HTTP status. */
@@ -79,7 +80,7 @@ export async function invoke(handler: DocSyncHandler, opts: InvokeOptions): Prom
 export async function invokeRaw(handler: DocSyncHandler, opts: InvokeOptions): Promise<{ status: number; body: string | undefined }> {
   let status = 0
   let body: string | undefined
-  const req: DocSyncRequest = { headers: { 'content-type': 'application/json', ...opts.headers }, url: opts.url, body: opts.body ?? {} }
+  const req: DocSyncRequest = { headers: { 'content-type': 'application/json', ...opts.headers }, url: opts.url, method: opts.method, body: opts.body ?? {} }
   const res: DocSyncResponse = {
     setHeader() {},
     status(code) {

@@ -66,6 +66,16 @@ describe('scheduled rules: /schedule/<rule>', () => {
     expect((await invokeRaw(handler, { url: '/schedule/post-category' })).status).toBe(404)
   })
 
+  it('answers 405 for a non-POST method but runs on POST or when the method is unknown', async () => {
+    await db.doc('post/p1').set({ title: 'a' })
+    await db.doc('post/p1/like/u1').set({})
+    const { handler } = handlerFor()
+    expect((await invokeRaw(handler, { url: '/schedule/daily-likes', method: 'GET' })).status).toBe(405)
+    expect((await db.doc('post/p1').get()).get('likeCount')).toBeUndefined()
+    expect((await invokeRaw(handler, { url: '/schedule/daily-likes', method: 'POST' })).status).toBe(200)
+    expect((await db.doc('post/p1').get()).get('likeCount')).toBe(1)
+  })
+
   it('stops at a page boundary when the budget is exhausted and reports completed: false', async () => {
     for (const id of ['p1', 'p2', 'p3']) {
       await db.doc(`post/${id}`).set({ title: id })
@@ -88,6 +98,7 @@ describe('scheduledRuleFromUrl', () => {
     expect(scheduledRuleFromUrl('/schedule/daily-likes')).toBe('daily-likes')
     expect(scheduledRuleFromUrl('/schedule/daily-likes/?x=1')).toBe('daily-likes')
     expect(scheduledRuleFromUrl('/schedule/a%20b')).toBe('a b')
+    expect(scheduledRuleFromUrl('/schedule/%E0')).toBe('%E0')
     expect(scheduledRuleFromUrl('/')).toBeUndefined()
     expect(scheduledRuleFromUrl('/schedule/')).toBeUndefined()
     expect(scheduledRuleFromUrl('/schedule/a/b')).toBeUndefined()

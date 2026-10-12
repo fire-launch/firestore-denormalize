@@ -62,8 +62,8 @@ export async function walkCollection(
     scanned += docs.length
     lastPath = page.docs[page.docs.length - 1]!.ref.path
     onPage?.({ scanned, lastPath })
-    if (opts.shouldStop?.()) return { scanned, lastPath, stopped: true }
     if (page.size < pageSize) break
+    if (opts.shouldStop?.()) return { scanned, lastPath, stopped: true }
     cursor = page.docs[page.docs.length - 1]
   }
   return { scanned, lastPath, stopped: false }
