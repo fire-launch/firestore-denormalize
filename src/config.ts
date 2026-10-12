@@ -43,6 +43,12 @@ export interface Connection {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /**
@@ -77,6 +83,12 @@ export interface AggregateRule {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /** Sort key of a view source query: a field path, or `[field, direction]`. */
@@ -189,6 +201,12 @@ export interface ViewRule<S extends Record<string, ViewSource> = Record<string, 
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /**
@@ -214,6 +232,12 @@ export interface ProjectionRule {
   schedule?: string
   /** IANA time zone for `schedule`. Default `Etc/UTC`. */
   timeZone?: string
+  /**
+   * Defer this rule: events only mark what changed, and a Cloud Tasks task recomputes it once
+   * per interval (`'90s'`, `'10m'`, `'1h'`). Lifecycle events (base created/deleted) stay
+   * immediate. Not with `schedule`.
+   */
+  defer?: string
 }
 
 /** One rule of any kind. */
@@ -241,6 +265,8 @@ export interface ResolvedConnection extends Connection {
   targetPattern: CollectionPattern
   /** Set when the rule runs on a schedule instead of on events. */
   scheduled?: ResolvedSchedule
+  /** Set when the rule's recompute is deferred instead of running on every event. */
+  deferred?: { everyMs: number }
 }
 
 export interface ResolvedAggregate extends AggregateRule {
@@ -250,6 +276,8 @@ export interface ResolvedAggregate extends AggregateRule {
   watchedFields: string[]
   /** Set when the rule runs on a schedule instead of on events. */
   scheduled?: ResolvedSchedule
+  /** Set when the rule's recompute is deferred instead of running on every event. */
+  deferred?: { everyMs: number }
 }
 
 /** A rule's `schedule` after validation. */
@@ -292,6 +320,8 @@ export interface ResolvedView {
   projection?: true
   /** Set when the rule runs on a schedule instead of on events. */
   scheduled?: ResolvedSchedule
+  /** Set when the rule's recompute is deferred instead of running on every event. */
+  deferred?: { everyMs: number }
 }
 
 export type ResolvedRule = ResolvedConnection | ResolvedAggregate | ResolvedView
@@ -386,6 +416,15 @@ const RESOURCE_PREFIX_MAX = TRIGGER_NAME_MAX - 9
 
 const str = (v: unknown): v is string => typeof v === 'string' && v.trim().length > 0
 
+const DURATION = /^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/
+/** `90s`, `10m`, `1h`, `1h30m` → milliseconds; `undefined` when not a duration. */
+export function parseDuration(s: string): number | undefined {
+  const m = DURATION.exec(s)
+  if (!m || s === '') return undefined
+  const [, h = '0', mi = '0', sec = '0'] = m
+  return ((Number(h) * 60 + Number(mi)) * 60 + Number(sec)) * 1000
+}
+
 /**
  * Validates the config and applies defaults. Throws {@link ConfigError} listing every problem found.
  */
@@ -457,6 +496,31 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
       return null
     }
     return { cron: fields.join(' '), timeZone: (r.timeZone as string | undefined) ?? 'Etc/UTC' }
+  }
+  const DEFER_MIN_MS = 10_000
+  const DEFER_MAX_MS = 24 * 60 * 60 * 1000
+  /** Resolves `defer`: `undefined` when the rule has none, `null` after reporting a problem. */
+  const deferResolver = (r: { name?: unknown; schedule?: unknown; defer?: unknown }, label: string): { everyMs: number } | undefined | null => {
+    if (r.defer === undefined) return undefined
+    if (r.schedule !== undefined) {
+      problems.push(`${label}: \`defer\` and \`schedule\` cannot be combined`)
+      return null
+    }
+    const everyMs = typeof r.defer === 'string' ? parseDuration(r.defer) : undefined
+    if (everyMs === undefined) {
+      problems.push(`${label}: \`defer\` must be a duration like "10m"`)
+      return null
+    }
+    if (everyMs < DEFER_MIN_MS || everyMs > DEFER_MAX_MS) {
+      problems.push(`${label}: \`defer\` must be between 10s and 24h`)
+      return null
+    }
+    if (!str(r.name) || !SAFE_RULE_NAME.test(r.name)) {
+      // The name becomes part of the Cloud Tasks task id.
+      problems.push(`${label}: a deferred rule's \`name\` must match [A-Za-z0-9_-]`)
+      return null
+    }
+    return { everyMs }
   }
   const writtenFields: { rule: string; target: CollectionPattern; field: string }[] = []
   const idFields: { target: CollectionPattern; field: string }[] = []
@@ -536,8 +600,9 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     if (target && okTarget) writtenFields.push({ rule: label, target, field: c.targetField })
     if (target && okId) idFields.push({ target, field: c.idField })
     const scheduled = schedule(c, label)
-    if (source && target && okId && okTarget && okFields && scheduled !== null) {
-      resolvedConnections.push({ ...c, sourcePattern: source, targetPattern: target, scheduled: scheduled ?? undefined })
+    const deferred = deferResolver(c, label)
+    if (source && target && okId && okTarget && okFields && scheduled !== null && deferred !== null) {
+      resolvedConnections.push({ ...c, sourcePattern: source, targetPattern: target, scheduled: scheduled ?? undefined, deferred: deferred ?? undefined })
     }
   })
 
@@ -583,9 +648,10 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
     if (target && okTarget) writtenFields.push({ rule: label, target, field: a.targetField })
     const scheduled = schedule(a, label)
-    if (source && target && okTarget && (okId || (hasIdParam && str(a.idParam))) && (a.aggregate === 'count' || sumField) && scheduled !== null) {
+    const deferred = deferResolver(a, label)
+    if (source && target && okTarget && (okId || (hasIdParam && str(a.idParam))) && (a.aggregate === 'count' || sumField) && scheduled !== null && deferred !== null) {
       const watched = [a.idField, sumField].filter((f): f is string => typeof f === 'string')
-      resolvedAggregates.push({ ...a, sourcePattern: source, targetPattern: target, watchedFields: watched, scheduled: scheduled ?? undefined })
+      resolvedAggregates.push({ ...a, sourcePattern: source, targetPattern: target, watchedFields: watched, scheduled: scheduled ?? undefined, deferred: deferred ?? undefined })
     }
   })
 
@@ -627,6 +693,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         build: projectionBuild(p.targetFields),
         schedule: p.schedule,
         timeZone: p.timeZone,
+        defer: p.defer,
       },
       i,
       label,
@@ -831,7 +898,8 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     if (target && okTargetFields) for (const f of explicit) writtenFields.push({ rule: label, target, field: f })
 
     const scheduled = schedule(v, label)
-    if (target && okTargetFields && okBuild && okPatch && sourcesOk && okBase && scheduled !== null) {
+    const deferred = deferResolver(v, label)
+    if (target && okTargetFields && okBuild && okPatch && sourcesOk && okBase && scheduled !== null && deferred !== null) {
       resolvedViews.push({
         kind: 'view',
         name: v.name,
@@ -847,6 +915,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         patch: v.patch,
         projection,
         scheduled: scheduled ?? undefined,
+        deferred: deferred ?? undefined,
       })
     }
   })
@@ -961,6 +1030,11 @@ export function collectionsOf(config: {
 /** Rules that run on a schedule instead of on events. */
 export function scheduledRules(config: ResolvedConfig): ResolvedRule[] {
   return rulesOf(config).filter((r) => r.scheduled !== undefined)
+}
+
+/** Rules whose recompute is deferred instead of running on every event. */
+export function deferredRules(config: ResolvedConfig): ResolvedRule[] {
+  return rulesOf(config).filter((r) => r.deferred !== undefined)
 }
 
 /**

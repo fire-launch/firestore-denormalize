@@ -9,8 +9,10 @@ import {
   defineConnection,
   defineProjection,
   defineView,
+  deferredRules,
   jobName,
   needsCollectionGroupQuery,
+  parseDuration,
   resourceHash,
   rulesOf,
   scheduledRules,
@@ -636,5 +638,21 @@ describe('schedule', () => {
     })
     const r = validateConfig({ ...base, rules: [...base.rules, view] })
     expect(writeTriggers(r)).toEqual([])
+  })
+})
+
+describe('defer', () => {
+  it('resolves defer durations and rejects bad ones', () => {
+    const c = base.rules[0] as Connection
+    expect(validateConfig({ ...base, rules: [{ ...c, defer: '10m' }] }).connections[0]!.deferred).toEqual({ everyMs: 600_000 })
+    expect(validateConfig({ ...base, rules: [{ ...c, defer: '1h30m' }] }).connections[0]!.deferred).toEqual({ everyMs: 5_400_000 })
+    expect(problemsOf({ ...base, rules: [{ ...c, defer: '5s' }] })).toContainEqual(expect.stringContaining('`defer` must be between 10s and 24h'))
+    expect(problemsOf({ ...base, rules: [{ ...c, defer: 'soon' }] })).toContainEqual(expect.stringContaining('`defer` must be a duration'))
+    expect(problemsOf({ ...base, rules: [{ ...c, defer: '10m', schedule: '0 3 * * *' }] })).toContainEqual(expect.stringContaining('`defer` and `schedule` cannot be combined'))
+    expect(problemsOf({ ...base, rules: [{ ...c, defer: '10m', name: 'bad name' }] })).toContainEqual(expect.stringContaining('a deferred rule\'s `name` must match [A-Za-z0-9_-]'))
+    expect(deferredRules(validateConfig({ ...base, rules: [{ ...c, defer: '10m' }] })).map((r) => r.name)).toEqual([c.name])
+    expect(parseDuration('2h30m')).toBe(9_000_000)
+    expect(parseDuration('90s')).toBe(90_000)
+    expect(parseDuration('')).toBeUndefined()
   })
 })

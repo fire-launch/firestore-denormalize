@@ -3,6 +3,13 @@
  * enqueues a Cloud Tasks task that calls the same URL again with the cursor in the body. The
  * cursor never touches the user's Firestore.
  */
+import { createHash } from 'node:crypto'
+
+/** A base or target document a deferred rule has not yet recomputed for. */
+export interface DirtyUnit {
+  unit: 'source' | 'target'
+  path: string
+}
 
 export interface ContinuationBody {
   /** Last document path the previous chunk processed (`RebuildResult.lastPath`). */
@@ -21,11 +28,29 @@ export interface ContinuationTask {
   rule: string
   /** `<serviceUrl>/schedule/<rule>`. */
   url: string
-  body: ContinuationBody
+  body: ContinuationBody | { flush: DirtyUnit }
+  /** When set, the task runs no earlier than this time (ISO 8601), e.g. the end of a defer bucket. */
+  scheduleTime?: string
   /** OIDC identity of the task call (the trigger service account) and its audience (the service URL). */
   serviceAccountEmail: string
   audience: string
   queue: { project: string; location: string; name: string }
+}
+
+/**
+ * The defer bucket a dirty unit falls into at `now`: the interval `[bucket - 1, bucket) * everyMs`
+ * has just closed, so the recompute runs at `bucket * everyMs`. `bucket` groups units that should
+ * be recomputed together; `scheduleTime` is when the Cloud Tasks task should run.
+ */
+export function deferBucket(everyMs: number, now: number = Date.now()): { bucket: number; scheduleTime: string } {
+  const bucket = Math.floor(now / everyMs) + 1
+  return { bucket, scheduleTime: new Date(bucket * everyMs).toISOString() }
+}
+
+/** Cloud Tasks task id for one dirty unit's bucket: stable, so retries of the same unit/bucket dedupe. */
+export function deferTaskId(rule: string, bucket: number, unit: DirtyUnit): string {
+  const hash = createHash('sha256').update(`${unit.unit}\n${unit.path}`).digest('hex').slice(0, 16)
+  return `${rule}-d${bucket}-${hash}`
 }
 
 /** Enqueues one continuation task. The default implementation calls the Cloud Tasks REST API with ADC. */
@@ -69,6 +94,7 @@ export function buildContinuationRequest(task: ContinuationTask): { url: string;
       task: {
         name: `${parent}/tasks/${task.id}`,
         dispatchDeadline: '1800s',
+        ...(task.scheduleTime ? { scheduleTime: task.scheduleTime } : {}),
         httpRequest: {
           httpMethod: 'POST',
           url: task.url,

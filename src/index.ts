@@ -14,6 +14,8 @@ export {
   defineProjection,
   rulesOf,
   scheduledRules,
+  deferredRules,
+  parseDuration,
   scheduleQueueName,
   serviceAccountEmail,
   writeTriggers,
@@ -95,9 +97,12 @@ export {
   buildContinuationRequest,
   createCloudTasksEnqueuer,
   enqueueWithRetry,
+  deferBucket,
+  deferTaskId,
   type ContinuationBody,
   type ContinuationTask,
   type Enqueue,
+  type DirtyUnit,
 } from './schedule.js'
 export { verify, type VerifyOptions, type VerifyProgress, type VerifyResult, type Mismatch } from './verify.js'
 export { startDevBridge, type DevBridge, type DevBridgeOptions } from './dev.js'
