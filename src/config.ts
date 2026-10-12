@@ -311,6 +311,18 @@ export function defineConfig(config: DocSyncConfig): DocSyncConfig {
   return config
 }
 
+/** Expands a bare service-account id to `<id>@<project>.iam.gserviceaccount.com`. */
+export function serviceAccountEmail(config: Pick<ResolvedConfig, 'serviceAccount'>, project: string): string {
+  return config.serviceAccount.includes('@')
+    ? config.serviceAccount
+    : `${config.serviceAccount}@${project}.iam.gserviceaccount.com`
+}
+
+/** Cloud Tasks queue that carries the continuation of scheduled runs that ran out of budget. */
+export function scheduleQueueName(instanceName: string): string {
+  return `${instanceName}-schedule`
+}
+
 /** Validates a raw config, or returns an already resolved one unchanged. */
 export function resolveConfig(config: DocSyncConfig | ResolvedConfig): ResolvedConfig {
   return (config as ResolvedConfig).resolved === true ? (config as ResolvedConfig) : validateConfig(config as DocSyncConfig)

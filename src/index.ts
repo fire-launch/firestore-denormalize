@@ -12,6 +12,8 @@ export {
   defineProjection,
   rulesOf,
   scheduledRules,
+  scheduleQueueName,
+  serviceAccountEmail,
   writeTriggers,
   type WriteTrigger,
   ConfigError,
@@ -84,5 +86,14 @@ export {
   type Leaf,
 } from './types.js'
 export { ReadCounter, countingFirestore, type ReadCounts } from './counter.js'
+export {
+  continuationRunId,
+  parseContinuationBody,
+  buildContinuationRequest,
+  createCloudTasksEnqueuer,
+  type ContinuationBody,
+  type ContinuationTask,
+  type Enqueue,
+} from './schedule.js'
 export { verify, type VerifyOptions, type VerifyProgress, type VerifyResult, type Mismatch } from './verify.js'
 export { startDevBridge, type DevBridge, type DevBridgeOptions } from './dev.js'

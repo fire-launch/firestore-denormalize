@@ -1,17 +1,13 @@
 /**
  * Pure functions that turn a config into gcloud invocations. Kept free of I/O so they can be unit tested.
  */
-import { scheduledRules, triggerCollectionsOf, triggerName, type ResolvedConfig } from '../config.js'
+import { scheduledRules, serviceAccountEmail, triggerCollectionsOf, triggerName, type ResolvedConfig } from '../config.js'
 import { type CollectionPattern, eventarcPathPattern, normalizePathPattern } from '../paths.js'
 
 export const INSTANCE_LABEL = 'doc-sync-instance'
 export const EVENT_TYPE = 'google.cloud.firestore.document.v1.written'
 
-export function serviceAccountEmail(config: Pick<ResolvedConfig, 'serviceAccount'>, project: string): string {
-  return config.serviceAccount.includes('@')
-    ? config.serviceAccount
-    : `${config.serviceAccount}@${project}.iam.gserviceaccount.com`
-}
+export { serviceAccountEmail } from '../config.js'
 
 export interface TriggerSpec {
   name: string

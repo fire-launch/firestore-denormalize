@@ -19,6 +19,8 @@ import {
   type ResolvedViewSource,
   resolveConfig,
   rulesOf,
+  scheduleQueueName,
+  serviceAccountEmail,
   type ViewChange,
 } from './config.js'
 import { DecodeError, decodeDocumentEventData, type DecodedDocument } from './decode.js'
@@ -29,6 +31,7 @@ import { jsonLogger, type Logger } from './logger.js'
 import { type DocumentMatch, isValidDocumentId, matchDocumentPath, resolveCollectionPath } from './paths.js'
 import { forEachLimit } from './walk.js'
 import { rebuild } from './rebuild.js'
+import { continuationRunId, createCloudTasksEnqueuer, parseContinuationBody, type ContinuationTask, type Enqueue } from './schedule.js'
 
 export interface DocSyncHandlerOptions {
   /** Firestore instance to use. Defaults to `getFirestore()` (or `getFirestore(database)` for a named database). */
@@ -48,6 +51,14 @@ export interface DocSyncHandlerOptions {
     budgetMs?: number
     /** Targets processed in parallel within a page. Default 20. */
     concurrency?: number
+    /** GCP project of the Cloud Tasks queue. Default: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`, else the Firestore client's project. */
+    project?: string
+    /** Public URL of this service (`https://…run.app`), used for the continuation task. Default: `https://<x-forwarded-host | host header>`. */
+    serviceUrl?: string
+    /** Replaces the Cloud Tasks call (tests, emulator, other platforms). Receives the fully built task. */
+    enqueue?: Enqueue
+    /** Set to `false` to never enqueue a continuation (the run then stops on its budget as in 0.9). Default `true`. */
+    continue?: boolean
   }
 }
 
@@ -217,29 +228,78 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
   const processor = new Processor(db, logger, options.maxRetries ?? 5, options.pageSize ?? 500)
   const rules = rulesOf(resolved)
   const eventRules = rules.filter((r) => r.scheduled === undefined)
+  const enqueue: Enqueue = options.schedule?.enqueue ?? createCloudTasksEnqueuer()
 
-  async function runScheduled(name: string, res: DocSyncResponse): Promise<void> {
+  function scheduleProject(): string | undefined {
+    return options.schedule?.project ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? (db() as unknown as { projectId?: string }).projectId
+  }
+
+  function serviceUrlFrom(req: DocSyncRequest): string | undefined {
+    if (options.schedule?.serviceUrl) return options.schedule.serviceUrl.replace(/\/+$/, '')
+    const host = header(req, 'x-forwarded-host') ?? header(req, 'host')
+    return host ? `https://${host}` : undefined
+  }
+
+  async function runScheduled(name: string, req: DocSyncRequest, res: DocSyncResponse): Promise<void> {
     const startedAt = Date.now()
     const rule = rules.find((r) => r.name === name)
     if (!rule || !rule.scheduled) {
       logger.warn('doc-sync schedule: unknown or unscheduled rule', { rule: name })
       return respondJson(res, 404, { error: `no scheduled rule "${name}"` })
     }
+    let cont: ReturnType<typeof parseContinuationBody> = {}
+    try {
+      cont = parseContinuationBody(await readBody(req))
+    } catch {
+      cont = {}
+    }
+    const runId = continuationRunId(cont.runId, header(req, 'x-cloudscheduler-scheduletime'))
+    const chunk = cont.chunk ?? 0
+    const passStartedAt = cont.startedAt ?? new Date(startedAt).toISOString()
     try {
       const [result] = await rebuild(resolved, {
         firestore: db(),
         logger,
         rules: [name],
+        startAfter: cont.startAfter,
         pageSize: options.pageSize ?? 500,
         concurrency: options.schedule?.concurrency,
         maxRetries: options.maxRetries ?? 5,
         budgetMs: options.schedule?.budgetMs ?? DEFAULT_SCHEDULE_BUDGET_MS,
       })
+      let continued = false
+      if (!result!.completed && result!.lastPath && options.schedule?.continue !== false) {
+        const project = scheduleProject()
+        const serviceUrl = serviceUrlFrom(req)
+        if (!project || !serviceUrl) {
+          logger.error('doc-sync schedule: could not enqueue continuation; the next scheduled run starts over', { rule: name, runId, chunk, reason: !project ? 'project unknown' : 'service URL unknown' })
+        } else {
+          const task: ContinuationTask = {
+            id: `${name}-${runId}-${chunk + 1}`,
+            rule: name,
+            url: `${serviceUrl}/schedule/${encodeURIComponent(name)}`,
+            body: { startAfter: result!.lastPath, runId, chunk: chunk + 1, startedAt: passStartedAt },
+            serviceAccountEmail: serviceAccountEmail(resolved, project),
+            audience: serviceUrl,
+            queue: { project, location: resolved.serviceRegion, name: scheduleQueueName(resolved.name) },
+          }
+          try {
+            await enqueue(task)
+            continued = true
+            logger.info('doc-sync schedule: continuation enqueued', { rule: name, runId, chunk: chunk + 1, startAfter: result!.lastPath, task: task.id })
+          } catch (err) {
+            logger.error('doc-sync schedule: could not enqueue continuation; the next scheduled run starts over', { rule: name, runId, chunk, error: err })
+          }
+        }
+      }
       const body = {
         rule: name,
+        runId,
+        chunk,
         scanned: result!.scanned,
         written: result!.written,
         completed: result!.completed,
+        continued,
         lastPath: result!.lastPath,
         reads: result!.reads,
         queries: result!.queries,
@@ -250,8 +310,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       logger.info('doc-sync schedule: run', body)
       return respondJson(res, 200, body)
     } catch (err) {
-      logger.error('doc-sync schedule: run failed, will be retried by Cloud Scheduler', { rule: name, error: err })
-      return respondJson(res, 500, { error: 'run failed' })
+      logger.error('doc-sync schedule: run failed, will be retried by Cloud Scheduler', { rule: name, runId, chunk, error: err })
+      return respondJson(res, 500, { error: 'run failed', runId, chunk })
     }
   }
 
@@ -259,7 +319,7 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const scheduledName = scheduledRuleFromUrl(req.url)
     if (scheduledName !== undefined) {
       if (req.method !== undefined && req.method !== 'POST') return respondJson(res, 405, { error: 'use POST' })
-      return runScheduled(scheduledName, res)
+      return runScheduled(scheduledName, req, res)
     }
 
     const startedAt = Date.now()
