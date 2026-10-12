@@ -192,6 +192,14 @@ describe('scheduled rules: continuation', () => {
     expect(r).toMatchObject({ completed: false, continued: false, chunk: 0, runId: 'ok', lastPath: 'post/p1' })
     expect(tasks).toEqual([])
   })
+
+  it('accepts a continuation body delivered as rawBody bytes (the Firebase onRequest shape)', async () => {
+    await seed(2)
+    const { handler } = handlerFor({ pageSize: 1 })
+    const body = { startAfter: 'post/p1', runId: 'r', chunk: 1, startedAt: '2026-10-12T03:00:00.000Z' }
+    const result = JSON.parse((await invokeRaw(handler, { url: '/schedule/daily-likes', headers: { host }, body: Buffer.from(JSON.stringify(body)) })).body!)
+    expect(result).toMatchObject({ completed: true, chunk: 1, runId: 'r', scanned: 1, written: 1, lastPath: 'post/p2' })
+  })
 })
 
 describe('scheduledRuleFromUrl', () => {

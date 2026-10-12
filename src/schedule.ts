@@ -86,17 +86,20 @@ export function buildContinuationRequest(task: ContinuationTask): { url: string;
  * runtime service account on Cloud Run). A task that already exists (HTTP 409) counts as enqueued.
  */
 export function createCloudTasksEnqueuer(): Enqueue {
-  let clientPromise: Promise<{ request: (opts: { url: string; method: 'POST'; data: unknown }) => Promise<unknown> }> | undefined
+  type Client = { request: (opts: { url: string; method: 'POST'; data: unknown; timeout?: number }) => Promise<unknown> }
+  type Auth = { getClient: () => Promise<Client> }
+  // The GoogleAuth instance itself (not a getClient() call result) is cached: a transient
+  // getClient() failure must not poison every later continuation on this instance.
+  let authPromise: Promise<Auth> | undefined
   return async (task) => {
-    if (!clientPromise) {
-      clientPromise = import('google-auth-library').then(({ GoogleAuth }) =>
-        new GoogleAuth({ scopes: 'https://www.googleapis.com/auth/cloud-platform' }).getClient() as Promise<{ request: (opts: { url: string; method: 'POST'; data: unknown }) => Promise<unknown> }>,
-      )
+    if (!authPromise) {
+      authPromise = import('google-auth-library').then(({ GoogleAuth }) => new GoogleAuth({ scopes: 'https://www.googleapis.com/auth/cloud-platform' }) as unknown as Auth)
     }
-    const client = await clientPromise
+    const auth = await authPromise
+    const client = await auth.getClient()
     const { url, payload } = buildContinuationRequest(task)
     try {
-      await client.request({ url, method: 'POST', data: payload })
+      await client.request({ url, method: 'POST', data: payload, timeout: 30_000 })
     } catch (err) {
       const status = (err as { response?: { status?: number } }).response?.status ?? (err as { code?: number }).code
       if (status === 409) return

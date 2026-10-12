@@ -231,7 +231,14 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
   const enqueue: Enqueue = options.schedule?.enqueue ?? createCloudTasksEnqueuer()
 
   function scheduleProject(): string | undefined {
-    return options.schedule?.project ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? (db() as unknown as { projectId?: string }).projectId
+    const configured = options.schedule?.project ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT
+    if (configured !== undefined) return configured
+    // `projectId` is an undocumented getter of the Firestore client; it throws when the client is not initialised.
+    try {
+      return (db() as unknown as { projectId?: string }).projectId
+    } catch {
+      return undefined
+    }
   }
 
   function serviceUrlFrom(req: DocSyncRequest): string | undefined {
@@ -310,7 +317,10 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       logger.info('doc-sync schedule: run', body)
       return respondJson(res, 200, body)
     } catch (err) {
-      logger.error('doc-sync schedule: run failed, will be retried by Cloud Scheduler', { rule: name, runId, chunk, error: err })
+      // Chunk 0 is the Scheduler's own call, retried by Cloud Scheduler; a later chunk is delivered
+      // by the continuation task, retried by Cloud Tasks instead.
+      const message = chunk === 0 ? 'doc-sync schedule: run failed, will be retried by Cloud Scheduler' : 'doc-sync schedule: continuation chunk failed, will be retried by Cloud Tasks'
+      logger.error(message, { rule: name, runId, chunk, error: err })
       return respondJson(res, 500, { error: 'run failed', runId, chunk })
     }
   }

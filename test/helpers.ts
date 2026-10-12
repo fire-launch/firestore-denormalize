@@ -81,7 +81,15 @@ export async function invoke(handler: DocSyncHandler, opts: InvokeOptions): Prom
 /** Like `invoke`, but returns the status and the response body text (JSON routes). */
 export async function invokeRaw(handler: DocSyncHandler, opts: InvokeOptions): Promise<{ status: number; body: string | undefined }> {
   let body: string | undefined
-  const req: DocSyncRequest = { headers: { 'content-type': 'application/json', ...opts.headers }, url: opts.url, method: opts.method, body: opts.body ?? {} }
+  // The Firebase `onRequest` shape: a Uint8Array body is the raw, unparsed bytes (`rawBody`), not `req.body`.
+  const bytes = opts.body instanceof Uint8Array
+  const req: DocSyncRequest = {
+    headers: { 'content-type': 'application/json', ...opts.headers },
+    url: opts.url,
+    method: opts.method,
+    body: bytes ? undefined : opts.body ?? {},
+    rawBody: bytes ? (opts.body as Uint8Array) : undefined,
+  }
   if (opts.plainResponse) {
     const res: DocSyncResponse = {
       statusCode: 0,
