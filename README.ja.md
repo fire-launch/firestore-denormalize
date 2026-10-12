@@ -101,7 +101,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**イベントではなく定期実行**: どのルールにも `schedule` を付けると、Firestore のイベントではなく Cloud Scheduler のジョブが同じ関数（`/schedule/<rule>`）を呼んで同期します。大きなファンアウト、夜間の集計、遅れてよい読み取りモデルに。
+**イベントではなく定期実行**: どのルールにも `schedule` を付けると、Firestore のイベントではなく Cloud Scheduler のジョブが同じ関数（`/schedule/<rule>`）を呼んで同期します。大きなファンアウト、夜間の集計、遅れてよい読み取りモデルに。時間予算を超えた実行は Cloud Tasks のキューを通じてチャンクに分けて続行します。カーソルはタスクに載せるので、データ側には何も書きません。
 
 ```ts
 defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })

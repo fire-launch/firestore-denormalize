@@ -298,6 +298,12 @@ const scheduledView = defineView({
 })
 defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [scheduledView] })
 
+const scheduledCopy = defineConnection({
+  name: 'scheduled-copy', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull', schedule: '0 4 * * *', timeZone: 'Asia/Tokyo',
+})
+const scheduledProjection = defineProjection({ name: 'scheduled-user-public', base: 'user', target: 'userPublic', targetFields: ['displayName'], schedule: '0 5 * * *' })
+defineConfig({ name: 'doc-sync', region: 'r', service: 's', serviceAccount: 'sa', rules: [scheduledCopy, scheduledProjection] })
+
 defineProjection({
   name: 'x',
   base: 'user',

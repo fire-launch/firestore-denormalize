@@ -4,6 +4,17 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.10.0] - 2026-10-12
+
+### Added
+
+- Scheduled runs that stop on their time budget enqueue a Cloud Tasks continuation (`<instance>-schedule` queue, task `<rule>-<runId>-<chunk>`, cursor in the task body); the JSON answer gains `runId`, `chunk`, `continued`. `setup` creates the queue and, with `--runtime-service-account <email>`, grants the runtime SA `roles/cloudtasks.enqueuer` and `roles/iam.serviceAccountUser`. New handler options `schedule.project`, `schedule.serviceUrl`, `schedule.enqueue`, `schedule.continue`.
+- `/schedule/<rule>` accepts a JSON body `{ startAfter, runId, chunk, startedAt }` to resume a pass.
+- Typed configs: `schedule` / `timeZone` test coverage for connections and projections.
+- New runtime dependency: `google-auth-library` (Cloud Tasks REST with ADC).
+- The 500 answer of `/schedule/<rule>` now includes `runId` and `chunk`.
+- `setup` creates the queue with `--max-attempts=5 --min-backoff=60s`.
+
 ## [0.9.0] - 2026-10-12
 
 ### Added

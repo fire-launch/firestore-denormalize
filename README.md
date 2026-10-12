@@ -102,7 +102,7 @@ post/p1       { title: 'Hello' }
 post/p1       { title: 'Hello', likeCount: 2 }
 ```
 
-**Scheduled instead of event-driven**: add `schedule` to any rule and it is synced by a Cloud Scheduler job calling the same function (`/schedule/<rule>`) rather than by Firestore events. For large fan-outs, nightly aggregates, or read models that may lag.
+**Scheduled instead of event-driven**: add `schedule` to any rule and it is synced by a Cloud Scheduler job calling the same function (`/schedule/<rule>`) rather than by Firestore events. For large fan-outs, nightly aggregates, or read models that may lag. Runs that exceed the time budget continue in chunks through a Cloud Tasks queue, with the cursor in the task, so nothing is written to your data.
 
 ```ts
 defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *', timeZone: 'Asia/Tokyo' })

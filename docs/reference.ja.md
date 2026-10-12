@@ -56,7 +56,11 @@ export default defineConfig({
 | `timeZone` | cron のタイムゾーン（IANA 名）。既定 `Etc/UTC` |
 
 - 整合性は「cron 間隔 + 1 回の実行時間」を上限とする最終的整合になります。書き込みは引き続き `update(..., { lastUpdateTime })` なので、定期実行がイベント駆動の並行書き込みを古い値で上書きすることはありません。
-- 1 回の実行には時間予算があります（`createDocSyncHandler` の `schedule.budgetMs`、既定 20 分。Cloud Scheduler の応答待ちは最長 30 分）。予算を超えるとページ境界で止まり、`completed: false` と `lastPath` を返します。次の定期実行は先頭からやり直します。1 回で終わらない規模ならルールを分けるか、再開対応版（予定）を待ってください。
+- 1 回の実行には時間予算があります（`createDocSyncHandler` の `schedule.budgetMs`、既定 20 分。Cloud Scheduler の応答待ちは最長 30 分）。予算を超えるとページ境界で止まり、**継続**を積みます。キュー `<instance>-schedule`（`serviceRegion`）の Cloud Tasks タスクが同じ `/schedule/<rule>` を本文 `{ startAfter, runId, chunk, startedAt }` 付きで呼び、止まった場所から続けます。タスク ID は `<rule>-<runId>-<chunk>` で、重複（再試行されたチャンク）は無視されます。タスクを積めなかった場合は `continued: false` を返し、次の定期実行は先頭からやり直します。
+- 継続に必要なもの: キュー（`setup` が作成）と、関数の実行サービスアカウントに対する `roles/cloudtasks.enqueuer`（キュー）および トリガー用サービスアカウントに対する `roles/iam.serviceAccountUser`（`setup --runtime-service-account <email>` が両方を付与）。プロジェクトは `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントから、サービス URL はリクエストの `host` ヘッダーから求めます。`schedule.project` / `schedule.serviceUrl` で上書きできます。`schedule.continue: false` で継続を無効化、`schedule.enqueue` で Cloud Tasks 呼び出しを置き換えられます（テスト、エミュレータ、他基盤）。
+- キューは失敗した継続を最大 5 回、60 秒以上の間隔で再試行します。スケジュールを外したルールへの継続は 404 になり、その回数で止まります。
+- 前の一周が終わる前に次の cron が来ると 2 本が並走します。書き込みは条件付きなので壊れませんが、読み取りが無駄になります。
+- エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` に「タスクの `body` を本文にしてハンドラをもう一度呼ぶ関数」を渡す（テストスイートがそうしています）か、予算の無い `doc-sync rebuild --rule <name>` を使ってください。
 - 手動やエミュレータで実行するには `doc-sync rebuild --rule <name>`、または関数の `POST /schedule/<name>`（CloudEvent ヘッダーは不要）。
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
 - 関数の `timeoutSeconds` は予算より長くしてください。イベントのみなら 300、スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上にします（[推奨する関数の設定](#推奨する関数の設定) を参照）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
@@ -128,18 +132,18 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `logger` | 標準出力への JSON | `info` / `warn` / `error` を持つ任意のオブジェクト。`console` も使えます |
 | `maxRetries` | 5 | 条件付き書き込みが失敗したターゲットのやり直し回数 |
 | `pageSize` | 500 | ターゲット検索のページサイズ |
-| `schedule: { budgetMs, concurrency }` | `budgetMs` は 20 分、`concurrency` は 20 | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数 |
+| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true` | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤） |
 
 ハンドラは `(req, res) => Promise<void>` で、Express や Node の `http` でも使えます。
 
-`POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, scanned, written, completed, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知またはイベント駆動のルールは 404、POST 以外は 405、失敗は 500（Cloud Scheduler が再試行）。`req.url` を渡してください（Express は渡します）。
+`POST /schedule/<rule>` はそのスケジュールルールを実行し、JSON `{ rule, runId, chunk, scanned, written, completed, continued, lastPath, reads, queries, aggregations, durationMs }` を返します（200）。未知またはイベント駆動のルールは 404、POST 以外は 405、失敗は 500（`{ error, runId, chunk }`。先頭チャンクは Cloud Scheduler が、継続チャンクは Cloud Tasks が再試行）。本文には予算で止まったパスを再開するための継続 `{ startAfter, runId, chunk, startedAt }` を渡せます。`runId` は 1 回のパスを識別し、`chunk` は Scheduler 自身の呼び出しが `0`、以降 `1`、`2`、... と増え、`continued` はこの実行が次のチャンクを積んだかどうかを示します。`req.url` を渡してください（Express は渡します）。
 
 ## CLI
 
 | コマンド | 内容 |
 |---|---|
-| `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告を表示します。`--strict` を付けると警告があれば失敗します |
-| `setup` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API も有効化します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
+| `validate [--strict]` | 設定を検査します。トリガー、コストの見積もり、書き込みの連鎖、警告、（スケジュールルールがあれば）`continuation queue: <instance>-schedule (<serviceRegion>)` を表示します。`--strict` を付けると警告があれば失敗します |
+| `setup [--runtime-service-account <email>]` | トリガー用サービスアカウントを作成し、`roles/eventarc.eventReceiver`（プロジェクト）と `roles/run.invoker`（サービス）を付与し、API を有効化します。スケジュールルールがあれば Cloud Scheduler API と Cloud Tasks API も有効化し、そのルールの `<instance>-schedule` キューを作成します（`--max-attempts=5 --min-backoff=60s`）。`--runtime-service-account <email>` を付けると、そのサービスアカウントにキューへの `roles/cloudtasks.enqueuer` とトリガー用サービスアカウントへの `roles/iam.serviceAccountUser`（継続を積むのに必要）も付与します。付けない場合は、手動で実行する 2 つの `gcloud` コマンドを表示します。冪等です。サービスがまだ存在しない間は invoker の付与をスキップするので、最初のデプロイ後に再実行してください |
 | `deploy [--deploy-function <name>]` | 不足している Eventarc トリガー（イベント駆動ルールのコレクション分）を作成し、ずれたもの（サービス、サービスのリージョン、パスパターン、SA）を更新し、不要なものを削除します。対象は `region` 内でラベル `doc-sync-instance=<name>` を持つトリガーだけです。スケジュールルールの Cloud Scheduler ジョブ（`serviceRegion` 内で description `doc-sync-instance=<name>` を持つもの）も同様に作成・更新・削除します。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください。`firebase deploy` を先に実行することもできます |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | 全ターゲットを巡り、実際のイベントが書き込むはずの値を書き込みます。ソースが存在しない場合は `onSourceDelete` に従います |
 | `verify [--fix] [--rule]... [--start-after]` | 全ターゲットを巡り、不整合（実際の値と期待値の差）を報告します。`--fix` を付けると修復します。不整合が残っていると終了コード 1 になります |
@@ -193,6 +197,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 - ハンドラはリクエストを認証しません。トリガー用サービスアカウントだけが呼べるように制限してください: `onRequest` の `invoker:`、または Cloud Run での `--no-allow-unauthenticated` + `roles/run.invoker` です。これがないと関数は公開状態になります。
 - 偽造・再送されたリクエストができるのは、再計算(読み取り)を強制することだけです。値は常に本物のソースから読み直され、`patch` が受け取るのもリクエストのデータではなく、メンバーシップを確認した上での読み直しです。
 - Scheduler ジョブはトリガー用サービスアカウントの OIDC トークンで関数を呼ぶので、同じ `invoker` の制限がかかります。`/schedule/<rule>` 経路自体は認証しません。
+- 継続タスクも同じトリガー用サービスアカウントの OIDC トークンで呼び返すので、同じ `invoker` の制限がかかります。
 - `setup` がトリガー用サービスアカウントに付与するのは、プロジェクトへの `roles/eventarc.eventReceiver` とサービスへの `roles/run.invoker` だけです。
 - 関数のランタイム用サービスアカウントには Firestore の読み書き権限（`roles/datastore.user`）が必要で、あなたの `build` / `patch` を実行します。既定のコンピュート用サービスアカウントではなく専用のものを使ってください。
 - ファンアウトにはイベント単位の上限がありません。`validate` の警告、`maxInstances`、`timeoutSeconds` で制御してください。
