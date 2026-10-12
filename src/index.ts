@@ -90,7 +90,6 @@ export {
   type Leaf,
 } from './types.js'
 export { ReadCounter, countingFirestore, type ReadCounts } from './counter.js'
-export { SourceCache } from './source-cache.js'
 export {
   continuationRunId,
   parseContinuationBody,
