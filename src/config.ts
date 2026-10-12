@@ -34,6 +34,14 @@ export interface Connection {
   targetField: string
   /** Behaviour when the source document is missing/deleted. */
   onSourceDelete: OnSourceDelete
+  /**
+   * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
+   * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
+   * which rebuilds this rule. Events for its collections are ignored.
+   */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /**
@@ -60,6 +68,14 @@ export interface AggregateRule {
   aggregate: 'count' | { sum: string }
   /** Field on the target that receives the number. */
   targetField: string
+  /**
+   * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
+   * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
+   * which rebuilds this rule. Events for its collections are ignored.
+   */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /** Sort key of a view source query: a field path, or `[field, direction]`. */
@@ -164,6 +180,14 @@ export interface ViewRule<S extends Record<string, ViewSource> = Record<string, 
    * looks like, keyed by document id. `rebuild` and `verify` never use it.
    */
   patch?(current: T, change: ViewChange, ctx: PatchContext): T | undefined | Promise<T | undefined>
+  /**
+   * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
+   * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
+   * which rebuilds this rule. Events for its collections are ignored.
+   */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /**
@@ -181,6 +205,14 @@ export interface ProjectionRule {
   target: string
   /** Paths copied from the base as they are. `'rest'` is not supported. */
   targetFields: string[]
+  /**
+   * Run this rule on a Cloud Scheduler cron (unix-cron, 5 fields, e.g. `'0 3 * * *'`) instead of
+   * on Firestore events: `deploy` creates a job that calls `/schedule/<name>` on the function,
+   * which rebuilds this rule. Events for its collections are ignored.
+   */
+  schedule?: string
+  /** IANA time zone for `schedule`. Default `Etc/UTC`. */
+  timeZone?: string
 }
 
 /** One rule of any kind. */
@@ -206,6 +238,8 @@ export interface DocSyncConfig {
 export interface ResolvedConnection extends Connection {
   sourcePattern: CollectionPattern
   targetPattern: CollectionPattern
+  /** Set when the rule runs on a schedule instead of on events. */
+  scheduled?: ResolvedSchedule
 }
 
 export interface ResolvedAggregate extends AggregateRule {
@@ -213,6 +247,14 @@ export interface ResolvedAggregate extends AggregateRule {
   targetPattern: CollectionPattern
   /** Source fields whose change requires a recompute (`idField` and/or the summed field). */
   watchedFields: string[]
+  /** Set when the rule runs on a schedule instead of on events. */
+  scheduled?: ResolvedSchedule
+}
+
+/** A rule's `schedule` after validation. */
+export interface ResolvedSchedule {
+  cron: string
+  timeZone: string
 }
 
 export interface ResolvedViewSource {
@@ -247,6 +289,8 @@ export interface ResolvedView {
   patch?: ViewRule['patch']
   /** Set when the view was made from `defineProjection`. */
   projection?: true
+  /** Set when the rule runs on a schedule instead of on events. */
+  scheduled?: ResolvedSchedule
 }
 
 export type ResolvedRule = ResolvedConnection | ResolvedAggregate | ResolvedView
@@ -372,6 +416,33 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   })
 
   const names = new Map<string, string>()
+  const CRON_FIELD = /^[A-Za-z0-9*,/?#LW-]+$/
+  const SAFE_RULE_NAME = /^[A-Za-z0-9_-]+$/
+  /** Resolves `schedule` / `timeZone`: `undefined` when the rule has none, `null` after reporting a problem. */
+  const schedule = (r: { name?: unknown; schedule?: unknown; timeZone?: unknown }, label: string): ResolvedSchedule | undefined | null => {
+    if (r.schedule === undefined) {
+      if (r.timeZone !== undefined) {
+        problems.push(`${label}: \`timeZone\` requires \`schedule\``)
+        return null
+      }
+      return undefined
+    }
+    const fields = typeof r.schedule === 'string' ? r.schedule.trim().split(/\s+/) : []
+    if (fields.length !== 5 || !fields.every((f) => CRON_FIELD.test(f))) {
+      problems.push(`${label}: \`schedule\` must be a unix-cron expression with 5 fields (e.g. "0 3 * * *")`)
+      return null
+    }
+    if (r.timeZone !== undefined && !str(r.timeZone)) {
+      problems.push(`${label}: \`timeZone\` must be an IANA time zone name`)
+      return null
+    }
+    if (!str(r.name) || !SAFE_RULE_NAME.test(r.name)) {
+      // The name becomes a Cloud Scheduler job name and a URL segment.
+      problems.push(`${label}: a scheduled rule's \`name\` must match [A-Za-z0-9_-]`)
+      return null
+    }
+    return { cron: fields.join(' '), timeZone: (r.timeZone as string | undefined) ?? 'Etc/UTC' }
+  }
   const writtenFields: { rule: string; target: CollectionPattern; field: string }[] = []
   const idFields: { target: CollectionPattern; field: string }[] = []
   const resolvedConnections: ResolvedConnection[] = []
@@ -449,8 +520,9 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
     if (target && okTarget) writtenFields.push({ rule: label, target, field: c.targetField })
     if (target && okId) idFields.push({ target, field: c.idField })
-    if (source && target && okId && okTarget && okFields) {
-      resolvedConnections.push({ ...c, sourcePattern: source, targetPattern: target })
+    const scheduled = schedule(c, label)
+    if (source && target && okId && okTarget && okFields && scheduled !== null) {
+      resolvedConnections.push({ ...c, sourcePattern: source, targetPattern: target, scheduled: scheduled ?? undefined })
     }
   })
 
@@ -495,9 +567,10 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
       }
     }
     if (target && okTarget) writtenFields.push({ rule: label, target, field: a.targetField })
-    if (source && target && okTarget && (okId || (hasIdParam && str(a.idParam))) && (a.aggregate === 'count' || sumField)) {
+    const scheduled = schedule(a, label)
+    if (source && target && okTarget && (okId || (hasIdParam && str(a.idParam))) && (a.aggregate === 'count' || sumField) && scheduled !== null) {
       const watched = [a.idField, sumField].filter((f): f is string => typeof f === 'string')
-      resolvedAggregates.push({ ...a, sourcePattern: source, targetPattern: target, watchedFields: watched })
+      resolvedAggregates.push({ ...a, sourcePattern: source, targetPattern: target, watchedFields: watched, scheduled: scheduled ?? undefined })
     }
   })
 
@@ -530,7 +603,16 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
     }
     if (!ok) return
     viewList.push({
-      rule: { kind: 'view', name: p.name, target: p.target, base: p.base, targetFields: p.targetFields, build: projectionBuild(p.targetFields) },
+      rule: {
+        kind: 'view',
+        name: p.name,
+        target: p.target,
+        base: p.base,
+        targetFields: p.targetFields,
+        build: projectionBuild(p.targetFields),
+        schedule: p.schedule,
+        timeZone: p.timeZone,
+      },
       i,
       label,
       projection: true,
@@ -733,7 +815,8 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
 
     if (target && okTargetFields) for (const f of explicit) writtenFields.push({ rule: label, target, field: f })
 
-    if (target && okTargetFields && okBuild && okPatch && sourcesOk && okBase) {
+    const scheduled = schedule(v, label)
+    if (target && okTargetFields && okBuild && okPatch && sourcesOk && okBase && scheduled !== null) {
       resolvedViews.push({
         kind: 'view',
         name: v.name,
@@ -748,6 +831,7 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         build: v.build,
         patch: v.patch,
         projection,
+        scheduled: scheduled ?? undefined,
       })
     }
   })
@@ -855,6 +939,31 @@ export function collectionsOf(config: {
     add(v?.base)
     const sources = v?.sources
     if (sources && typeof sources === 'object') for (const s of Object.values(sources)) add((s as { collection?: unknown })?.collection)
+  }
+  return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
+}
+
+/** Rules that run on a schedule instead of on events. */
+export function scheduledRules(config: ResolvedConfig): ResolvedRule[] {
+  return rulesOf(config).filter((r) => r.scheduled !== undefined)
+}
+
+/**
+ * Collections that need an Eventarc trigger: every source, target and base of the rules that
+ * run on events. A collection used only by scheduled rules gets no trigger.
+ */
+export function triggerCollectionsOf(config: ResolvedConfig): CollectionPattern[] {
+  const byKey = new Map<string, CollectionPattern>()
+  const add = (p: CollectionPattern | undefined) => {
+    if (p && !byKey.has(p.key)) byKey.set(p.key, p)
+  }
+  for (const r of rulesOf(config)) {
+    if (r.scheduled) continue
+    add(r.targetPattern)
+    if (r.kind === 'view') {
+      add(r.basePattern)
+      for (const s of r.sources) add(s.pattern)
+    } else add(r.sourcePattern)
   }
   return [...byKey.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0))
 }

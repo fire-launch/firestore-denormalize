@@ -11,6 +11,8 @@ import {
   defineView,
   needsCollectionGroupQuery,
   rulesOf,
+  scheduledRules,
+  triggerCollectionsOf,
   triggerName,
   validateConfig,
   writeTriggers,
@@ -535,5 +537,46 @@ describe('projections', () => {
     expect(problemsOf({ ...base, rules: [{ ...projection, exclude: ['email'] } as never] })).toContainEqual(expect.stringContaining('`exclude` does not apply to a projection'))
     expect(problemsOf({ ...base, rules: [{ ...projection, base: undefined } as never] })).toContainEqual(expect.stringContaining('projection "user-public": `base` is required'))
     expect(problemsOf({ ...base, rules: [{ ...projection, targetFields: 'displayName' } as never] })).toContainEqual(expect.stringContaining('projection "user-public": `targetFields` must be a non-empty array'))
+  })
+})
+
+describe('schedule', () => {
+  const scheduledAgg = defineAggregate({
+    name: 'daily-likes',
+    source: 'post/{postId}/like',
+    target: 'post',
+    idParam: 'postId',
+    aggregate: 'count',
+    targetField: 'likeCount',
+    schedule: '0 3 * * *',
+  })
+
+  it('resolves schedule and timeZone, defaulting to Etc/UTC', () => {
+    const r = validateConfig({ ...base, rules: [...base.rules, scheduledAgg, { ...scheduledAgg, name: 'tokyo', targetField: 'likeCountTokyo', timeZone: 'Asia/Tokyo' }] })
+    expect(r.aggregates[0]!.scheduled).toEqual({ cron: '0 3 * * *', timeZone: 'Etc/UTC' })
+    expect(r.aggregates[1]!.scheduled).toEqual({ cron: '0 3 * * *', timeZone: 'Asia/Tokyo' })
+    expect(scheduledRules(r).map((x) => x.name)).toEqual(['daily-likes', 'tokyo'])
+    expect(r.connections[0]!.scheduled).toBeUndefined()
+  })
+
+  it('rejects a malformed cron, timeZone without schedule, and an unsafe name', () => {
+    expect(problemsOf({ ...base, rules: [{ ...scheduledAgg, schedule: '0 3 * *' }] })).toContainEqual(expect.stringContaining('`schedule` must be a unix-cron expression with 5 fields'))
+    expect(problemsOf({ ...base, rules: [{ ...scheduledAgg, schedule: 'every day' }] })).toContainEqual(expect.stringContaining('`schedule` must be a unix-cron expression with 5 fields'))
+    expect(problemsOf({ ...base, rules: [{ ...scheduledAgg, schedule: undefined, timeZone: 'Asia/Tokyo' }] })).toContainEqual(expect.stringContaining('`timeZone` requires `schedule`'))
+    expect(problemsOf({ ...base, rules: [{ ...scheduledAgg, name: 'daily likes' }] })).toContainEqual(expect.stringContaining('a scheduled rule\'s `name` must match [A-Za-z0-9_-]'))
+  })
+
+  it('carries schedule from a projection to its view', () => {
+    const r = validateConfig({ ...base, rules: [defineProjection({ name: 'user-public', base: 'user', target: 'userPublic', targetFields: ['displayName'], schedule: '*/30 * * * *' })] })
+    expect(r.views[0]!.scheduled).toEqual({ cron: '*/30 * * * *', timeZone: 'Etc/UTC' })
+  })
+
+  it('derives Eventarc trigger collections from event-driven rules only', () => {
+    // base.rules: connection category -> post (events). Scheduled aggregate: post/{postId}/like -> post.
+    const r = validateConfig({ ...base, rules: [...base.rules, scheduledAgg] })
+    expect(collectionsOf(r).map((p) => p.raw).sort()).toEqual(['category', 'post', 'post/{postId}/like'])
+    expect(triggerCollectionsOf(r).map((p) => p.raw).sort()).toEqual(['category', 'post'])
+    const onlyScheduled = validateConfig({ ...base, rules: [scheduledAgg] })
+    expect(triggerCollectionsOf(onlyScheduled)).toEqual([])
   })
 })
