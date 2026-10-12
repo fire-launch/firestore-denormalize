@@ -256,21 +256,23 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
   if (schedulerDisabled) {
     if (jobs.length) log('  Cloud Scheduler API is not enabled; run `doc-sync setup` first.')
   } else {
-    jobPlan = planJobs(jobs, existingJobs, undefined)
     let serviceUrl: string | undefined
-    if (jobPlan.create.length || jobPlan.update.length) {
+    if (jobs.length) {
       try {
         serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim() || undefined
       } catch (err) {
         if (!(err instanceof CommandError && NOT_FOUND.test(err.stderr))) throw err
       }
       if (!serviceUrl && runner.dryRun) serviceUrl = 'https://<service-url>'
-      if (serviceUrl) {
-        jobPlan = planJobs(jobs, existingJobs, { config, project, serviceUrl })
-      } else {
+    }
+    if (serviceUrl) {
+      jobPlan = planJobs(jobs, existingJobs, { config, project, serviceUrl })
+    } else {
+      jobPlan = planJobs(jobs, existingJobs, undefined)
+      if (jobs.length) {
+        jobPlan = { ...jobPlan, create: [], update: [] }
         log(`  Cloud Run service "${config.service}" does not exist yet in ${config.serviceRegion}; jobs need its URL.`)
         log('  Deploy the function first, then run `doc-sync deploy` again.')
-        jobPlan = { ...jobPlan, create: [], update: [] }
       }
     }
 

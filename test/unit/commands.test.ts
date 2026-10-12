@@ -175,6 +175,32 @@ describe('deploy with scheduled rules', () => {
     expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([expect.stringMatching(/^gcloud scheduler jobs create http doc-sync-daily-likes .*--uri=https:\/\/docsync-abc-an\.a\.run\.app\/schedule\/daily-likes /)])
   })
 
+  it('updates a job whose settings drifted from the config, even though the job already exists', () => {
+    const existingJob = JSON.stringify([
+      {
+        name: 'projects/my-proj/locations/asia-northeast1/jobs/doc-sync-daily-likes',
+        description: 'doc-sync-instance=doc-sync',
+        schedule: '0 4 * * *',
+        timeZone: 'Etc/UTC',
+        httpTarget: {
+          uri: 'https://docsync-abc-an.a.run.app/schedule/daily-likes',
+          httpMethod: 'POST',
+          oidcToken: { serviceAccountEmail: 'doc-sync-trigger@my-proj.iam.gserviceaccount.com', audience: 'https://docsync-abc-an.a.run.app' },
+        },
+        retryConfig: { retryCount: 3, minBackoffDuration: '60s' },
+      },
+    ])
+    const { runner, mutations } = fakeRunner({
+      'gcloud eventarc triggers list': '[]',
+      'gcloud scheduler jobs list': existingJob,
+      'gcloud run services describe docsync': 'https://docsync-abc-an.a.run.app\n',
+    })
+    deploy(sctx(runner), {})
+    const scheduler = mutations.filter((m) => m.startsWith('gcloud scheduler'))
+    expect(scheduler).toHaveLength(1)
+    expect(scheduler[0]).toMatch(/^gcloud scheduler jobs update http doc-sync-daily-likes /)
+  })
+
   it('skips job creation with a message when the service does not exist yet', () => {
     const lines: string[] = []
     const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': '[]', 'gcloud run services describe docsync': notFound })
