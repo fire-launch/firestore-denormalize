@@ -6,134 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [0.12.0] - 2026-10-13
 
-### Added
-
-- `defer: '<duration>'` on any rule (`'90s'`, `'10m'`, `'1h'`; not with `schedule`).
-- Under `defer`, an event only marks the changed source or target document. A Cloud Tasks task recomputes each marked document once per interval.
-- Lifecycle stays immediate under `defer`: a base created or deleted, a target's first value, a hand-deleted base-view target.
-- If the mark cannot be queued, the event answers 500 and Eventarc retries it.
-- `POST /schedule/<rule>` with `{ flush: { unit, path } }` recomputes one marked document by hand.
-- `setup` enables the Cloud Tasks API and creates the continuation queue for deferred rules too. `validate` lists deferred rules and their flush cost.
-- Within one event, a source document is read once and shared across rules. A read older than the target it is combined with is never reused.
-
-### Changed
-
-- `ContinuationBody` gains an optional `flush` field, and its cursor fields become optional. `ContinuationTask` gains an optional `scheduleTime`.
-- A custom `schedule.enqueue` must honour `scheduleTime` for deferred rules and treat a duplicate task id as success.
-- `RuleResult.action` can now be `defer`.
-
-## [0.11.0] - 2026-10-13
-
-### Changed
-
-- Trigger and job names now end in a short hash, so two instances never produce the same name. Collection ids ending in `_` are now accepted.
-- The next `deploy` creates the new names, then deletes the old ones. Events in the switch-over minute may be missed or delivered twice, so run `doc-sync verify --fix` afterwards. A paused job comes back enabled.
-- `setup` fixes the retry policy of an existing continuation queue when it differs from the expected one.
-- New exports `jobName` and `resourceHash`. Do not run an older CLI against the same project afterwards; it would rename the resources back.
-
-## [0.10.0] - 2026-10-12
+First published release.
 
 ### Added
 
-- Scheduled runs that stop on their time budget enqueue a Cloud Tasks continuation (`<instance>-schedule` queue, task `<rule>-<runId>-<chunk>`, cursor in the task body); the JSON answer gains `runId`, `chunk`, `continued`. `setup` creates the queue and, with `--runtime-service-account <email>`, grants the runtime SA `roles/cloudtasks.enqueuer` and `roles/iam.serviceAccountUser`. New handler options `schedule.project`, `schedule.serviceUrl`, `schedule.enqueue`, `schedule.continue`.
-- `/schedule/<rule>` accepts a JSON body `{ startAfter, runId, chunk, startedAt }` to resume a pass.
-- Typed configs: `schedule` / `timeZone` test coverage for connections and projections.
-- New runtime dependency: `google-auth-library` (Cloud Tasks REST with ADC).
-- The 500 answer of `/schedule/<rule>` now includes `runId` and `chunk`.
-- `setup` creates the queue with `--max-attempts=5 --min-backoff=60s`.
-
-## [0.9.0] - 2026-10-12
-
-### Added
-
-- `schedule` (and `timeZone`) on any rule: the rule is synced by a Cloud Scheduler job calling `POST /schedule/<rule>` on the same function instead of by Firestore events. `deploy` creates / updates / deletes the jobs; `setup` enables the Cloud Scheduler API; Eventarc triggers are created only for collections used by event-driven rules.
-- The handler answers `/schedule/<rule>` with a time-boxed `rebuild` (`schedule.budgetMs`, default 20 minutes) and a JSON result including `completed`.
-- `rebuild()` accepts `budgetMs` and reports `completed`.
-- `validate` lists scheduled rules and estimates their cost per run.
-- `/schedule/<rule>` accepts POST only (405 otherwise).
-
-## [0.8.0] - 2026-10-12
-
-### Changed
-
-- **Breaking:** a view declares `targetFields: string[]` instead of `targetField`. `build` returns an object holding the declared paths (nested); a declared path whose value is `undefined` is deleted; undeclared paths are logged once and ignored. `patch` receives and returns the same object shape.
-- `verify` mismatches carry `issue: 'value' | 'missing' | 'orphan'`; `field` is set for `value` only.
-- Handler results (`RuleResult.action`) may now be `create` or `remove` (target document created / removed).
-- The view source key `base` is reserved (it names the base in `RuleResult.source`); rename such a source.
-
-### Added
-
-- `base` on a view: the target `target/{id}` exists exactly when `base/{id}` exists, judged by a fresh read on every event. The base document is passed to `build` / `patch` as `base`. `sources` may be omitted when `base` is set.
-- `'rest'` in `targetFields` (views with `base`): write and prune every root key no rule declares.
-- `defineProjection`: a view with `base` and no `build` that mirrors the declared paths into another collection.
-- `rebuild` / `verify` walk the base collection first for base views (creating / reporting missing targets), then the target collection (removing / reporting orphans).
-- `validate` prints a base trigger line and counts the base read.
-
-## [0.7.0] - 2026-10-12
-
-### Changed
-
-- `defineConfig` takes a single `rules` array instead of `connections` / `aggregates` / `views`; rules are created with `defineConnection` / `defineAggregate` / `defineView` (or carry a `kind`). `typed<C>()` returns the three helpers as well.
-
-## [0.6.0] - 2026-10-11
-
-### Changed
-
-- A target whose `idField` now points at a missing source follows `onSourceDelete`, the same treatment `rebuild` gives a missing source (was: left alone).
-- A `targetField` removed by an application write (e.g. `set()` without merge) is recomputed on the next event for that document.
-- Trigger names are derived from collection ids lower-cased (`chatRooms` → `chatrooms`).
-- A view's `patch` receives `after: undefined` when the changed document no longer belongs to the target, not only when it was deleted.
-- `undefined` is stripped from the values a view's `build` / `patch` returns before they are written (map entries dropped, array elements become `null`).
-- `--emulator-host` applies to `rebuild` and `verify`, not only `dev`.
-- The `verify` library log line no longer includes the mismatch's actual/expected values.
-
-### Added
-
-- Validation for multi-region `serviceRegion`, `service` names, reserved ids/field names, overlapping collection patterns, and `idField` aggregates whose collection group would be ambiguous.
-- `ce-type`, request body size, and value nesting depth limits on incoming events.
-- A read of the changed document once per page on `refField` fan-out.
-
-### Removed
-
-Removed from the public API: `Processor`, `ConnectionResult`, `SyncOptions`, `DeletedSource`, `CheckResult`, `CheckOptions`, `resolveConfig`. Added: `EncodeOptions`.
-
-### Fixed
-
-- Retries no longer reuse a page's source cache.
-- `BulkWriter` is closed on failure.
-- Windows argument quoting for `gcloud` / `firebase` commands.
-
-## [0.5.0] - 2026-10-11
-
-### Added
-
-- Cost estimate in `validate` (`--strict`), runtime read counters.
-
-## [0.4.0] - 2026-10-11
-
-### Added
-
-- Typed config: `typed<Collections>()`.
-
-## [0.3.0] - 2026-10-09
-
-### Added
-
-- Views (`build` + `patch`).
-- `doc-sync verify`.
-
-## [0.2.0] - 2026-10-08
-
-### Added
-
-- Counts and sums.
-- Subcollections.
-- `rebuild`.
-- `doc-sync dev`.
-
-## [0.1.0] - 2026-10-08
-
-### Added
-
-- Copy sync.
-- `validate` / `setup` / `deploy`.
+- One Cloud Run function and one Eventarc trigger per collection keep denormalized documents in sync.
+- Values are re-read from Firestore, never taken from the event, and every write is conditional on the target's `updateTime`.
+- `defineView`: the general rule. Declared `targetFields` of a target are kept equal to `build(...)` over its sources. Optional `base` ties the target's existence to a same-id document; optional `patch` updates incrementally.
+- `defineProjection`: a view with `base` and no `build`, for read models that copy declared fields.
+- `defineConnection`: copies fields of a source document into the documents that point at it.
+- `defineAggregate`: keeps a count or sum from an aggregation query.
+- `typed<Collections>()` gives the config and `build` typed sources and targets.
+- `schedule: '<cron>'` runs a rule from Cloud Scheduler instead of events. Runs over the time budget continue in chunks through a Cloud Tasks queue.
+- `defer: '<duration>'` keeps a rule event-driven but recomputes each changed document at most once per interval through Cloud Tasks. Lifecycle events stay immediate.
+- Within one event, a source document is read once and shared across rules, never older than the target it is combined with.
+- CLI `doc-sync`: `validate` (cost estimate, write chains, warnings), `setup` (service account, IAM, APIs, queue), `deploy` (triggers and jobs), `rebuild`, `verify --fix`, `dev` (emulator bridge).
+- Trigger, job and queue names carry a hash so instances never collide, and `deploy` finds its resources by an ownership marker.

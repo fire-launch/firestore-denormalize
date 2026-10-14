@@ -26,8 +26,6 @@
 
 `<hash>` はインスタンスとコレクション（またはルール）から作る 8 文字です。インスタンス間で名前が衝突せず、63 文字の制限にも収まります。長い名前はハッシュの前で切り詰めます。`deploy` は名前ではなく所有者の印で自分のリソースを見つけるので、この名前を手で扱うことはありません。
 
-0.10 からの移行: 次の `deploy` でトリガーとジョブの名前が変わります。切り替えの 1 分前後のイベントを取りこぼすことがあるので、その後に `doc-sync verify --fix` を実行してください。
-
 ```ts
 export default defineConfig({
   name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger',

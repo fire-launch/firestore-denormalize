@@ -26,8 +26,6 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 
 `<hash>` is 8 characters derived from the instance and the collection or rule. It keeps names unique across instances and within the 63-character limit. Long names are shortened before the hash. `deploy` finds its own resources by an ownership marker, not by name, so you never type these names.
 
-Upgrading from 0.10: the next `deploy` renames triggers and jobs. Run `doc-sync verify --fix` afterwards, because events in the switch-over minute may be missed.
-
 ```ts
 export default defineConfig({
   name: 'doc-sync', region: 'asia-northeast1', service: 'docsync', serviceAccount: 'doc-sync-trigger',
