@@ -207,12 +207,14 @@ describe('estimateCost', () => {
 })
 
 describe('cronRunsPerDay', () => {
-  it('averages matches per day over a 4-week window starting 2026-01-01 UTC', () => {
+  it('averages matches per day over the 365 days of 2025', () => {
     expect(cronRunsPerDay('* * * * *')).toBe(1440)
     expect(cronRunsPerDay('0 3 * * *')).toBe(1)
     expect(cronRunsPerDay('*/15 * * * *')).toBe(96)
-    expect(cronRunsPerDay('0 9-17 * * 1-5')).toBeCloseTo((9 * 20) / 28, 5)
-    expect(cronRunsPerDay('0 0 1 * *')).toBeCloseTo(1 / 28, 10)
+    expect(cronRunsPerDay('0 9-17 * * 1-5')).toBeCloseTo((9 * 261) / 365, 5)
+    expect(cronRunsPerDay('0 0 1 * *')).toBeCloseTo(12 / 365, 6)
+    expect(cronRunsPerDay('0 0 31 * *')).toBeCloseTo(7 / 365, 6)
+    expect(cronRunsPerDay('0 0 * 2 *')).toBeCloseTo(28 / 365, 6)
     expect(cronRunsPerDay('0 0 L * *')).toBeUndefined()
   })
 })

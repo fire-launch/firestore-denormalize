@@ -83,6 +83,14 @@ describe('.firebaserc lookup', () => {
     const resolved = resolveProject(inputs({ cwd: dir, gcloudDefault: () => 'gcloud-proj' }))
     expect(resolved).toEqual({ project: 'gcloud-proj', source: 'gcloud' })
   })
+
+  it('does not treat .firebaserc as explicit when it names several aliases', () => {
+    dir = mkdtempSync(join(tmpdir(), 'doc-sync-rc-'))
+    writeFileSync(join(dir, '.firebaserc'), JSON.stringify({ projects: { default: 'a', staging: 'b' } }))
+    const resolved = resolveProject(inputs({ cwd: dir, gcloudDefault: () => 'gcloud-proj' }))
+    expect(resolved?.source).not.toBe('firebaserc')
+    expect(resolved).toEqual({ project: 'gcloud-proj', source: 'gcloud' })
+  })
 })
 
 describe('describeProjectSource', () => {

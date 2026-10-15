@@ -59,10 +59,11 @@ function formatRunsPerDay(n: number): string {
 }
 
 /**
- * Average runs per day of a 5-field unix-cron over a 4-week window; `undefined` for syntax this
- * evaluator does not know (names, `?`, `L`, `W`, `#`). Evaluates every minute from
- * 2026-01-01T00:00 UTC for 28 days and divides matches by 28; the time zone does not matter for
- * a 4-week average.
+ * Average runs per day of a 5-field unix-cron over a full year; `undefined` for syntax this
+ * evaluator does not know (names, `?`, `L`, `W`, `#`). Walks the 365 days of 2025 (a non-leap
+ * year, so every calendar date and weekday occurs its usual number of times) and, for each day
+ * whose month and day-of-month/day-of-week match, adds the number of minute/hour combinations
+ * that run that day; divides the total by 365. The time zone does not matter for a yearly average.
  */
 export function cronRunsPerDay(cron: string): number | undefined {
   const fields = cron.trim().split(/\s+/)
@@ -78,19 +79,18 @@ export function cronRunsPerDay(cron: string): number | undefined {
   const domRestricted = domSpec !== '*'
   const dowRestricted = dowSpec !== '*'
 
-  const start = Date.UTC(2026, 0, 1, 0, 0)
-  let matches = 0
-  for (let i = 0; i < 28 * 1440; i++) {
-    const t = new Date(start + i * 60000)
-    if (!minuteSet.has(t.getUTCMinutes())) continue
-    if (!hourSet.has(t.getUTCHours())) continue
+  const start = Date.UTC(2025, 0, 1, 0, 0)
+  const runsPerMatchingDay = minuteSet.size * hourSet.size
+  let total = 0
+  for (let day = 0; day < 365; day++) {
+    const t = new Date(start + day * 86400000)
     if (!monthSet.has(t.getUTCMonth() + 1)) continue
     const domMatch = domSet.has(t.getUTCDate())
     const dowMatch = dowSet.has(t.getUTCDay())
     const dayMatches = domRestricted && dowRestricted ? domMatch || dowMatch : domRestricted ? domMatch : dowRestricted ? dowMatch : true
-    if (dayMatches) matches++
+    if (dayMatches) total += runsPerMatchingDay
   }
-  return matches / 28
+  return total / 365
 }
 
 /** One cron field (a star, a number, a range, a stepped star or range, comma lists); `null` for anything else. */

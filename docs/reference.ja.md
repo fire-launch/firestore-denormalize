@@ -78,7 +78,7 @@ export default defineConfig({
 - 継続に必要なもの: キュー（`setup` が作成）と、関数の実行サービスアカウントに対する `roles/cloudtasks.enqueuer`（キュー）および トリガー用サービスアカウントに対する `roles/iam.serviceAccountUser`（`setup --runtime-service-account <email>` が両方を付与）。プロジェクトは `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントから、サービス URL はリクエストの `host` ヘッダーから求めます。`schedule.project` / `schedule.serviceUrl` で上書きできます。`schedule.continue: false` で継続を無効化、`schedule.enqueue` で Cloud Tasks 呼び出しを置き換えられます（テスト、エミュレータ、他基盤）。
 - キューは失敗した継続を最大 5 回、60 秒以上の間隔で再試行します。スケジュールを外したルールへの継続は 404 になり、その回数で止まります。
 - 一周が cron 間隔より長いと次の一周と重なります。定常状態では（一周の所要時間 ÷ cron 間隔）本の連鎖が同時に走り、読み取りが倍増して `maxInstances` を奪い合います。cron 間隔は一周より長くしてください（実行ログの `durationMs` と `chunk` で測れます）。関数が 429/503 を返すと Cloud Tasks はチャンクを最大 5 回（60 秒以上の間隔）再試行してから捨て、連鎖は静かに終わります。Cloud Tasks のログにしか残らず、次の cron で先頭からやり直します。
-- エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` に「タスクの `body` を本文にしてハンドラをもう一度呼ぶ関数」を渡す（テストスイートがそうしています）か、予算の無い `doc-sync rebuild --rule <name>` を使ってください。
+- エミュレータ: `FIRESTORE_EMULATOR_HOST` を設定すると、タスクは Cloud Tasks を使わずタイマーで関数プロセス内で実行されます（`schedule.local`）。
 - 実際のデプロイに対して手動で実行するには `doc-sync run <rule>` を使います。トリガー用サービスアカウントになりすまして得た ID トークンで `POST /schedule/<rule>` を 1 回呼びます。呼び出す側にそのサービスアカウントへの `roles/iam.serviceAccountTokenCreator` が必要です。エミュレータに対しては `doc-sync rebuild --rule <name>`、または関数への `POST /schedule/<name>`（CloudEvent ヘッダーは不要）を直接使ってください。
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
 - 関数の `timeoutSeconds` は予算より長くしてください。イベントのみなら 300、スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上にします（[推奨する関数の設定](#推奨する関数の設定) を参照）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
@@ -193,7 +193,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `run <rule>` | Cloud Scheduler と同じ方法でスケジュールルールを 1 回実行します: トリガー用サービスアカウントになりすまして得た ID トークンで `POST /schedule/<rule>` を呼びます（`gcloud auth print-identity-token --impersonate-service-account ... --audiences <サービス URL>`）。呼び出す側にそのサービスアカウントへの `roles/iam.serviceAccountTokenCreator` が必要です。スケジュールルール専用です |
 | `dev --url <handler>` | Firestore エミュレータとハンドラを CloudEvents で橋渡しします。エミュレータ専用です |
 
-- `--config` の既定は `./doc-sync.config.ts` です。`--project` は次の順で解決します: `--project`、`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`、`.firebaserc`、gcloud のアクティブな設定。どのコマンドも `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)` を表示します。
+- `--config` の既定は `./doc-sync.config.ts` です。`--project` は次の順で解決します: `--project`、`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`、`.firebaserc`（プロジェクトが 1 つだけのとき）、gcloud のアクティブな設定。どのコマンドも `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)` を表示します。
 - `setup`・`deploy`・`rebuild`（`--dry-run` なし）・`verify --fix`・`run` は、プロジェクトが gcloud のアクティブな設定からしか来ていない場合は実行を拒否します。`--project`、`GOOGLE_CLOUD_PROJECT`、`.firebaserc` のいずれかで明示してください。
 - `rebuild` / `verify` / `dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` または `--emulator-host` が設定されていればエミュレータを使います。
 - `--start-after` は最初に処理するルールにしか効きません。`--rule` と組み合わせて使ってください。
@@ -248,7 +248,7 @@ defer ルールの印をつけるだけのイベントは reads `0 (+ 1 task)`�
 ## 後片付け
 
 - Cloud Tasks のキューを削除すると、同じ名前のキューは 7 日間作り直せません。
-- 削除したトリガー用サービスアカウントは 30 日間復元できます。それを過ぎると `setup` が新しいものを作成します。
+- 削除したトリガー用サービスアカウントは 30 日間復元できます。`setup` を再実行すると同じメールアドレスの新しいアカウントが作られますが、これは別の ID です。元のアカウントに戻したい場合は先に復元してください。
 
 ## セキュリティ
 

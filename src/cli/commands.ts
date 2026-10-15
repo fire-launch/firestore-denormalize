@@ -43,11 +43,16 @@ export interface Context {
   log: (line?: string) => void
 }
 
+/** Logs the resolved project and where it came from; the first line of every command's output. */
+export function printProject(ctx: Context): void {
+  ctx.log(`Project:         ${ctx.project} (${describeProjectSource(ctx.projectSource)})`)
+}
+
 export function printSummary(ctx: Context): void {
   const { config, log } = ctx
   log(`Config:          ${ctx.configPath}`)
   log(`Instance:        ${config.name}`)
-  log(`Project:         ${ctx.project} (${describeProjectSource(ctx.projectSource)})`)
+  printProject(ctx)
   log(`Region:          ${config.region}`)
   log(`Database:        ${config.database}`)
   log(`Service:         ${config.service} (${config.serviceRegion})`)
@@ -159,6 +164,7 @@ export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
 const RUNTIME_SA_PROJECT = /@([a-z][a-z0-9-]*)\.iam\.gserviceaccount\.com$/
 
 export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {}): void {
+  printProject(ctx)
   requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'setup')
   const { config, project, runner, log } = ctx
   const email = serviceAccountEmail(config, project)
@@ -403,13 +409,23 @@ type FetchLike = (
 
 /** Calls a scheduled rule's `/schedule/<rule>` once, impersonating the trigger service account for an ID token (same identity Cloud Scheduler uses). */
 export async function run(ctx: Context, opts: { rule: string; fetchImpl?: FetchLike }): Promise<void> {
+  printProject(ctx)
+  if (ctx.runner.dryRun) throw new Error('run does not support --dry-run')
   requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'run')
   const { config, project, runner, log } = ctx
   const rule = rulesOf(config).find((r) => r.name === opts.rule)
   if (!rule?.scheduled) {
     throw new Error(`rule "${opts.rule}" is not scheduled; deferred rules are flushed by their tasks`)
   }
-  const serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim()
+  let serviceUrl: string
+  try {
+    serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim()
+  } catch (err) {
+    if (err instanceof CommandError && NOT_FOUND.test(err.stderr)) {
+      throw new Error(`service ${config.service} not found in ${config.serviceRegion}; deploy the function first`)
+    }
+    throw err
+  }
   if (!serviceUrl) {
     throw new Error(`service ${config.service} not found in ${config.serviceRegion}; deploy the function first`)
   }
@@ -423,7 +439,13 @@ export async function run(ctx: Context, opts: { rule: string; fetchImpl?: FetchL
   }
   const url = `${serviceUrl}/schedule/${opts.rule}`
   const doFetch = opts.fetchImpl ?? (fetch as FetchLike)
-  const res = await doFetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' })
+  let res: { ok: boolean; status: number; text(): Promise<string> }
+  try {
+    res = await doFetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(`request ended before the run finished (${message}); the run continues on the server, see its logs`)
+  }
   const text = await res.text()
   let pretty = text
   try {
@@ -481,10 +503,11 @@ export async function rebuild(
   ctx: Context,
   opts: { rules?: string[]; dryRun: boolean; startAfter?: string; pageSize?: number },
 ): Promise<void> {
-  if (!opts.dryRun) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'rebuild')
+  printProject(ctx)
+  const emulator = process.env.FIRESTORE_EMULATOR_HOST
+  if (!opts.dryRun && !emulator) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'rebuild')
   const { log } = ctx
   const firestore = await cliFirestore(ctx)
-  const emulator = process.env.FIRESTORE_EMULATOR_HOST
   log(`Rebuilding ${opts.rules?.length ? opts.rules.join(', ') : 'all rules'} in ${emulator ? `emulator ${emulator}` : `project ${ctx.project}`}${opts.dryRun ? ' (dry run)' : ''}`)
   log()
   const results = await runRebuild(ctx.config, {
@@ -519,10 +542,11 @@ export async function verify(
   ctx: Context,
   opts: { rules?: string[]; fix: boolean; startAfter?: string; pageSize?: number },
 ): Promise<boolean> {
-  if (opts.fix) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'verify')
+  printProject(ctx)
+  const emulator = process.env.FIRESTORE_EMULATOR_HOST
+  if (opts.fix && !emulator) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'verify')
   const { log } = ctx
   const firestore = await cliFirestore(ctx)
-  const emulator = process.env.FIRESTORE_EMULATOR_HOST
   log(`Verifying ${opts.rules?.length ? opts.rules.join(', ') : 'all rules'} in ${emulator ? `emulator ${emulator}` : `project ${ctx.project}`}${opts.fix ? ' (fix)' : ''}`)
   log()
   const results = await runVerify(ctx.config, {
@@ -558,6 +582,7 @@ export async function verify(
 }
 
 export async function dev(ctx: Context, opts: { url: string; emulatorHost?: string }): Promise<void> {
+  printProject(ctx)
   const { log } = ctx
   if (opts.emulatorHost) process.env.FIRESTORE_EMULATOR_HOST = opts.emulatorHost
   if (!process.env.FIRESTORE_EMULATOR_HOST) {

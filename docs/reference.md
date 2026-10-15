@@ -78,7 +78,7 @@ Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZon
 - The continuation needs: the queue (created by `setup`), and on the function's runtime service account `roles/cloudtasks.enqueuer` on the queue and `roles/iam.serviceAccountUser` on the trigger service account (`setup --runtime-service-account <email>` grants both). The handler finds the project from `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client and the service URL from the request's `host` header; override with `schedule.project` / `schedule.serviceUrl`. `schedule.continue: false` turns the continuation off; `schedule.enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms).
 - The queue retries a failed continuation up to 5 times with at least 60 s backoff; a continuation for a rule that is no longer scheduled gets 404 and stops after those attempts.
 - A pass longer than the cron interval overlaps the next one: in steady state about (pass duration ÷ cron interval) chains run at once, multiplying reads and competing for `maxInstances`. Choose a cron interval longer than a full pass (watch `durationMs` and `chunk` in the run logs). If the function answers 429/503, Cloud Tasks retries a chunk up to 5 times (≥ 60 s apart) and then drops it; the chain ends silently — only the Cloud Tasks logs show it — and the next cron starts over.
-- Emulator: there is no Cloud Tasks emulator. Pass `schedule.enqueue` a function that calls the handler again with the task's `body` as the request body (the test suite does this), or run `doc-sync rebuild --rule <name>` which has no budget.
+- Emulator: with `FIRESTORE_EMULATOR_HOST` set, tasks run inside the function process with timers (`schedule.local`). No Cloud Tasks needed.
 - To run a scheduled rule by hand against a real deployment: `doc-sync run <rule>` calls `POST /schedule/<rule>` once with an ID token obtained by impersonating the trigger service account; the caller needs `roles/iam.serviceAccountTokenCreator` on it. Against the emulator: `doc-sync rebuild --rule <name>`, or `POST /schedule/<name>` on the function directly (no CloudEvent headers needed).
 - Schedule or events, never both: a scheduled rule ignores target creation too, so its fields appear on the first run after the target exists.
 - Set the function's `timeoutSeconds` above the budget: 300 for event-only deployments; ≥ `schedule.budgetMs` (default 20 min → 1800) once a rule is scheduled (see [Recommended function settings](#recommended-function-settings)). Otherwise the platform cuts a long run before it can stop cleanly.
@@ -193,7 +193,7 @@ The handler is `(req, res) => Promise<void>` and also works with Express or Node
 | `run <rule>` | Calls a scheduled rule once the way Cloud Scheduler would: `POST /schedule/<rule>` with an ID token obtained by impersonating the trigger service account (`gcloud auth print-identity-token --impersonate-service-account ... --audiences <service url>`). The caller needs `roles/iam.serviceAccountTokenCreator` on that account. Scheduled rules only |
 | `dev --url <handler>` | Bridges the Firestore emulator to the handler as CloudEvents. Emulator only |
 
-- `--config` defaults to `./doc-sync.config.ts`. `--project` resolves in order: `--project`, `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`, `.firebaserc`, gcloud's active config; every command prints `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)`.
+- `--config` defaults to `./doc-sync.config.ts`. `--project` resolves in order: `--project`, `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`, `.firebaserc` (when it names a single project), gcloud's active config; every command prints `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)`.
 - `setup`, `deploy`, `rebuild` (without `--dry-run`), `verify --fix` and `run` refuse a project that comes only from gcloud's active config: name it with `--project`, `GOOGLE_CLOUD_PROJECT`, or `.firebaserc`.
 - `rebuild` / `verify` / `dev` use Application Default Credentials, or the emulator when `FIRESTORE_EMULATOR_HOST` or `--emulator-host` is set.
 - `--start-after` applies to the first rule processed: use it with `--rule`.
@@ -248,7 +248,7 @@ A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) an
 ## Teardown
 
 - Deleting the Cloud Tasks queue blocks recreating a queue of the same name for 7 days.
-- A deleted trigger service account can be undeleted for 30 days; after that, `setup` creates a new one.
+- A deleted trigger service account can be undeleted for 30 days. Rerunning `setup` creates a new account with the same email, which is a different identity; undelete first if you want the old one back.
 
 ## Security
 

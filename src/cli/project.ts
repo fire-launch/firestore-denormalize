@@ -79,6 +79,7 @@ function readFirebaserc(cwd: string): string | undefined {
   }
 }
 
+/** Counts `.firebaserc` as explicit only when `projects` names exactly one alias; several aliases is ambiguous. */
 function readFirebasercFile(path: string): string | undefined {
   let text: string
   try {
@@ -87,8 +88,9 @@ function readFirebasercFile(path: string): string | undefined {
     return undefined
   }
   try {
-    const parsed = JSON.parse(text) as { projects?: { default?: string } }
-    return parsed.projects?.default
+    const parsed = JSON.parse(text) as { projects?: Record<string, string> }
+    const aliases = Object.values(parsed.projects ?? {})
+    return aliases.length === 1 ? aliases[0] : undefined
   } catch {
     return undefined
   }

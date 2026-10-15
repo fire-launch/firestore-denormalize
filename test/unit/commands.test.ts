@@ -192,6 +192,30 @@ describe('run', () => {
     const fetchImpl = async () => ({ ok: false, status: 403, text: async () => JSON.stringify({ error: 'nope' }) })
     await expect(run(rctx(runner), { rule: 'daily-likes', fetchImpl })).rejects.toThrow(/403/)
   })
+
+  it('does not support --dry-run', async () => {
+    const { runner } = fakeRunner({})
+    await expect(run({ ...rctx(runner), runner: { ...runner, dryRun: true } }, { rule: 'daily-likes' })).rejects.toThrow('run does not support --dry-run')
+  })
+
+  it('reports the service as missing when gcloud answers NOT_FOUND', async () => {
+    const notFoundService = new CommandError('gcloud', 1, 'ERROR: (gcloud.run.services.describe) NOT_FOUND: Service not found')
+    const { runner } = fakeRunner({ 'gcloud run services describe': notFoundService })
+    await expect(run(rctx(runner), { rule: 'daily-likes' })).rejects.toThrow('service docsync not found in asia-northeast1; deploy the function first')
+  })
+
+  it('reports a fetch failure as continuing on the server', async () => {
+    const { runner } = fakeRunner({
+      'gcloud run services describe': 'https://docsync-abc-an.a.run.app\n',
+      'gcloud auth print-identity-token': 'fake-token',
+    })
+    const fetchImpl = async () => {
+      throw new Error('socket hang up')
+    }
+    await expect(run(rctx(runner), { rule: 'daily-likes', fetchImpl })).rejects.toThrow(
+      'request ended before the run finished (socket hang up); the run continues on the server, see its logs',
+    )
+  })
 })
 
 describe('deploy', () => {

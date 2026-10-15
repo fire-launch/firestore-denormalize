@@ -299,7 +299,11 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     const { res, status } = collectingResponse()
     try {
       await runScheduled(task.rule, { headers: { host: 'local' }, url: `/schedule/${encodeURIComponent(task.rule)}`, method: 'POST', body: task.body }, res)
-      logger.info('doc-sync: local task ran', { rule: task.rule, task: task.id, status: status() })
+      if (status() >= 400) {
+        logger.error('doc-sync: local task failed', { rule: task.rule, task: task.id, status: status() })
+      } else {
+        logger.info('doc-sync: local task ran', { rule: task.rule, task: task.id, status: status() })
+      }
     } catch (err) {
       logger.error('doc-sync: local task failed', { rule: task.rule, task: task.id, error: err })
     }

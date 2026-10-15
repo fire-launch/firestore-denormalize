@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - Every CLI command prints which source the resolved project came from, and `setup`, `deploy`, `rebuild`, `verify --fix` and `run` now refuse a project that only comes from gcloud's active config.
 - `validate`'s cost line for a scheduled rule now shows runs per day next to the per-run formula.
+- Under the Firestore emulator, continuation and flush tasks now run inside the process by default. Tests that relied on a budget-stopped run answering `continued: false` without an `enqueue` should pass `schedule.local: false`.
 
 ## [0.12.0] - 2026-10-13
 

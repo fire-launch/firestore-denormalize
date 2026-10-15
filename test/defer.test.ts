@@ -179,7 +179,7 @@ describe('defer: local task mode', () => {
     await db.doc('category/c1').set({ name: 'News' })
     await db.doc('post/p1').set({ title: 'a', categoryId: 'c1' })
     const logger = silentLogger()
-    const handler = createDocSyncHandler(config, { firestore: db, logger, pageSize: 2, schedule: { local: { maxWaitMs: 50 } } })
+    const handler = createDocSyncHandler(config, { firestore: db, logger, pageSize: 2, schedule: { local: { maxWaitMs: 300 } } })
     const cat = db.doc('category/c1')
     await invoke(handler, { ...(await change(cat, () => cat.update({ name: 'Tech' }))), headers: { host } })
     await invoke(handler, { ...(await change(cat, () => cat.update({ name: 'Tech2' }))), headers: { host } })
