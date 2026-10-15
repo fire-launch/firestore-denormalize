@@ -6,6 +6,7 @@ import { verify as runVerify } from '../verify.js'
 import type { Logger } from '../logger.js'
 import { eventarcPathPattern } from '../paths.js'
 import { CommandError, type Runner } from './exec.js'
+import { describeProjectSource, requireExplicitProject, type ProjectSource } from './project.js'
 import {
   desiredJobs,
   desiredTriggers,
@@ -37,6 +38,7 @@ export interface Context {
   config: ResolvedConfig
   configPath: string
   project: string
+  projectSource: ProjectSource
   runner: Runner
   log: (line?: string) => void
 }
@@ -45,7 +47,7 @@ export function printSummary(ctx: Context): void {
   const { config, log } = ctx
   log(`Config:          ${ctx.configPath}`)
   log(`Instance:        ${config.name}`)
-  log(`Project:         ${ctx.project}`)
+  log(`Project:         ${ctx.project} (${describeProjectSource(ctx.projectSource)})`)
   log(`Region:          ${config.region}`)
   log(`Database:        ${config.database}`)
   log(`Service:         ${config.service} (${config.serviceRegion})`)
@@ -154,7 +156,10 @@ export function validate(ctx: Context, opts: { strict?: boolean } = {}): void {
   }
 }
 
+const RUNTIME_SA_PROJECT = /@([a-z][a-z0-9-]*)\.iam\.gserviceaccount\.com$/
+
 export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {}): void {
+  requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'setup')
   const { config, project, runner, log } = ctx
   const email = serviceAccountEmail(config, project)
   const saId = email.split('@')[0]!
@@ -247,6 +252,11 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
     }
     const rt = opts.runtimeServiceAccount
     if (rt) {
+      const match = RUNTIME_SA_PROJECT.exec(rt)
+      const other = match?.[1]
+      if (other && other !== project) {
+        log(`  WARNING: ${rt} belongs to project "${other}", not "${project}". The grants below are cross-project. Continue only if that is intended.`)
+      }
       runner.mutate('gcloud', [
         'tasks',
         'queues',
@@ -284,6 +294,7 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
 }
 
 export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
+  requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'deploy')
   const { config, project, runner, log } = ctx
   printSummary(ctx)
   log()
@@ -423,6 +434,7 @@ export async function rebuild(
   ctx: Context,
   opts: { rules?: string[]; dryRun: boolean; startAfter?: string; pageSize?: number },
 ): Promise<void> {
+  if (!opts.dryRun) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'rebuild')
   const { log } = ctx
   const firestore = await cliFirestore(ctx)
   const emulator = process.env.FIRESTORE_EMULATOR_HOST
@@ -460,6 +472,7 @@ export async function verify(
   ctx: Context,
   opts: { rules?: string[]; fix: boolean; startAfter?: string; pageSize?: number },
 ): Promise<boolean> {
+  if (opts.fix) requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'verify')
   const { log } = ctx
   const firestore = await cliFirestore(ctx)
   const emulator = process.env.FIRESTORE_EMULATOR_HOST

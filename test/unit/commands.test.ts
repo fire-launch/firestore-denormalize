@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defineAggregate, defineConnection, defineView, jobName, triggerName, validateConfig } from '../../src/config.js'
-import { deploy, setup, validate, type Context } from '../../src/cli/commands.js'
+import { deploy, printSummary, setup, validate, type Context } from '../../src/cli/commands.js'
 import { CommandError, formatCommand, type Runner } from '../../src/cli/exec.js'
 
 const config = validateConfig({
@@ -31,7 +31,7 @@ function fakeRunner(reads: Record<string, string | Error>) {
   return { runner, mutations }
 }
 
-const ctx = (runner: Runner): Context => ({ config, configPath: '/x/doc-sync.config.ts', project: 'my-proj', runner, log: () => {} })
+const ctx = (runner: Runner): Context => ({ config, configPath: '/x/doc-sync.config.ts', project: 'my-proj', projectSource: 'flag', runner, log: () => {} })
 const notFound = new CommandError('gcloud', 1, 'ERROR: (gcloud.iam.service-accounts.describe) NOT_FOUND: Unknown service account')
 const authError = new CommandError('gcloud', 1, 'ERROR: (gcloud.iam.service-accounts.describe) There was a problem refreshing your current auth tokens')
 
@@ -67,6 +67,47 @@ describe('setup errors', () => {
     const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': authError })
     expect(() => setup(ctx(runner))).toThrow(/auth tokens/)
     expect(mutations.some((m) => m.includes('service-accounts create'))).toBe(false)
+  })
+
+  it('refuses to run against an implicit gcloud project', () => {
+    const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': notFound, 'gcloud run services describe': 'docsync' })
+    expect(() => setup({ ...ctx(runner), projectSource: 'gcloud' })).toThrow(
+      '`setup` changes project "my-proj", which only comes from gcloud\'s active config. Name it: --project my-proj, GOOGLE_CLOUD_PROJECT, or .firebaserc.',
+    )
+    expect(mutations).toEqual([])
+  })
+})
+
+describe('setup with a cross-project runtime service account', () => {
+  const scheduled = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })],
+  })
+
+  it('logs a WARNING before the grants, and still applies them', () => {
+    const lines: string[] = []
+    const { runner, mutations } = fakeRunner({
+      'gcloud iam service-accounts describe': '',
+      'gcloud run services describe docsync': 'docsync',
+      'gcloud tasks queues describe doc-sync-schedule': notFound,
+    })
+    setup({ ...ctx(runner), config: scheduled, log: (l = '') => lines.push(l) }, { runtimeServiceAccount: 'fn-runtime@other-proj.iam.gserviceaccount.com' })
+    const warningIndex = lines.findIndex((l) => l.includes('WARNING'))
+    expect(warningIndex).toBeGreaterThanOrEqual(0)
+    expect(lines[warningIndex]).toBe(
+      '  WARNING: fn-runtime@other-proj.iam.gserviceaccount.com belongs to project "other-proj", not "my-proj". The grants below are cross-project. Continue only if that is intended.',
+    )
+    const queueHeaderIndex = lines.findIndex((l) => l.startsWith('# 5/5'))
+    expect(queueHeaderIndex).toBeLessThan(warningIndex)
+    expect(mutations).toContain(
+      'gcloud tasks queues add-iam-policy-binding doc-sync-schedule --location=asia-northeast1 --project=my-proj --member=serviceAccount:fn-runtime@other-proj.iam.gserviceaccount.com --role=roles/cloudtasks.enqueuer --format=none',
+    )
+    expect(mutations).toContain(
+      'gcloud iam service-accounts add-iam-policy-binding doc-sync-trigger@my-proj.iam.gserviceaccount.com --project=my-proj --member=serviceAccount:fn-runtime@other-proj.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --format=none',
+    )
   })
 })
 
@@ -116,6 +157,14 @@ describe('deploy', () => {
   })
 })
 
+describe('printSummary', () => {
+  it('shows the project source', () => {
+    const lines: string[] = []
+    printSummary({ ...ctx(fakeRunner({}).runner), projectSource: 'firebaserc', log: (l = '') => lines.push(l) })
+    expect(lines.join('\n')).toContain('Project:         my-proj (from .firebaserc)')
+  })
+})
+
 describe('validate', () => {
   const costConfig = validateConfig({
     name: 'doc-sync',
@@ -138,6 +187,7 @@ describe('validate', () => {
     config: costConfig,
     configPath: '/x/doc-sync.config.ts',
     project: 'my-proj',
+    projectSource: 'flag',
     runner: fakeRunner({}).runner,
     log,
   })

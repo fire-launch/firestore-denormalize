@@ -4,6 +4,7 @@ import { ConfigError } from '../src/config.js'
 import { deploy, dev, rebuild, setup, validate, verify, type Context } from '../src/cli/commands.js'
 import { createRunner } from '../src/cli/exec.js'
 import { DEFAULT_CONFIG_PATH, loadConfig } from '../src/cli/load-config.js'
+import { resolveProject, type ResolvedProject } from '../src/cli/project.js'
 import { spawnSync } from 'node:child_process'
 
 const HELP = `doc-sync — sync denormalized Firestore documents with one function and per-collection Eventarc triggers
@@ -28,7 +29,7 @@ Commands:
 Options:
   --config <path>           Config file (default: ${DEFAULT_CONFIG_PATH})
   --strict                  validate: exit 1 when the cost estimate has warnings
-  --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then gcloud's active project)
+  --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then .firebaserc, then gcloud's active project; setup/deploy/rebuild/verify --fix require one of the first three)
   --dry-run                 setup/deploy: print gcloud commands; rebuild: report without writing
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
   --runtime-service-account <email>  setup: grant the function's runtime SA the roles it needs to enqueue continuation tasks
@@ -88,14 +89,16 @@ async function main(argv: string[]): Promise<number> {
   // The flag must take effect for every command that talks to Firestore, or rebuild/verify would use ADC against a real project.
   if (values['emulator-host']) process.env.FIRESTORE_EMULATOR_HOST = values['emulator-host']
   const emulator = Boolean(process.env.FIRESTORE_EMULATOR_HOST)
-  const project =
-    command === 'validate' || ((command === 'rebuild' || command === 'verify' || command === 'dev') && emulator)
-      ? (values.project ?? resolveProject(false) ?? 'demo-doc-sync')
-      : resolveProject(true, values.project)
+  const useEmulatorDefault = command === 'validate' || ((command === 'rebuild' || command === 'verify' || command === 'dev') && emulator)
+  const resolved: ResolvedProject | undefined =
+    resolveProject({ flag: values.project, env: process.env, cwd: process.cwd(), gcloudDefault }) ??
+    (useEmulatorDefault ? { project: 'demo-doc-sync', source: 'emulator-default' } : undefined)
+  if (!resolved) throw new Error('no project: pass --project <id>, set GOOGLE_CLOUD_PROJECT, or add a .firebaserc')
   const ctx: Context = {
     config,
     configPath: path,
-    project: project ?? '<project>',
+    project: resolved.project,
+    projectSource: resolved.source,
     runner: createRunner({ dryRun: values['dry-run'], log }),
     log,
   }
@@ -130,20 +133,14 @@ async function main(argv: string[]): Promise<number> {
   return 0
 }
 
-function resolveProject(required: true, flag?: string): string
-function resolveProject(required: false, flag?: string): string | undefined
-function resolveProject(required: boolean, flag?: string): string | undefined {
-  const fromEnv = flag ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT ?? process.env.CLOUDSDK_CORE_PROJECT
-  if (fromEnv) return fromEnv
+function gcloudDefault(): string | undefined {
   const r = spawnSync('gcloud', ['config', 'get-value', 'project'], {
     encoding: 'utf8',
     stdio: ['ignore', 'pipe', 'ignore'],
     shell: process.platform === 'win32',
   })
   const fromGcloud = r.status === 0 ? r.stdout.trim() : ''
-  if (fromGcloud && fromGcloud !== '(unset)') return fromGcloud
-  if (required) throw new Error('no project: pass --project <id> or set GOOGLE_CLOUD_PROJECT')
-  return undefined
+  return fromGcloud && fromGcloud !== '(unset)' ? fromGcloud : undefined
 }
 
 main(process.argv.slice(2)).then(
