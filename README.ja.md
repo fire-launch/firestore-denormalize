@@ -182,7 +182,7 @@ export const docSync = onRequest(
 )
 ```
 
-**3. サービスアカウント、デプロイ、トリガーの設定。**
+**3. サービスアカウント、デプロイ、トリガーの設定。** `--project` は必須です。`setup` と `deploy` は、プロジェクトが gcloud のアクティブな設定からしか来ていない場合は実行を拒否します。
 
 ```sh
 npx doc-sync setup  --project <project> --config functions/src/doc-sync.config.ts   # 初回のみ: SA・IAM・API
@@ -232,6 +232,8 @@ firebase emulators:start --only firestore,functions
 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
   --config functions/src/doc-sync.config.ts --url http://127.0.0.1:5001/demo-app/asia-northeast1/docSync
 ```
+
+functions エミュレータは `--project` / `GCLOUD_PROJECT` で指定したプロジェクトの下で関数を動かします。`functions/.env` の `PROJECT_ID` は使いません。
 
 ## 次に読むもの
 

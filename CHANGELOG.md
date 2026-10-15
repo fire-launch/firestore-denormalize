@@ -4,6 +4,21 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.13.0] - 2026-10-15
+
+### Added
+
+- `doc-sync run <rule>` runs a scheduled rule once against a real deployment, using an identity token from the trigger service account.
+- Handler option `schedule.local` runs scheduled continuations and deferred flushes inside the process instead of Cloud Tasks; on by default under the Firestore emulator.
+- `setup` also provisions Eventarc's service agent and warns when `--runtime-service-account` names a service account from another project.
+- `validate` warns when a scheduled rule runs more than 24 times a day, and when a `sum` aggregate needs a composite index for `idField`.
+- New reference sections cover the first deployment to a new project and tearing resources down.
+
+### Changed
+
+- Every CLI command prints which source the resolved project came from, and `setup`, `deploy`, `rebuild`, `verify --fix` and `run` now refuse a project that only comes from gcloud's active config.
+- `validate`'s cost line for a scheduled rule now shows runs per day next to the per-run formula.
+
 ## [0.12.0] - 2026-10-13
 
 First published release.

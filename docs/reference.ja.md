@@ -1,6 +1,6 @@
 # リファレンス
 
-[README](../README.ja.md) · [設定](#設定) · [ハンドラ](#ハンドラ) · [CLI](#cli) · [変更はこう処理される](#変更はこう処理される) · [ログ](#ログ) · [コストの見積もり](#コストの見積もり) · [既知の制約](#既知の制約) · [セキュリティ](#セキュリティ) · [推奨する関数の設定](#推奨する関数の設定)
+[README](../README.ja.md) · [設定](#設定) · [ハンドラ](#ハンドラ) · [CLI](#cli) · [変更はこう処理される](#変更はこう処理される) · [ログ](#ログ) · [コストの見積もり](#コストの見積もり) · [既知の制約](#既知の制約) · [初回デプロイ](#新しいプロジェクトへの初回デプロイ) · [後片付け](#後片付け) · [セキュリティ](#セキュリティ) · [推奨する関数の設定](#推奨する関数の設定)
 
 ## 設定
 
@@ -79,7 +79,7 @@ export default defineConfig({
 - キューは失敗した継続を最大 5 回、60 秒以上の間隔で再試行します。スケジュールを外したルールへの継続は 404 になり、その回数で止まります。
 - 一周が cron 間隔より長いと次の一周と重なります。定常状態では（一周の所要時間 ÷ cron 間隔）本の連鎖が同時に走り、読み取りが倍増して `maxInstances` を奪い合います。cron 間隔は一周より長くしてください（実行ログの `durationMs` と `chunk` で測れます）。関数が 429/503 を返すと Cloud Tasks はチャンクを最大 5 回（60 秒以上の間隔）再試行してから捨て、連鎖は静かに終わります。Cloud Tasks のログにしか残らず、次の cron で先頭からやり直します。
 - エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` に「タスクの `body` を本文にしてハンドラをもう一度呼ぶ関数」を渡す（テストスイートがそうしています）か、予算の無い `doc-sync rebuild --rule <name>` を使ってください。
-- 手動やエミュレータで実行するには `doc-sync rebuild --rule <name>`、または関数の `POST /schedule/<name>`（CloudEvent ヘッダーは不要）。
+- 実際のデプロイに対して手動で実行するには `doc-sync run <rule>` を使います。トリガー用サービスアカウントになりすまして得た ID トークンで `POST /schedule/<rule>` を 1 回呼びます。呼び出す側にそのサービスアカウントへの `roles/iam.serviceAccountTokenCreator` が必要です。エミュレータに対しては `doc-sync rebuild --rule <name>`、または関数への `POST /schedule/<name>`（CloudEvent ヘッダーは不要）を直接使ってください。
 - スケジュールかイベントかの二択です。スケジュールルールはターゲットの作成イベントも無視するので、フィールドはターゲットができた後の最初の実行で付きます。
 - 関数の `timeoutSeconds` は予算より長くしてください。イベントのみなら 300、スケジュールルールがあれば `schedule.budgetMs`（既定 20 分 → 1800）以上にします（[推奨する関数の設定](#推奨する関数の設定) を参照）。短いと長い実行が途中で切られ、`completed: false` を返す前に終わります。
 - ジョブは失敗（HTTP 500）した実行を最大 3 回、60 秒以上の間隔で再試行します。実行は冪等なので再試行は安全です。
@@ -98,13 +98,14 @@ export default defineConfig({
 | `target` | aggregate のソース、view の `idField` / `idParam` ソース、または既存のターゲット・base が変わったとき | そのターゲット 1 件、読み直して |
 | （即時。defer されない） | base の作成・削除、ターゲットの最初の値、base 付き view のターゲットの手動削除 | `defer` の無いルールと同じく、すぐに |
 
+- バケットの境界をまたぐ変更は、バケットごとに 1 回、計 2 回フラッシュされます。
 - skip 判定（フィールド未変更、`watch` 未変更など）が先に効くので、関係ない書き込みには何も印をつけません。
 - タスクを積めなかった場合、イベントは 500 を返し Eventarc が再送します。
 - 失敗が続くフラッシュはキューが最大 5 回まで再試行し、それでも失敗すれば捨てられます。そのようなターゲットは `verify --fix` で直せます。
 - 上の schedule の継続と同じ Cloud Tasks キューと権限が必要です。`setup` は、いずれかのルールが `schedule` または `defer` を持つときにキューを作成します。
 - 独自の `schedule.enqueue` は、タスクの `scheduleTime` を守り、`id` の重複を成功として扱う必要があります。
 - フラッシュ: `POST /schedule/<rule>` に本文 `{ "flush": { "unit": "source" | "target", "path": "..." } }` を送ると、その単位だけを再計算し、処理済みイベントと同じ JSON に `flush` と `durationMs` を加えて返します。`defer` の無いルールへの `flush` は 404、`flush` の無い本文で `defer` ルールを呼んだ場合は 400 です。
-- エミュレータ: Cloud Tasks のエミュレータはありません。`schedule.enqueue` を `createDocSyncHandler` に渡し、各タスクの `body` を自分で `/schedule/<rule>` に POST してください（テストスイートがそうしています）。
+- エミュレータ: `FIRESTORE_EMULATOR_HOST` を設定すると、タスクは Cloud Tasks を使わずタイマーで関数プロセス内で実行されます（`schedule.local`）。
 
 ### `defineView`: `target` の宣言した `targetFields` = `build(...)` の該当パス、を保つ
 
@@ -172,7 +173,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `logger` | 標準出力への JSON | `info` / `warn` / `error` を持つ任意のオブジェクト。`console` も使えます |
 | `maxRetries` | 5 | 条件付き書き込みが失敗したターゲットのやり直し回数 |
 | `pageSize` | 500 | ターゲット検索のページサイズ |
-| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true` | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤）。defer のルールでは、タスクの `scheduleTime` を守る必要があります |
+| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue, local }` | `budgetMs` は 20 分、`concurrency` は 20、`continue` は `true`、`local` は `FIRESTORE_EMULATOR_HOST` が設定され `enqueue` が無いとき既定で有効 | `/schedule/<rule>` 実行のオプション。`budgetMs` は時間予算、`concurrency` は 1 ページ内で並列に処理するターゲット数。予算で止まった実行は `continue: false` でない限り Cloud Tasks の継続を積みます。`project` / `serviceUrl` はキューの GCP プロジェクトとこのサービスの公開 URL を上書きします（既定: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / Firestore クライアントのプロジェクト、リクエストの `host` ヘッダー）。`enqueue` は Cloud Tasks の呼び出しを置き換えます（テスト、エミュレータ、他基盤）。defer のルールでは、タスクの `scheduleTime` を守る必要があります。`local: boolean | { maxWaitMs }` は継続とフラッシュのタスクを Cloud Tasks の代わりにタイマーでプロセス内で実行します |
 
 同じイベントの中では、ソースドキュメントは 1 回だけ読みます。組み合わせるターゲットより古い読み取りは使い回しません。
 
@@ -189,9 +190,11 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `deploy [--deploy-function <name>]` | 不足している Eventarc トリガー（イベント駆動ルールのコレクション分）を作成し、ずれたもの（サービス、サービスのリージョン、パスパターン、SA）を更新し、不要なものを削除します。対象は `region` 内でラベル `doc-sync-instance=<name>` を持つトリガーだけです。スケジュールルールの Cloud Scheduler ジョブ（`serviceRegion` 内で description `doc-sync-instance=<name>` を持つもの）も同様に作成・更新・削除します。ジョブには Cloud Run のサービス URL が要るので、関数の初回デプロイ後に実行してください。`firebase deploy` を先に実行することもできます |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | 全ターゲットを巡り、実際のイベントが書き込むはずの値を書き込みます。ソースが存在しない場合は `onSourceDelete` に従います |
 | `verify [--fix] [--rule]... [--start-after]` | 全ターゲットを巡り、不整合（実際の値と期待値の差）を報告します。`--fix` を付けると修復します。不整合が残っていると終了コード 1 になります |
+| `run <rule>` | Cloud Scheduler と同じ方法でスケジュールルールを 1 回実行します: トリガー用サービスアカウントになりすまして得た ID トークンで `POST /schedule/<rule>` を呼びます（`gcloud auth print-identity-token --impersonate-service-account ... --audiences <サービス URL>`）。呼び出す側にそのサービスアカウントへの `roles/iam.serviceAccountTokenCreator` が必要です。スケジュールルール専用です |
 | `dev --url <handler>` | Firestore エミュレータとハンドラを CloudEvents で橋渡しします。エミュレータ専用です |
 
-- `--config` の既定は `./doc-sync.config.ts`、`--project` の既定は `$GOOGLE_CLOUD_PROJECT`、次いで gcloud のアクティブなプロジェクトです。
+- `--config` の既定は `./doc-sync.config.ts` です。`--project` は次の順で解決します: `--project`、`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`、`.firebaserc`、gcloud のアクティブな設定。どのコマンドも `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)` を表示します。
+- `setup`・`deploy`・`rebuild`（`--dry-run` なし）・`verify --fix`・`run` は、プロジェクトが gcloud のアクティブな設定からしか来ていない場合は実行を拒否します。`--project`、`GOOGLE_CLOUD_PROJECT`、`.firebaserc` のいずれかで明示してください。
 - `rebuild` / `verify` / `dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` または `--emulator-host` が設定されていればエミュレータを使います。
 - `--start-after` は最初に処理するルールにしか効きません。`--rule` と組み合わせて使ってください。
 - `region` を変更すると古いトリガーがそのまま残ります。手動で削除するか、新しい設定に切り替える前に古い設定で `deploy` を実行してください。
@@ -223,9 +226,9 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 
 ## コストの見積もり
 
-`validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（マッチするターゲット数）と `M`（ターゲット 1 件あたりのソース文書数）の式で表示し、`refField` のビューのソース（ファンアウト）と、`limit` も `patch` も無い多対一のビューのソースを警告します。`--strict` で警告を終了コード 1 にできます。
+`validate` はルールごとに、1 イベントが引き起こす読み取り・書き込みを `N`（マッチするターゲット数）と `M`（ターゲット 1 件あたりのソース文書数）の式で表示し、`refField` のビューのソース（ファンアウト）、`limit` も `patch` も無い多対一のビューのソース、そして必要な複合インデックスの無い `idField` 絞り込みの `sum` aggregate を警告します。`--strict` で警告を終了コード 1 にできます。
 
-スケジュールルールは `schedule <cron> (<tz>): every <target>` の 1 行で、reads は `T × (ターゲット 1 件あたりの読み取り)`、writes は `≤ T`（T はターゲット数）です。
+スケジュールルールは `schedule <cron> (<tz>): every <target>` の 1 行で、reads は `T × (ターゲット 1 件あたりの読み取り) per run, R runs/day`、writes は `≤ T per run`（T はターゲット数）です。cron が 1 日に 24 回を超えて実行される場合は警告が出ます。
 
 defer ルールの印をつけるだけのイベントは reads `0 (+ 1 task)`（または `≤ 2 tasks`）、writes `0` になり、それぞれに再計算の reads/writes を持つ `flush <collection>/{id} (≤ 1 per <interval>)` 行が加わります。ライフサイクル行（ターゲットの最初の値、base の作成・削除）はそのままの即時コストを保ちます。
 
@@ -233,8 +236,19 @@ defer ルールの印をつけるだけのイベントは reads `0 (+ 1 task)`�
 
 - ソースが削除されたときにターゲットは削除されません。`setNull` または `deleteField` を使ってください。
 - アプリが上書きした `targetField` は、ソースが次に変わるか `rebuild` / `verify --fix` を実行するまで誤った値のままです。フィールドが削除された場合は、次のイベントで直ります。
-- ターゲット検索には `idField` の単一フィールドインデックスが必要です。コレクショングループクエリ（`validate` が一覧します）にはコレクショングループインデックスが必要です。ビューで `idField` と `orderBy` を併用する場合は複合インデックスが必要です。初回実行時に Firestore が作成用のリンクを表示します。
+- ターゲット検索には `idField` の単一フィールドインデックスが必要です。コレクショングループクエリ（`validate` が一覧します）にはコレクショングループインデックスが必要です。ビューで `idField` と `orderBy` を併用する場合、および `idField` で絞り込む `sum` aggregate にも複合インデックスが必要です。初回実行時に Firestore が作成用のリンクを表示します。
 - `build` / `patch` での恒久的な失敗やインデックス不足は 500 を返し、最大 24 時間再送されます。`doc-sync: failed` のログ行を監視してください。
+
+## 新しいプロジェクトへの初回デプロイ
+
+- Cloud Build には、Firebase のデプロイが前提とする権限を持つデフォルトのコンピュート用サービスアカウントが必要です。最近の組織ポリシーでは既定で Editor ロールが外れているため、`roles/cloudbuild.builds.builder`、`roles/artifactregistry.writer`、`roles/logging.logWriter` を付与するか、専用のビルド用サービスアカウントを使ってください。
+- Eventarc のサービスエージェントは `setup` が作成し、使えるようになるまで数分かかることがあります。トリガー作成が拒否されたら `deploy` をやり直してください。
+- `setup` は Cloud Run サービスが存在してからでないと `roles/run.invoker` を付与しません。そのため順序は setup → 関数のデプロイ → deploy（トリガーとジョブ） → setup の再実行 になります。
+
+## 後片付け
+
+- Cloud Tasks のキューを削除すると、同じ名前のキューは 7 日間作り直せません。
+- 削除したトリガー用サービスアカウントは 30 日間復元できます。それを過ぎると `setup` が新しいものを作成します。
 
 ## セキュリティ
 

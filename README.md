@@ -183,7 +183,7 @@ export const docSync = onRequest(
 )
 ```
 
-**3. Set up the service account, deploy, create the triggers.**
+**3. Set up the service account, deploy, create the triggers.** `--project` is required: `setup` and `deploy` refuse to run against a project that only comes from gcloud's active config.
 
 ```sh
 npx doc-sync setup  --project <project> --config functions/src/doc-sync.config.ts   # once: SA, IAM, APIs
@@ -233,6 +233,8 @@ firebase emulators:start --only firestore,functions
 FIRESTORE_EMULATOR_HOST=127.0.0.1:8080 npx doc-sync dev --project demo-app \
   --config functions/src/doc-sync.config.ts --url http://127.0.0.1:5001/demo-app/asia-northeast1/docSync
 ```
+
+The functions emulator serves the function under the project from `--project` / `GCLOUD_PROJECT`, not from a `PROJECT_ID` in `functions/.env`.
 
 ## Read next
 

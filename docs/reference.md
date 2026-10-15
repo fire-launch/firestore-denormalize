@@ -1,6 +1,6 @@
 # Reference
 
-[README](../README.md) · [Config](#config) · [Handler](#handler) · [CLI](#cli) · [Processing](#how-a-change-is-processed) · [Logs](#logs) · [Cost estimate](#cost-estimate) · [Limitations](#known-limitations) · [Security](#security) · [Function settings](#recommended-function-settings)
+[README](../README.md) · [Config](#config) · [Handler](#handler) · [CLI](#cli) · [Processing](#how-a-change-is-processed) · [Logs](#logs) · [Cost estimate](#cost-estimate) · [Limitations](#known-limitations) · [First deployment](#first-deployment-on-a-new-project) · [Teardown](#teardown) · [Security](#security) · [Function settings](#recommended-function-settings)
 
 ## Config
 
@@ -79,7 +79,7 @@ Any rule may carry `schedule: '<unix-cron>'` (5 fields) and an optional `timeZon
 - The queue retries a failed continuation up to 5 times with at least 60 s backoff; a continuation for a rule that is no longer scheduled gets 404 and stops after those attempts.
 - A pass longer than the cron interval overlaps the next one: in steady state about (pass duration ÷ cron interval) chains run at once, multiplying reads and competing for `maxInstances`. Choose a cron interval longer than a full pass (watch `durationMs` and `chunk` in the run logs). If the function answers 429/503, Cloud Tasks retries a chunk up to 5 times (≥ 60 s apart) and then drops it; the chain ends silently — only the Cloud Tasks logs show it — and the next cron starts over.
 - Emulator: there is no Cloud Tasks emulator. Pass `schedule.enqueue` a function that calls the handler again with the task's `body` as the request body (the test suite does this), or run `doc-sync rebuild --rule <name>` which has no budget.
-- To run a scheduled rule by hand or against the emulator: `doc-sync rebuild --rule <name>`, or `POST /schedule/<name>` on the function (no CloudEvent headers needed).
+- To run a scheduled rule by hand against a real deployment: `doc-sync run <rule>` calls `POST /schedule/<rule>` once with an ID token obtained by impersonating the trigger service account; the caller needs `roles/iam.serviceAccountTokenCreator` on it. Against the emulator: `doc-sync rebuild --rule <name>`, or `POST /schedule/<name>` on the function directly (no CloudEvent headers needed).
 - Schedule or events, never both: a scheduled rule ignores target creation too, so its fields appear on the first run after the target exists.
 - Set the function's `timeoutSeconds` above the budget: 300 for event-only deployments; ≥ `schedule.budgetMs` (default 20 min → 1800) once a rule is scheduled (see [Recommended function settings](#recommended-function-settings)). Otherwise the platform cuts a long run before it can stop cleanly.
 - The job retries a failed run (HTTP 500) up to 3 times with at least 60 s backoff; runs are idempotent, so retries are safe.
@@ -98,13 +98,14 @@ Any rule may carry `defer: '<duration>'` (`'90s'`, `'10m'`, `'1h'`, `'1h30m'`; 1
 | `target` | An aggregate source, a view `idField` / `idParam` source, or an existing target or base, changing | That one target, fresh |
 | (immediate, not deferred) | A base created or deleted, a target's first value, or a hand-deleted base-view target | Right away, same as a rule without `defer` |
 
+- Changes that straddle a bucket boundary are flushed twice, once per bucket.
 - Skip checks (unchanged fields, unchanged `watch` fields, ...) run first, so an irrelevant write marks nothing.
 - If the task cannot be queued, the event answers 500 and Eventarc retries it.
 - A flush that keeps failing is retried by the queue up to 5 times, then dropped. `verify --fix` repairs such a target.
 - Needs the same Cloud Tasks queue and grants as the schedule continuation above; `setup` creates the queue when any rule has `schedule` or `defer`.
 - A custom `schedule.enqueue` must honour `scheduleTime` and treat a duplicate `id` as success.
 - Flush: `POST /schedule/<rule>` with body `{ "flush": { "unit": "source" | "target", "path": "..." } }` recomputes that one unit and answers the same JSON as a processed event, plus `flush` and `durationMs`. A `flush` for a rule without `defer` gets 404; a `defer` rule called without `flush` gets 400.
-- Emulator: there is no Cloud Tasks emulator. Pass `schedule.enqueue` to `createDocSyncHandler` and post each task's `body` to `/schedule/<rule>` yourself (the test suite does this).
+- Emulator: with `FIRESTORE_EMULATOR_HOST` set, tasks run inside the function process with timers (`schedule.local`). No Cloud Tasks needed.
 
 ### `defineView`: keep the declared `targetFields` of `target` = the matching paths of `build(...)`
 
@@ -172,7 +173,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `logger` | JSON to stdout | Anything with `info` / `warn` / `error`; `console` works |
 | `maxRetries` | 5 | Redos of a target whose conditional write failed |
 | `pageSize` | 500 | Target query page size |
-| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue }` | `budgetMs` 20 minutes, `concurrency` 20, `continue` `true` | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page. A budget-stopped run enqueues a Cloud Tasks continuation unless `continue: false`; `project` / `serviceUrl` override the GCP project of the queue and this service's public URL (defaults: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client's project; the request's `host` header); `enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms); for deferred rules it must honour the task's `scheduleTime` |
+| `schedule: { budgetMs, concurrency, project, serviceUrl, enqueue, continue, local }` | `budgetMs` 20 minutes, `concurrency` 20, `continue` `true`, `local` on when `FIRESTORE_EMULATOR_HOST` is set and no `enqueue` is given | Options for `/schedule/<rule>` runs: `budgetMs` is the time box; `concurrency` is targets processed in parallel within a page. A budget-stopped run enqueues a Cloud Tasks continuation unless `continue: false`; `project` / `serviceUrl` override the GCP project of the queue and this service's public URL (defaults: `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / the Firestore client's project; the request's `host` header); `enqueue` replaces the Cloud Tasks call (tests, emulator, other platforms); for deferred rules it must honour the task's `scheduleTime`; `local: boolean | { maxWaitMs }` runs continuation and flush tasks inside the process with timers instead of Cloud Tasks |
 
 Within one event, a source document is read once; a read older than the target it is combined with is never reused.
 
@@ -189,9 +190,11 @@ The handler is `(req, res) => Promise<void>` and also works with Express or Node
 | `deploy [--deploy-function <name>]` | Creates missing Eventarc triggers (for collections of event-driven rules), updates drifted ones (service, service region, path pattern, SA), deletes stale ones; only triggers labelled `doc-sync-instance=<name>` in `region`. Likewise creates / updates / deletes the Cloud Scheduler jobs of scheduled rules (identified by description `doc-sync-instance=<name>` in `serviceRegion`); jobs need the Cloud Run service URL, so run it after the first function deploy. Optionally runs `firebase deploy` first |
 | `rebuild [--dry-run] [--rule]... [--start-after]` | Walks every target and writes what a live event would. Missing sources follow `onSourceDelete` |
 | `verify [--fix] [--rule]... [--start-after]` | Walks every target and reports mismatches (actual vs expected); `--fix` repairs them; exits 1 while a mismatch remains |
+| `run <rule>` | Calls a scheduled rule once the way Cloud Scheduler would: `POST /schedule/<rule>` with an ID token obtained by impersonating the trigger service account (`gcloud auth print-identity-token --impersonate-service-account ... --audiences <service url>`). The caller needs `roles/iam.serviceAccountTokenCreator` on that account. Scheduled rules only |
 | `dev --url <handler>` | Bridges the Firestore emulator to the handler as CloudEvents. Emulator only |
 
-- `--config` defaults to `./doc-sync.config.ts`; `--project` to `$GOOGLE_CLOUD_PROJECT`, then gcloud's active project.
+- `--config` defaults to `./doc-sync.config.ts`. `--project` resolves in order: `--project`, `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`, `.firebaserc`, gcloud's active config; every command prints `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)`.
+- `setup`, `deploy`, `rebuild` (without `--dry-run`), `verify --fix` and `run` refuse a project that comes only from gcloud's active config: name it with `--project`, `GOOGLE_CLOUD_PROJECT`, or `.firebaserc`.
 - `rebuild` / `verify` / `dev` use Application Default Credentials, or the emulator when `FIRESTORE_EMULATOR_HOST` or `--emulator-host` is set.
 - `--start-after` applies to the first rule processed: use it with `--rule`.
 - Changing `region` leaves the old triggers in place; delete them by hand or run `deploy` with the old config first.
@@ -223,9 +226,9 @@ One JSON line per rule per event: `eventId`, `rule`, `kind`, `source` (view sour
 
 ## Cost estimate
 
-`validate` prints per rule the reads and writes one event causes, as formulas over `N` (matching targets) and `M` (source documents per target), and warns about `refField` view sources (fan-out) and many-to-one view sources with neither `limit` nor `patch`. `--strict` turns warnings into exit code 1.
+`validate` prints per rule the reads and writes one event causes, as formulas over `N` (matching targets) and `M` (source documents per target), and warns about `refField` view sources (fan-out), many-to-one view sources with neither `limit` nor `patch`, and a `sum` aggregate filtered by `idField` without the composite index it needs. `--strict` turns warnings into exit code 1.
 
-A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with reads `T × (per-target reads)` and writes `≤ T`, T being the number of targets.
+A scheduled rule shows one line `schedule <cron> (<tz>): every <target>` with reads `T × (per-target reads) per run, R runs/day` and writes `≤ T per run`, T being the number of targets; a warning appears when a cron runs more than 24 times a day.
 
 A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) and `0` writes, each with a matching `flush <collection>/{id} (≤ 1 per <interval>)` line carrying the recompute's reads and writes. Lifecycle lines (a target's first value, a base created or deleted) keep their immediate cost.
 
@@ -233,8 +236,19 @@ A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) an
 
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
 - A `targetField` overwritten by the application keeps the wrong value until the source changes or `rebuild` / `verify --fix`; a removed one is repaired on the next event.
-- Target queries need the single-field index on `idField`; collection-group queries (`validate` lists them) need a collection-group index; `idField` + `orderBy` in a view needs a composite index. Firestore prints the creation link on first use.
+- Target queries need the single-field index on `idField`; collection-group queries (`validate` lists them) need a collection-group index; `idField` + `orderBy` in a view needs a composite index; a `sum` aggregate filtered by `idField` needs a composite index too. Firestore prints the creation link on first use.
 - Permanent failures in `build` / `patch` or a missing index return 500 and are redelivered for up to 24 hours; watch the `doc-sync: failed` log line.
+
+## First deployment on a new project
+
+- Cloud Build needs the default compute service account to have the roles Firebase deploy expects. Recent organization policies remove its Editor role by default; grant `roles/cloudbuild.builds.builder`, `roles/artifactregistry.writer` and `roles/logging.logWriter`, or use a custom build service account.
+- Eventarc's service agent is created by `setup` and can take a few minutes to become usable; rerun `deploy` if trigger creation is refused.
+- `setup` grants `roles/run.invoker` only once the Cloud Run service exists, so the order is: `setup` → deploy the function → `deploy` (triggers and jobs) → `setup` again.
+
+## Teardown
+
+- Deleting the Cloud Tasks queue blocks recreating a queue of the same name for 7 days.
+- A deleted trigger service account can be undeleted for 30 days; after that, `setup` creates a new one.
 
 ## Security
 
