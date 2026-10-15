@@ -88,7 +88,7 @@ describe('.firebaserc lookup', () => {
 describe('describeProjectSource', () => {
   it('names each source', () => {
     expect(describeProjectSource('flag')).toBe('from --project')
-    expect(describeProjectSource('env')).toBe('from $GOOGLE_CLOUD_PROJECT')
+    expect(describeProjectSource('env')).toBe('from environment variable')
     expect(describeProjectSource('firebaserc')).toBe('from .firebaserc')
     expect(describeProjectSource('gcloud')).toBe("from gcloud active config")
     expect(describeProjectSource('emulator-default')).toBe('emulator default')

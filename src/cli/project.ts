@@ -48,7 +48,7 @@ export function describeProjectSource(source: ProjectSource): string {
     case 'flag':
       return 'from --project'
     case 'env':
-      return 'from $GOOGLE_CLOUD_PROJECT'
+      return 'from environment variable'
     case 'firebaserc':
       return 'from .firebaserc'
     case 'gcloud':
