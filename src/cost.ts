@@ -28,13 +28,101 @@ export function estimateCost(rule: ResolvedRule): RuleCost {
   if (rule.scheduled) {
     // A scheduled rule runs `rebuild`: every target once per run. The per-target reads are the target-side line's reads.
     const perTarget = perEvent.lines[perEvent.lines.length - 1]!.reads
+    const runsPerDay = cronRunsPerDay(rule.scheduled.cron)
+    const runsPerDayText = runsPerDay === undefined ? 'runs/day unknown' : runsPerDay === 1 ? '1 run/day' : `${formatRunsPerDay(runsPerDay)} runs/day`
+    const warnings = [...perEvent.warnings]
+    if (runsPerDay !== undefined && runsPerDay > 24) {
+      const r = formatRunsPerDay(runsPerDay)
+      warnings.push(
+        `schedule "${rule.scheduled.cron}" runs ${r} times a day: every target is read ${r} times a day. Use a less frequent cron, or \`defer\` for event-driven batching.`,
+      )
+    }
     return {
       ...perEvent,
-      lines: [{ trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`, reads: `T × (${perTarget})`, writes: '≤ T' }],
+      warnings,
+      lines: [
+        {
+          trigger: `schedule ${rule.scheduled.cron} (${rule.scheduled.timeZone}): every ${rule.target}`,
+          reads: `T × (${perTarget}) per run, ${runsPerDayText}`,
+          writes: '≤ T per run',
+        },
+      ],
     }
   }
   if (rule.deferred) return deferCost(rule, perEvent, rule.deferred.everyMs)
   return perEvent
+}
+
+/** `1440` / `48` as-is; `0.14` for non-integer values below 1 (and any other non-integer). */
+function formatRunsPerDay(n: number): string {
+  return Number.isInteger(n) ? String(n) : n.toFixed(2)
+}
+
+/**
+ * Average runs per day of a 5-field unix-cron over a 4-week window; `undefined` for syntax this
+ * evaluator does not know (names, `?`, `L`, `W`, `#`). Evaluates every minute from
+ * 2026-01-01T00:00 UTC for 28 days and divides matches by 28; the time zone does not matter for
+ * a 4-week average.
+ */
+export function cronRunsPerDay(cron: string): number | undefined {
+  const fields = cron.trim().split(/\s+/)
+  if (fields.length !== 5) return undefined
+  const [minuteSpec, hourSpec, domSpec, monthSpec, dowSpec] = fields as [string, string, string, string, string]
+  const minuteSet = parseCronField(minuteSpec, 0, 59)
+  const hourSet = parseCronField(hourSpec, 0, 23)
+  const domSet = parseCronField(domSpec, 1, 31)
+  const monthSet = parseCronField(monthSpec, 1, 12)
+  const dowSetRaw = parseCronField(dowSpec, 0, 7)
+  if (!minuteSet || !hourSet || !domSet || !monthSet || !dowSetRaw) return undefined
+  const dowSet = new Set(Array.from(dowSetRaw, (d) => (d === 7 ? 0 : d)))
+  const domRestricted = domSpec !== '*'
+  const dowRestricted = dowSpec !== '*'
+
+  const start = Date.UTC(2026, 0, 1, 0, 0)
+  let matches = 0
+  for (let i = 0; i < 28 * 1440; i++) {
+    const t = new Date(start + i * 60000)
+    if (!minuteSet.has(t.getUTCMinutes())) continue
+    if (!hourSet.has(t.getUTCHours())) continue
+    if (!monthSet.has(t.getUTCMonth() + 1)) continue
+    const domMatch = domSet.has(t.getUTCDate())
+    const dowMatch = dowSet.has(t.getUTCDay())
+    const dayMatches = domRestricted && dowRestricted ? domMatch || dowMatch : domRestricted ? domMatch : dowRestricted ? dowMatch : true
+    if (dayMatches) matches++
+  }
+  return matches / 28
+}
+
+/** One cron field (a star, a number, a range, a stepped star or range, comma lists); `null` for anything else. */
+function parseCronField(spec: string, min: number, max: number): Set<number> | null {
+  const result = new Set<number>()
+  for (const part of spec.split(',')) {
+    const star = /^\*(?:\/(\d+))?$/.exec(part)
+    if (star) {
+      const step = star[1] ? Number(star[1]) : 1
+      if (step <= 0) return null
+      for (let v = min; v <= max; v += step) result.add(v)
+      continue
+    }
+    const range = /^(\d+)-(\d+)(?:\/(\d+))?$/.exec(part)
+    if (range) {
+      const a = Number(range[1])
+      const b = Number(range[2])
+      const step = range[3] ? Number(range[3]) : 1
+      if (step <= 0 || a > b || a < min || b > max) return null
+      for (let v = a; v <= b; v += step) result.add(v)
+      continue
+    }
+    const single = /^(\d+)$/.exec(part)
+    if (single) {
+      const v = Number(single[1])
+      if (v < min || v > max) return null
+      result.add(v)
+      continue
+    }
+    return null
+  }
+  return result
 }
 
 /**
@@ -110,11 +198,17 @@ function estimateAggregateCost(rule: ResolvedAggregate): RuleCost {
     rule.idParam !== undefined
       ? { trigger: `${rule.source}/{id} changed`, reads: '1 + 1 aggregation', writes: '≤ 1' }
       : { trigger: `${rule.source}/{id} changed`, reads: '≤ 2 × (1 + 1 aggregation)', writes: '≤ 2' }
+  const warnings: string[] = []
+  if (typeof rule.aggregate === 'object' && rule.idField !== undefined) {
+    warnings.push(
+      `sum("${rule.aggregate.sum}") filtered by ${rule.idField} needs a composite index on ${rule.source} (${rule.idField}, ${rule.aggregate.sum}); rebuild stops with FAILED_PRECONDITION until it exists`,
+    )
+  }
   return {
     rule: rule.name,
     kind: 'aggregate',
     lines: [sourceLine, { trigger: `${rule.target}/{id} created`, reads: '1 + 1 aggregation', writes: '≤ 1' }],
-    warnings: [],
+    warnings,
   }
 }
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defineAggregate, defineConfig, defineConnection, defineView, validateConfig, writeTriggers, type Connection } from '../../src/index.js'
-import { estimateCost, formatChains } from '../../src/cost.js'
+import { cronRunsPerDay, estimateCost, formatChains } from '../../src/cost.js'
 
 const base = defineConfig({
   name: 'doc-sync',
@@ -119,7 +119,39 @@ describe('estimateCost', () => {
   it('estimates a scheduled rule per run instead of per event', () => {
     const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })] })
     const cost = estimateCost(cfg.aggregates[0]!)
-    expect(cost.lines).toEqual([{ trigger: 'schedule 0 3 * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation)', writes: '≤ T' }])
+    expect(cost.lines).toEqual([{ trigger: 'schedule 0 3 * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation) per run, 1 run/day', writes: '≤ T per run' }])
+    expect(cost.warnings).toEqual([])
+  })
+
+  it('warns when a schedule runs more than once an hour', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'often', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '* * * * *' })] })
+    const cost = estimateCost(cfg.aggregates[0]!)
+    expect(cost.lines).toEqual([{ trigger: 'schedule * * * * * (Etc/UTC): every post', reads: 'T × (1 + 1 aggregation) per run, 1440 runs/day', writes: '≤ T per run' }])
+    expect(cost.warnings).toEqual([
+      'schedule "* * * * *" runs 1440 times a day: every target is read 1440 times a day. Use a less frequent cron, or `defer` for event-driven batching.',
+    ])
+  })
+
+  it('does not warn for a schedule that runs at most hourly', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'twice-daily', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 */2 * * *' })] })
+    const cost = estimateCost(cfg.aggregates[0]!)
+    expect(cost.warnings).toEqual([])
+  })
+
+  it('warns about a composite index for sum aggregates filtered by idField', () => {
+    expect(estimateCost(rule('customer-total')).warnings).toEqual([
+      'sum("amount") filtered by customerId needs a composite index on order (customerId, amount); rebuild stops with FAILED_PRECONDITION until it exists',
+    ])
+  })
+
+  it('does not warn about a composite index for count aggregates with idField', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'user-posts', source: 'post', target: 'user', idField: 'authorId', aggregate: 'count', targetField: 'postCount' })] })
+    expect(estimateCost(cfg.aggregates[0]!).warnings).toEqual([])
+  })
+
+  it('does not warn about a composite index for sum aggregates with idParam', () => {
+    const cfg = validateConfig({ ...base, rules: [defineAggregate({ name: 'post-total', source: 'post/{postId}/order', target: 'post', idParam: 'postId', aggregate: { sum: 'amount' }, targetField: 'total' })] })
+    expect(estimateCost(cfg.aggregates[0]!).warnings).toEqual([])
   })
 
   it('a deferred connection: marks cost a task, flushes carry the recompute, a target\'s first value stays immediate', () => {
@@ -171,6 +203,17 @@ describe('estimateCost', () => {
       { trigger: 'postPublic/{id} authorId changed', reads: '0 (+ 1 task)', writes: '0' },
       { trigger: 'flush postPublic/{id} (≤ 1 per 1h)', reads: perTarget, writes: '≤ 1' },
     ])
+  })
+})
+
+describe('cronRunsPerDay', () => {
+  it('averages matches per day over a 4-week window starting 2026-01-01 UTC', () => {
+    expect(cronRunsPerDay('* * * * *')).toBe(1440)
+    expect(cronRunsPerDay('0 3 * * *')).toBe(1)
+    expect(cronRunsPerDay('*/15 * * * *')).toBe(96)
+    expect(cronRunsPerDay('0 9-17 * * 1-5')).toBeCloseTo((9 * 20) / 28, 5)
+    expect(cronRunsPerDay('0 0 1 * *')).toBeCloseTo(1 / 28, 10)
+    expect(cronRunsPerDay('0 0 L * *')).toBeUndefined()
   })
 })
 
