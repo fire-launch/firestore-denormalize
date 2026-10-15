@@ -14,7 +14,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/fire-launch/firestore-denormalize.git"
+    "url": "git+https://github.com/fire-launch/firestore-denormalize.git"
   },
   "type": "module",
   "engines": {
@@ -37,7 +37,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "doc-sync": "./dist/cli.js"
+    "doc-sync": "dist/cli.js"
   },
   "files": [
     "dist",
