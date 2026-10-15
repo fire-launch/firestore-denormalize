@@ -24,6 +24,16 @@ function handlerFor(opts: Parameters<typeof createDocSyncHandler>[1] = {}) {
 const processed = (logs: ReturnType<typeof silentLogger>['entries'], rule: string) =>
   logs.filter((l) => l.message === 'doc-sync: processed' && l.fields?.rule === rule)
 
+/** Polls `cond` until it is true, or throws after `timeoutMs`. */
+async function until(cond: () => Promise<boolean> | boolean, timeoutMs: number): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await cond()) return
+    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
 beforeAll(() => {
   db = firestore()
 })
@@ -81,7 +91,8 @@ describe('scheduled rules: /schedule/<rule>', () => {
       await db.doc(`post/${id}`).set({ title: id })
       await db.doc(`post/${id}/like/u1`).set({})
     }
-    const { handler, logs } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0 } })
+    // local: false keeps this test on the pre-local-mode path (no host header, no continuation attempted).
+    const { handler, logs } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, local: false } })
     const { status, body } = await invokeRaw(handler, { url: '/schedule/daily-likes' })
     expect(status).toBe(200)
     const result = JSON.parse(body!)
@@ -263,6 +274,21 @@ describe('scheduled rules: continuation', () => {
     expect(result).toMatchObject({ completed: false, continued: false })
     const failure = logs.find((l) => l.message === 'doc-sync schedule: could not enqueue continuation; the next scheduled run starts over')
     expect(failure?.fields).toMatchObject({ reason: 'project unknown' })
+  })
+})
+
+describe('scheduled rules: local task mode', () => {
+  it('runs a continuation chain to completion with timers instead of Cloud Tasks, with no enqueue given', async () => {
+    for (let i = 1; i <= 3; i++) {
+      await db.doc(`post/p${i}`).set({ title: `p${i}` })
+      await db.doc(`post/p${i}/like/u1`).set({})
+    }
+    const { handler } = handlerFor({ pageSize: 1, schedule: { budgetMs: 0, local: true } })
+    await invokeRaw(handler, { url: '/schedule/daily-likes' })
+    await until(async () => (await db.doc('post/p3').get()).get('likeCount') === 1, 5000)
+    for (const id of ['p1', 'p2', 'p3']) {
+      expect((await db.doc(`post/${id}`).get()).get('likeCount')).toBe(1)
+    }
   })
 })
 

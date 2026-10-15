@@ -70,6 +70,8 @@ export interface DocSyncHandlerOptions {
     enqueue?: Enqueue
     /** Set to `false` to never enqueue a continuation (the run then stops on its budget as in 0.9). Default `true`. */
     continue?: boolean
+    /** Run continuation and flush tasks in this process with timers instead of Cloud Tasks (emulator, tests). Default: on when `FIRESTORE_EMULATOR_HOST` is set and no `enqueue` is given. */
+    local?: boolean | { maxWaitMs?: number }
   }
 }
 
@@ -250,7 +252,60 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
   const processor = new Processor(db, logger, options.maxRetries ?? 5, options.pageSize ?? 500)
   const rules = rulesOf(resolved)
   const eventRules = rules.filter((r) => r.scheduled === undefined)
-  const enqueue: Enqueue = options.schedule?.enqueue ?? createCloudTasksEnqueuer()
+
+  const localOption = options.schedule?.local
+  const localConfig = typeof localOption === 'object' && localOption !== null ? localOption : undefined
+  const isLocalMode =
+    options.schedule?.enqueue === undefined &&
+    (localOption === true || localConfig !== undefined || (localOption === undefined && Boolean(process.env.FIRESTORE_EMULATOR_HOST)))
+
+  function waitMsFor(scheduleTime: string | undefined): number {
+    const raw = scheduleTime ? Math.max(0, new Date(scheduleTime).getTime() - Date.now()) : 0
+    return localConfig?.maxWaitMs !== undefined ? Math.min(raw, localConfig.maxWaitMs) : raw
+  }
+
+  function collectingResponse(): { res: DocSyncResponse; status: () => number } {
+    let code = 200
+    const res: DocSyncResponse = {
+      status(c) {
+        code = c
+        return res
+      },
+      send() {},
+      end() {},
+      setHeader() {},
+    }
+    return { res, status: () => code }
+  }
+
+  /**
+   * Runs continuation and flush tasks in this process with timers instead of Cloud Tasks (emulator, tests).
+   * Like Cloud Tasks, `enqueue` itself resolves as soon as the task is scheduled; the task runs later, in the background.
+   */
+  function createLocalEnqueuer(): Enqueue {
+    const pending = new Set<string>()
+    return async (task) => {
+      if (pending.has(task.id)) return
+      pending.add(task.id)
+      const timer = setTimeout(() => {
+        pending.delete(task.id)
+        void runLocalTask(task)
+      }, waitMsFor(task.scheduleTime))
+      timer.unref?.()
+    }
+  }
+
+  async function runLocalTask(task: ContinuationTask): Promise<void> {
+    const { res, status } = collectingResponse()
+    try {
+      await runScheduled(task.rule, { headers: { host: 'local' }, url: `/schedule/${encodeURIComponent(task.rule)}`, method: 'POST', body: task.body }, res)
+      logger.info('doc-sync: local task ran', { rule: task.rule, task: task.id, status: status() })
+    } catch (err) {
+      logger.error('doc-sync: local task failed', { rule: task.rule, task: task.id, error: err })
+    }
+  }
+
+  const enqueue: Enqueue = options.schedule?.enqueue ?? (isLocalMode ? createLocalEnqueuer() : createCloudTasksEnqueuer())
 
   function scheduleProject(): string | undefined {
     const configured = options.schedule?.project ?? process.env.GOOGLE_CLOUD_PROJECT ?? process.env.GCLOUD_PROJECT
@@ -274,8 +329,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
     if (!rule.deferred) return undefined
     const everyMs = rule.deferred.everyMs
     return async (unit: DirtyUnit) => {
-      const project = scheduleProject()
-      const serviceUrl = serviceUrlFrom(req)
+      const project = scheduleProject() ?? (isLocalMode ? 'local' : undefined)
+      const serviceUrl = serviceUrlFrom(req) ?? (isLocalMode ? 'http://local' : undefined)
       if (!project || !serviceUrl) throw new Error('cannot enqueue: project or service URL unknown')
       const { bucket, scheduleTime } = deferBucket(everyMs)
       const task: ContinuationTask = {
@@ -367,8 +422,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       })
       let continued = false
       if (!result!.completed && result!.lastPath && options.schedule?.continue !== false) {
-        const project = scheduleProject()
-        const serviceUrl = serviceUrlFrom(req)
+        const project = scheduleProject() ?? (isLocalMode ? 'local' : undefined)
+        const serviceUrl = serviceUrlFrom(req) ?? (isLocalMode ? 'http://local' : undefined)
         if (!project || !serviceUrl) {
           logger.error('doc-sync schedule: could not enqueue continuation; the next scheduled run starts over', { rule: name, runId, chunk, reason: !project ? 'project unknown' : 'service URL unknown' })
         } else {

@@ -1,7 +1,7 @@
 import { parseArgs } from 'node:util'
 import { createRequire } from 'node:module'
 import { ConfigError } from '../src/config.js'
-import { deploy, dev, rebuild, setup, validate, verify, type Context } from '../src/cli/commands.js'
+import { deploy, dev, rebuild, run, setup, validate, verify, type Context } from '../src/cli/commands.js'
 import { createRunner } from '../src/cli/exec.js'
 import { DEFAULT_CONFIG_PATH, loadConfig } from '../src/cli/load-config.js'
 import { resolveProject, type ResolvedProject } from '../src/cli/project.js'
@@ -16,6 +16,7 @@ Usage:
   doc-sync rebuild  [--config <path>] [--project <id>] [--dry-run] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync verify   [--config <path>] [--project <id>] [--fix] [--rule <name>]... [--start-after <path>] [--page-size <n>]
   doc-sync dev      [--config <path>] [--project <id>] --url <handler url> [--emulator-host <host:port>]
+  doc-sync run      <rule> [--config <path>] [--project <id>]
 
 Commands:
   validate   Check the config and list the collections and trigger names
@@ -25,11 +26,12 @@ Commands:
              Also the way to run a scheduled rule by hand or against the emulator: rebuild --rule <name>
   verify     Recompute every derived value and report mismatches; --fix repairs them
   dev        Forward Firestore emulator changes to the handler as CloudEvents (local development)
+  run        Call POST /schedule/<rule> once with an impersonated ID token (scheduled rules)
 
 Options:
   --config <path>           Config file (default: ${DEFAULT_CONFIG_PATH})
   --strict                  validate: exit 1 when the cost estimate has warnings
-  --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then .firebaserc, then gcloud's active project; setup/deploy/rebuild/verify --fix require one of the first three)
+  --project <id>            GCP project (default: $GOOGLE_CLOUD_PROJECT, then .firebaserc, then gcloud's active project; setup/deploy/run/rebuild/verify --fix require one of the first three)
   --dry-run                 setup/deploy: print gcloud commands; rebuild: report without writing
   --deploy-function <name>  deploy: run \`firebase deploy --only functions:<name>\` first
   --runtime-service-account <email>  setup: grant the function's runtime SA the roles it needs to enqueue continuation tasks
@@ -79,7 +81,7 @@ async function main(argv: string[]): Promise<number> {
     log(HELP)
     return values.help ? 0 : 1
   }
-  if (!['validate', 'setup', 'deploy', 'rebuild', 'verify', 'dev'].includes(command)) {
+  if (!['validate', 'setup', 'deploy', 'rebuild', 'verify', 'dev', 'run'].includes(command)) {
     console.error(`unknown command: ${command}\n`)
     log(HELP)
     return 1
@@ -128,6 +130,10 @@ async function main(argv: string[]): Promise<number> {
     case 'dev':
       if (!values.url) throw new Error('dev requires --url <handler url>')
       await dev(ctx, { url: values.url, emulatorHost: values['emulator-host'] })
+      break
+    case 'run':
+      if (!positionals[1]) throw new Error('run requires a rule name: doc-sync run <rule>')
+      await run(ctx, { rule: positionals[1] })
       break
   }
   return 0

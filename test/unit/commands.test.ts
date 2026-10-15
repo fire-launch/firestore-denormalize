@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { defineAggregate, defineConnection, defineView, jobName, triggerName, validateConfig } from '../../src/config.js'
-import { deploy, printSummary, setup, validate, type Context } from '../../src/cli/commands.js'
+import { deploy, printSummary, run, setup, validate, type Context } from '../../src/cli/commands.js'
 import { CommandError, formatCommand, type Runner } from '../../src/cli/exec.js'
 
 const config = validateConfig({
@@ -13,7 +13,7 @@ const config = validateConfig({
   ],
 })
 
-function fakeRunner(reads: Record<string, string | Error>) {
+function fakeRunner(reads: Record<string, string | Error>, mutateErrors: Record<string, Error> = {}) {
   const mutations: string[] = []
   const runner: Runner = {
     dryRun: false,
@@ -25,7 +25,10 @@ function fakeRunner(reads: Record<string, string | Error>) {
       return hit[1]
     },
     mutate(cmd, args) {
-      mutations.push(formatCommand(cmd, args))
+      const key = formatCommand(cmd, args)
+      const hit = Object.entries(mutateErrors).find(([k]) => key.startsWith(k))
+      if (hit) throw hit[1]
+      mutations.push(key)
     },
   }
   return { runner, mutations }
@@ -44,6 +47,7 @@ describe('setup', () => {
     setup(ctx(runner))
     expect(mutations).toEqual([
       'gcloud services enable eventarc.googleapis.com run.googleapis.com --project=my-proj',
+      'gcloud beta services identity create --service=eventarc.googleapis.com --project=my-proj',
       "gcloud iam service-accounts create doc-sync-trigger '--display-name=Eventarc triggers for doc-sync' --project=my-proj",
       'gcloud projects add-iam-policy-binding my-proj --member=serviceAccount:doc-sync-trigger@my-proj.iam.gserviceaccount.com --role=roles/eventarc.eventReceiver --condition=None --format=none',
       'gcloud run services add-iam-policy-binding docsync --region=asia-northeast1 --project=my-proj --member=serviceAccount:doc-sync-trigger@my-proj.iam.gserviceaccount.com --role=roles/run.invoker --format=none',
@@ -108,6 +112,85 @@ describe('setup with a cross-project runtime service account', () => {
     expect(mutations).toContain(
       'gcloud iam service-accounts add-iam-policy-binding doc-sync-trigger@my-proj.iam.gserviceaccount.com --project=my-proj --member=serviceAccount:fn-runtime@other-proj.iam.gserviceaccount.com --role=roles/iam.serviceAccountUser --format=none',
     )
+  })
+})
+
+describe('setup: Eventarc service agent', () => {
+  it('records the identity create mutation and survives its failure', () => {
+    const lines: string[] = []
+    const { runner, mutations } = fakeRunner(
+      { 'gcloud iam service-accounts describe': notFound, 'gcloud run services describe': 'docsync' },
+      { 'gcloud beta services identity create': new Error('boom') },
+    )
+    setup({ ...ctx(runner), log: (l = '') => lines.push(l) })
+    expect(mutations.some((m) => m.startsWith('gcloud beta services identity create'))).toBe(false)
+    const text = lines.join('\n')
+    expect(text).toContain('could not create the Eventarc service agent (run: gcloud beta services identity create --service=eventarc.googleapis.com --project=my-proj)')
+    expect(text).toContain("Eventarc's service agent can take a few minutes to become usable on a new project; if deploy is refused, wait and rerun.")
+    // setup continues past the failure
+    expect(mutations.some((m) => m.includes('service-accounts create'))).toBe(true)
+  })
+})
+
+describe('run', () => {
+  const scheduled = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })],
+  })
+  const rctx = (runner: Runner): Context => ({ ...ctx(runner), config: scheduled })
+
+  it('posts to /schedule/<rule> with an impersonated ID token', async () => {
+    const { runner } = fakeRunner({
+      'gcloud run services describe': 'https://docsync-abc-an.a.run.app\n',
+      'gcloud auth print-identity-token': 'fake-token\n',
+    })
+    const lines: string[] = []
+    const calls: { url: string; init: unknown }[] = []
+    const fetchImpl = async (url: string, init: unknown) => {
+      calls.push({ url, init })
+      return { ok: true, status: 200, text: async () => JSON.stringify({ rule: 'daily-likes', written: 1 }) }
+    }
+    await run({ ...rctx(runner), log: (l = '') => lines.push(l) }, { rule: 'daily-likes', fetchImpl })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toBe('https://docsync-abc-an.a.run.app/schedule/daily-likes')
+    expect(calls[0]!.init).toMatchObject({ method: 'POST', headers: { Authorization: 'Bearer fake-token', 'Content-Type': 'application/json' }, body: '{}' })
+    expect(lines.join('\n')).toContain('POST https://docsync-abc-an.a.run.app/schedule/daily-likes → 200')
+  })
+
+  it('refuses a rule that is not scheduled', async () => {
+    const { runner } = fakeRunner({})
+    await expect(run(rctx(runner), { rule: 'not-a-rule' })).rejects.toThrow('rule "not-a-rule" is not scheduled; deferred rules are flushed by their tasks')
+  })
+
+  it('requires an explicit project', async () => {
+    const { runner } = fakeRunner({})
+    await expect(run({ ...rctx(runner), projectSource: 'gcloud' }, { rule: 'daily-likes' })).rejects.toThrow(/`run` changes project/)
+  })
+
+  it('reports the service as missing when the URL is empty', async () => {
+    const { runner } = fakeRunner({ 'gcloud run services describe': '' })
+    await expect(run(rctx(runner), { rule: 'daily-likes' })).rejects.toThrow('service docsync not found in asia-northeast1; deploy the function first')
+  })
+
+  it('mentions the impersonation role on a token error', async () => {
+    const tokenError = new CommandError('gcloud', 1, 'ERROR: (gcloud.auth.print-identity-token) PERMISSION_DENIED')
+    const { runner } = fakeRunner({
+      'gcloud run services describe': 'https://docsync-abc-an.a.run.app\n',
+      'gcloud auth print-identity-token': tokenError,
+    })
+    await expect(run(rctx(runner), { rule: 'daily-likes' })).rejects.toThrow(/roles\/iam\.serviceAccountTokenCreator on doc-sync-trigger@my-proj\.iam\.gserviceaccount\.com/)
+  })
+
+  it('throws on a non-2xx response', async () => {
+    const { runner } = fakeRunner({
+      'gcloud run services describe': 'https://docsync-abc-an.a.run.app\n',
+      'gcloud auth print-identity-token': 'fake-token',
+    })
+    const fetchImpl = async () => ({ ok: false, status: 403, text: async () => JSON.stringify({ error: 'nope' }) })
+    await expect(run(rctx(runner), { rule: 'daily-likes', fetchImpl })).rejects.toThrow(/403/)
   })
 })
 

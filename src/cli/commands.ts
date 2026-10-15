@@ -1,4 +1,4 @@
-import { collectionGroupQueries, deferredRules, scheduleQueueName, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
+import { collectionGroupQueries, deferredRules, rulesOf, scheduleQueueName, scheduledRules, type ResolvedConfig, type ResolvedRule, writeTriggers } from '../config.js'
 import { estimateCost, formatChains, formatDuration } from '../cost.js'
 import { startDevBridge } from '../dev.js'
 import { rebuild as runRebuild } from '../rebuild.js'
@@ -176,6 +176,12 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
     ...(queueNeeded ? ['cloudtasks.googleapis.com'] : []),
   ]
   runner.mutate('gcloud', ['services', 'enable', ...apis, `--project=${project}`])
+  try {
+    runner.mutate('gcloud', ['beta', 'services', 'identity', 'create', '--service=eventarc.googleapis.com', `--project=${project}`])
+  } catch {
+    log(`  could not create the Eventarc service agent (run: gcloud beta services identity create --service=eventarc.googleapis.com --project=${project})`)
+  }
+  log("  Eventarc's service agent can take a few minutes to become usable on a new project; if deploy is refused, wait and rerun.")
 
   log(`# 2/${total} Trigger service account`)
   if (exists(() => runner.read('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${project}`]))) {
@@ -387,6 +393,47 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
         ? `; jobs: created ${jobPlan.create.length}, updated ${jobPlan.update.length}, deleted ${jobPlan.remove.length}, unchanged ${jobPlan.keep.length}`
         : ''),
   )
+}
+
+/** Minimal shape of `fetch`, so tests can inject a fake without a full `Response`. */
+type FetchLike = (
+  url: string,
+  init: { method: string; headers: Record<string, string>; body: string },
+) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>
+
+/** Calls a scheduled rule's `/schedule/<rule>` once, impersonating the trigger service account for an ID token (same identity Cloud Scheduler uses). */
+export async function run(ctx: Context, opts: { rule: string; fetchImpl?: FetchLike }): Promise<void> {
+  requireExplicitProject({ project: ctx.project, source: ctx.projectSource }, 'run')
+  const { config, project, runner, log } = ctx
+  const rule = rulesOf(config).find((r) => r.name === opts.rule)
+  if (!rule?.scheduled) {
+    throw new Error(`rule "${opts.rule}" is not scheduled; deferred rules are flushed by their tasks`)
+  }
+  const serviceUrl = runner.read('gcloud', serviceUrlArgs(config, project)).trim()
+  if (!serviceUrl) {
+    throw new Error(`service ${config.service} not found in ${config.serviceRegion}; deploy the function first`)
+  }
+  const email = serviceAccountEmail(config, project)
+  let token: string
+  try {
+    token = runner.read('gcloud', ['auth', 'print-identity-token', `--impersonate-service-account=${email}`, `--audiences=${serviceUrl}`]).trim()
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    throw new Error(`${message} (you need roles/iam.serviceAccountTokenCreator on ${email} to impersonate it)`)
+  }
+  const url = `${serviceUrl}/schedule/${opts.rule}`
+  const doFetch = opts.fetchImpl ?? (fetch as FetchLike)
+  const res = await doFetch(url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' })
+  const text = await res.text()
+  let pretty = text
+  try {
+    pretty = JSON.stringify(JSON.parse(text), null, 2)
+  } catch {
+    // not JSON; print as received
+  }
+  log(`POST ${url} → ${res.status}`)
+  log(pretty)
+  if (!res.ok) throw new Error(`POST ${url} failed: ${res.status}`)
 }
 
 const NOT_FOUND = /NOT_FOUND|not found|cannot find|does not exist/i

@@ -34,6 +34,16 @@ function handlerFor(rules = config.rules, enqueue?: (t: ContinuationTask) => Pro
 const processed = (logs: ReturnType<typeof silentLogger>['entries'], rule: string) => logs.findLast((l) => l.message === 'doc-sync: processed' && l.fields?.rule === rule)?.fields
 const flush = (handler: ReturnType<typeof createDocSyncHandler>, task: ContinuationTask) => invokeRaw(handler, { url: task.url.replace(`https://${host}`, ''), headers: { host }, body: task.body })
 
+/** Polls `cond` until it is true, or throws after `timeoutMs`. */
+async function until(cond: () => Promise<boolean> | boolean, timeoutMs: number): Promise<void> {
+  const start = Date.now()
+  for (;;) {
+    if (await cond()) return
+    if (Date.now() - start > timeoutMs) throw new Error('timed out waiting for condition')
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+}
+
 beforeAll(() => { db = firestore() })
 beforeEach(async () => { await clearFirestore() })
 
@@ -161,5 +171,20 @@ describe('defer: view sources (refField and idParam)', () => {
   it('a flush source unit whose path matches no refField source answers 400', async () => {
     const { handler } = handlerFor([postInfo])
     expect((await invokeRaw(handler, { url: '/schedule/post-info', headers: { host }, body: { flush: { unit: 'source', path: 'wrong/x1' } } })).status).toBe(400)
+  })
+})
+
+describe('defer: local task mode', () => {
+  it('flushes automatically with no manual flush call, collapsing two changes in one bucket into one flush', async () => {
+    await db.doc('category/c1').set({ name: 'News' })
+    await db.doc('post/p1').set({ title: 'a', categoryId: 'c1' })
+    const logger = silentLogger()
+    const handler = createDocSyncHandler(config, { firestore: db, logger, pageSize: 2, schedule: { local: { maxWaitMs: 50 } } })
+    const cat = db.doc('category/c1')
+    await invoke(handler, { ...(await change(cat, () => cat.update({ name: 'Tech' }))), headers: { host } })
+    await invoke(handler, { ...(await change(cat, () => cat.update({ name: 'Tech2' }))), headers: { host } })
+    await until(async () => (await db.doc('post/p1').get()).get('category')?.name === 'Tech2', 1000)
+    expect((await db.doc('post/p1').get()).get('category')).toEqual({ name: 'Tech2' })
+    expect(logger.entries.filter((l) => l.message === 'doc-sync: local task ran')).toHaveLength(1)
   })
 })
