@@ -39,6 +39,9 @@ function spawnError(cmd: string, err: NodeJS.ErrnoException): Error {
 /** With a shell, Node joins the arguments unquoted; quote the ones that need it so spaces and metacharacters survive. */
 function shellArgs(args: string[]): string[] {
   if (!SHELL) return args
+  // cmd.exe has no escape for a double quote inside a quoted argument, so refuse rather than let it break out.
+  const bad = args.find((a) => a.includes('"'))
+  if (bad) throw new Error(`argument contains a double quote, which cannot be passed safely on Windows: ${bad}`)
   return args.map((a) => (/^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `"${a.replace(/(["%])/g, '^$1')}"`))
 }
 

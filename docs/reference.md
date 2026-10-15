@@ -239,13 +239,14 @@ A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) an
 ## Security
 
 - The handler does not authenticate. Restrict invocation to the trigger SA: `invoker:` in `onRequest`, or `--no-allow-unauthenticated` + `roles/run.invoker` on Cloud Run. Without it the function is public.
-- A forged or replayed request can only force recomputation (reads). Values are re-read from the real sources; `patch` gets a fresh, membership-checked read, never request data.
+- A forged or replayed request can force recomputation: reads, writes of correct values, scheduled and deferred runs. Values are re-read from the real sources. `patch` gets `change.after` from a fresh, membership-checked read, but `change.before` is the request payload and may be forged: never derive values from it.
+- Continuation and flush tasks call back at `https://<Host header>`. If the service is reachable under any host other than its run.app URL, set `schedule.serviceUrl`.
 - Scheduler jobs call the function with the trigger service account's OIDC token; the same `invoker` restriction covers them. The `/schedule/<rule>` route does no authentication of its own.
 - Continuation tasks call back with the same trigger service account's OIDC token, so the same `invoker` restriction covers them too.
-- `setup` grants the trigger SA exactly `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the service.
+- `setup` grants the trigger SA `roles/eventarc.eventReceiver` on the project and `roles/run.invoker` on the service. With `--runtime-service-account`, it also grants the runtime SA `roles/cloudtasks.enqueuer` on the queue and `roles/iam.serviceAccountUser` on the trigger SA, so every workload running as the runtime SA can act as the trigger SA.
 - The function's runtime SA needs Firestore read/write (`roles/datastore.user`) and runs your `build` / `patch`; use a dedicated SA, not the default compute one.
 - Fan-out has no per-event cap; control it with `validate` warnings, `maxInstances`, `timeoutSeconds`.
-- `verify` output and `Mismatch` objects contain document values.
+- `verify` output and `Mismatch` objects contain document values. Logs contain document paths and ids, and the messages of errors thrown by `build` / `patch`.
 
 ## Recommended function settings
 
