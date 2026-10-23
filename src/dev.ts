@@ -25,7 +25,7 @@ export interface DevBridgeOptions {
 }
 
 export interface DevBridge {
-  /** Resolves once every collection listener has received its initial snapshot. */
+  /** Resolves once every collection listener has received its initial snapshot; rejects if one fails before that. */
   ready: Promise<void>
   /** Resolves when deliveries in flight have finished. */
   idle(): Promise<void>
@@ -48,7 +48,8 @@ export function startDevBridge(config: DocSyncConfig | ResolvedConfig, options: 
       : options.firestore.collection(pattern.raw)
     let initial = true
     let markReady!: () => void
-    readies.push(new Promise<void>((r) => (markReady = r)))
+    let markFailed!: (err: unknown) => void
+    readies.push(new Promise<void>((resolve, reject) => ((markReady = resolve), (markFailed = reject))))
 
     const unsubscribe = query.onSnapshot(
       (snapshot) => {
@@ -71,7 +72,10 @@ export function startDevBridge(config: DocSyncConfig | ResolvedConfig, options: 
           markReady()
         }
       },
-      (err) => logger.error('doc-sync dev: listener failed', { collection: pattern.raw, error: err }),
+      (err) => {
+        logger.error('doc-sync dev: listener failed', { collection: pattern.raw, error: err })
+        if (initial) markFailed(err)
+      },
     )
     unsubscribes.push(unsubscribe)
   }
@@ -94,7 +98,7 @@ export function startDevBridge(config: DocSyncConfig | ResolvedConfig, options: 
       'ce-project': options.project,
       'ce-database': database,
       'ce-namespace': '(default)',
-      'ce-document': document,
+      // No `ce-document`: a header carries only Latin-1, and the handler reads the path from the payload.
     }
     try {
       const res = await doFetch(options.url, { method: 'POST', headers, body })
@@ -105,9 +109,17 @@ export function startDevBridge(config: DocSyncConfig | ResolvedConfig, options: 
     }
   }
 
+  const stop = () => unsubscribes.forEach((u) => u())
   return {
-    ready: Promise.all(readies).then(() => undefined),
+    // A listener that fails before its first snapshot fails `ready` and stops the others, so the caller can exit.
+    ready: Promise.all(readies).then(
+      () => undefined,
+      (err: unknown) => {
+        stop()
+        throw err
+      },
+    ),
     idle: () => Promise.all([...inFlight]).then(() => undefined),
-    stop: () => unsubscribes.forEach((u) => u()),
+    stop,
   }
 }

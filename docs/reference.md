@@ -8,12 +8,12 @@ The config file (e.g. `functions/src/doc-sync.config.ts`; any name, passed with 
 
 | Key | Meaning |
 |---|---|
-| `name` | Instance name (`[a-z][a-z0-9-]*`). Unique per project and region. |
+| `name` | Instance name (`[a-z][a-z0-9-]*`, up to 63 characters). Unique per project and region. |
 | `region` | Eventarc location = Firestore database location (`asia-northeast1`, `nam5`, ...) |
 | `database` | Firestore database ID. Default `(default)` |
 | `service` | Cloud Run service name of the function (for `onRequest`: the function name, lower-cased) |
 | `serviceRegion` | Cloud Run region. Default `region`; required when `region` is a multi-region (`nam5`, `eur3`) |
-| `serviceAccount` | Trigger service account; a bare ID becomes `<id>@<project>.iam.gserviceaccount.com` |
+| `serviceAccount` | Trigger service account; a bare ID becomes `<id>@<project>.iam.gserviceaccount.com`. `setup` creates it only in that project; an account of another project must already exist |
 | `rules[]` | The rules, in any order: `defineConnection(...)`, `defineAggregate(...)`, `defineView(...)`, `defineProjection(...)` (or objects with a `kind`) |
 
 ### Resource names
@@ -193,7 +193,7 @@ The handler is `(req, res) => Promise<void>` and also works with Express or Node
 | `run <rule>` | Calls a scheduled rule once the way Cloud Scheduler would: `POST /schedule/<rule>` with an ID token obtained by impersonating the trigger service account (`gcloud auth print-identity-token --impersonate-service-account ... --audiences <service url>`). The caller needs `roles/iam.serviceAccountTokenCreator` on that account. Scheduled rules only |
 | `dev --url <handler>` | Bridges the Firestore emulator to the handler as CloudEvents. Emulator only |
 
-- `--config` defaults to `./doc-sync.config.ts`. `--project` resolves in order: `--project`, `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`, `.firebaserc` (when it names a single project), gcloud's active config; every command prints `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)`.
+- `--config` defaults to `./doc-sync.config.ts`. `--project` resolves in order: `--project`, `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`, the nearest `.firebaserc` (when it names a single project), gcloud's active config; every command prints `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)`.
 - `setup`, `deploy`, `rebuild` (without `--dry-run`), `verify --fix` and `run` refuse a project that comes only from gcloud's active config: name it with `--project`, `GOOGLE_CLOUD_PROJECT`, or `.firebaserc`.
 - `rebuild` / `verify` / `dev` use Application Default Credentials, or the emulator when `FIRESTORE_EMULATOR_HOST` or `--emulator-host` is set.
 - `--start-after` applies to the first rule processed: use it with `--rule`.
@@ -237,6 +237,7 @@ A deferred rule's marking events show `0 (+ 1 task)` reads (or `≤ 2 tasks`) an
 - Targets are not deleted when the source is deleted; use `setNull` or `deleteField`.
 - A `targetField` overwritten by the application keeps the wrong value until the source changes or `rebuild` / `verify --fix`; a removed one is repaired on the next event.
 - Target queries need the single-field index on `idField`; collection-group queries (`validate` lists them) need a collection-group index; `idField` + `orderBy` in a view needs a composite index; a `sum` aggregate filtered by `idField` needs a composite index too. Firestore prints the creation link on first use.
+- An `idField` aggregate whose `source` the `target` cannot resolve (e.g. `users/{uid}/likes` counted per `post`) runs over the collection group, so it also counts every other collection with the same ID, such as `archive/{a}/likes`. Give such collections distinct IDs.
 - Permanent failures in `build` / `patch` or a missing index return 500 and are redelivered for up to 24 hours; watch the `doc-sync: failed` log line.
 
 ## First deployment on a new project

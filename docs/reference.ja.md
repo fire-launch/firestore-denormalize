@@ -8,12 +8,12 @@
 
 | キー | 意味 |
 |---|---|
-| `name` | インスタンス名（`[a-z][a-z0-9-]*`）。プロジェクトとリージョンの中で一意にする |
+| `name` | インスタンス名（`[a-z][a-z0-9-]*`、63 文字まで）。プロジェクトとリージョンの中で一意にする |
 | `region` | Eventarc のロケーション = Firestore データベースのロケーション（`asia-northeast1`、`nam5` など） |
 | `database` | Firestore のデータベース ID。既定 `(default)` |
 | `service` | 関数の Cloud Run サービス名（`onRequest` の場合は関数名を小文字化したもの） |
 | `serviceRegion` | Cloud Run のリージョン。既定は `region`。`region` がマルチリージョン（`nam5`、`eur3` など）のときは必須 |
-| `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完される |
+| `serviceAccount` | トリガー用サービスアカウント。ID だけ書くと `<id>@<project>.iam.gserviceaccount.com` に補完される。`setup` が作成するのはこのプロジェクトのアカウントだけで、別プロジェクトのアカウントは先に作っておく |
 | `rules[]` | ルール。順序は自由: `defineConnection(...)`、`defineAggregate(...)`、`defineView(...)`、`defineProjection(...)`（または `kind` を持つオブジェクト） |
 
 ### リソース名
@@ -193,7 +193,7 @@ createDocSyncHandler(config, { firestore, logger, maxRetries, pageSize, schedule
 | `run <rule>` | Cloud Scheduler と同じ方法でスケジュールルールを 1 回実行します: トリガー用サービスアカウントになりすまして得た ID トークンで `POST /schedule/<rule>` を呼びます（`gcloud auth print-identity-token --impersonate-service-account ... --audiences <サービス URL>`）。呼び出す側にそのサービスアカウントへの `roles/iam.serviceAccountTokenCreator` が必要です。スケジュールルール専用です |
 | `dev --url <handler>` | Firestore エミュレータとハンドラを CloudEvents で橋渡しします。エミュレータ専用です |
 
-- `--config` の既定は `./doc-sync.config.ts` です。`--project` は次の順で解決します: `--project`、`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`、`.firebaserc`（プロジェクトが 1 つだけのとき）、gcloud のアクティブな設定。どのコマンドも `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)` を表示します。
+- `--config` の既定は `./doc-sync.config.ts` です。`--project` は次の順で解決します: `--project`、`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` / `CLOUDSDK_CORE_PROJECT`、いちばん近い `.firebaserc`（プロジェクトが 1 つだけのとき）、gcloud のアクティブな設定。どのコマンドも `Project:         <id> (from --project | from environment variable | from .firebaserc | from gcloud active config | emulator default)` を表示します。
 - `setup`・`deploy`・`rebuild`（`--dry-run` なし）・`verify --fix`・`run` は、プロジェクトが gcloud のアクティブな設定からしか来ていない場合は実行を拒否します。`--project`、`GOOGLE_CLOUD_PROJECT`、`.firebaserc` のいずれかで明示してください。
 - `rebuild` / `verify` / `dev` は Application Default Credentials を使うか、`FIRESTORE_EMULATOR_HOST` または `--emulator-host` が設定されていればエミュレータを使います。
 - `--start-after` は最初に処理するルールにしか効きません。`--rule` と組み合わせて使ってください。
@@ -237,6 +237,7 @@ defer ルールの印をつけるだけのイベントは reads `0 (+ 1 task)`�
 - ソースが削除されたときにターゲットは削除されません。`setNull` または `deleteField` を使ってください。
 - アプリが上書きした `targetField` は、ソースが次に変わるか `rebuild` / `verify --fix` を実行するまで誤った値のままです。フィールドが削除された場合は、次のイベントで直ります。
 - ターゲット検索には `idField` の単一フィールドインデックスが必要です。コレクショングループクエリ（`validate` が一覧します）にはコレクショングループインデックスが必要です。ビューで `idField` と `orderBy` を併用する場合、および `idField` で絞り込む `sum` aggregate にも複合インデックスが必要です。初回実行時に Firestore が作成用のリンクを表示します。
+- `target` から `source` のパスが決まらない `idField` の aggregate（例: `post` ごとに数える `users/{uid}/likes`）はコレクショングループで集計するため、`archive/{a}/likes` のように同じ ID を持つ別のコレクションも数えます。そうしたコレクションには別の ID を付けてください。
 - `build` / `patch` での恒久的な失敗やインデックス不足は 500 を返し、最大 24 時間再送されます。`doc-sync: failed` のログ行を監視してください。
 
 ## 新しいプロジェクトへの初回デプロイ

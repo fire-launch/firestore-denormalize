@@ -88,4 +88,30 @@ describe('doc-sync dev bridge', () => {
 
     bridge.stop()
   })
+
+  it('delivers changes of documents whose ID is not Latin-1', async () => {
+    await db.doc('category/東京').set({ name: 'A' })
+    await db.doc('post/p1').set({ categoryId: '東京' })
+    const delivered: { document: string; status: number }[] = []
+    const bridge = startDevBridge(config, { firestore: db, url, project: PROJECT, logger: silentLogger(), onDelivered: (d) => delivered.push(d) })
+    await bridge.ready
+    await db.doc('category/東京').update({ name: 'B' })
+    for (let i = 0; i < 50 && (await db.doc('post/p1').get()).get('category')?.name !== 'B'; i++) await new Promise((r) => setTimeout(r, 50))
+    await bridge.idle()
+    expect(delivered).toContainEqual(expect.objectContaining({ document: 'category/東京', status: 204 }))
+    expect((await db.doc('post/p1').get()).get('category')).toEqual({ name: 'B' })
+    bridge.stop()
+  })
+
+  it('rejects ready when a listener fails before its first snapshot', async () => {
+    const failing = {
+      onSnapshot: (_next: unknown, error: (err: Error) => void) => {
+        queueMicrotask(() => error(new Error('permission denied')))
+        return () => {}
+      },
+    }
+    const fake = { collection: () => failing, collectionGroup: () => failing } as unknown as Firestore
+    const bridge = startDevBridge(config, { firestore: fake, url, project: PROJECT, logger: silentLogger() })
+    await expect(bridge.ready).rejects.toThrow('permission denied')
+  })
 })

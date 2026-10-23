@@ -4,6 +4,24 @@ All notable changes to this project are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.14.0] - 2026-10-23
+
+### Fixed
+
+- Events for documents whose ID contains non-ASCII characters (for example `category/東京`) were processed under a garbled path and changed nothing. The handler now takes the path from the event payload.
+- With `defer`, a view whose `refField` sources read the same collection recomputed only the targets of the first one.
+- A `Date` returned by `build` or `patch` was rewritten on every recompute and reported by `verify`.
+- `rebuild` and `verify` could resume a budget-stopped run in the wrong pass when a collection-group walk stopped on a same-named collection outside the pattern.
+- `setup` created a service account in the wrong project when `serviceAccount` named one from another project; it now stops with an error.
+- `doc-sync dev` failed to deliver changes of documents with non-ASCII IDs, and hung when a listener failed before its first snapshot.
+
+### Changed
+
+- The CLI uses the nearest `.firebaserc` only. When it names several projects or is invalid, parent directories are no longer searched.
+- `deploy` fails before changing anything when a rule is scheduled and Cloud Scheduler cannot be listed (API disabled or permission denied). Without scheduled rules it goes on and says that old jobs were not checked.
+- `validate` rejects an instance `name` longer than 63 characters, and an `idField` aggregate over a collection group whose `source` contains a fixed document ID.
+- The reference notes that a collection-group aggregate also counts other collections with the same ID.
+
 ## [0.13.0] - 2026-10-15
 
 ### Added
