@@ -1,6 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Firestore, QueryDocumentSnapshot } from 'firebase-admin/firestore'
-import { FieldValue } from 'firebase-admin/firestore'
+import { FieldValue, Timestamp } from 'firebase-admin/firestore'
 import { createDocSyncHandler, defineAggregate, defineConfig, defineProjection, defineView, rebuild, verify, type DocSyncConfig } from '../src/index.js'
 import { change, clearFirestore, firestore, invoke, silentLogger } from './helpers.js'
 
@@ -725,6 +725,27 @@ describe('views: rebuild and verify with base', () => {
     expect((await db.doc('postPublic/zz').get()).exists).toBe(false)
   })
 
+  it('resumes inside the targets when the cursor is a same-named collection outside the target pattern', async () => {
+    // Collection-group walks page through every `card` collection, so a budget stop can leave the cursor on one outside the pattern.
+    const cards = defineView({
+      name: 'member-card',
+      target: 'org/{o}/card',
+      base: 'org/{o}/member',
+      targetFields: ['name'],
+      sources: {},
+      build: ({ base }) => ({ name: base!.get('name') }),
+    })
+    const cfg2 = defineConfig({ ...config, rules: [cards] })
+    await db.doc('org/o1/member/m1').set({ name: 'a' }) // no target yet: pass 1 would create it
+    await db.doc('org/o1/card/orphan').set({ name: 'x' }) // before the cursor: pass 2 must not reach it
+    await db.doc('zzz/a/card/b').set({ name: 'stray' })
+    for (const run of [rebuild, verify] as const) {
+      await run(cfg2, { firestore: db, logger: silentLogger(), startAfter: 'zzz/a/card/b', ...(run === verify ? { fix: true } : {}) })
+      expect((await db.doc('org/o1/card/m1').get()).exists).toBe(false)
+      expect((await db.doc('org/o1/card/orphan').get()).exists).toBe(true)
+    }
+  })
+
   it('verify reports missing targets, differing fields and orphans, and fixes all three', async () => {
     await db.doc('post/p1').set({ title: 'a' })
     await db.doc('post/p2').set({ title: 'b' })
@@ -859,5 +880,27 @@ describe('projections', () => {
     await rebuild(cfg, { firestore: db, logger: silentLogger() })
     expect((await db.doc('userPublic/u1').get()).data()).toEqual({ displayName: 'D' })
     expect((await db.doc('userPublic/gone').get()).exists).toBe(false)
+  })
+})
+
+describe('views: Date values', () => {
+  const dated = defineView({
+    name: 'post-dated',
+    target: 'postDated',
+    base: 'post',
+    targetFields: ['publishedAt'],
+    sources: { comments: { collection: 'post/{postId}/comment', idParam: 'postId' } },
+    build: ({ base }) => ({ publishedAt: (base!.get('at') as Timestamp).toDate() }),
+  })
+  const cfg = defineConfig({ ...config, rules: [dated] })
+
+  it('a Date returned by build matches the stored Timestamp, so nothing is rewritten or reported', async () => {
+    await db.doc('post/p1').set({ at: Timestamp.fromMillis(1_700_000_000_000) })
+    await rebuild(cfg, { firestore: db, logger: silentLogger() })
+    expect((await db.doc('postDated/p1').get()).get('publishedAt')).toEqual(Timestamp.fromMillis(1_700_000_000_000))
+    const [again] = await rebuild(cfg, { firestore: db, logger: silentLogger() })
+    expect(again).toMatchObject({ written: 0 })
+    const [report] = await verify(cfg, { firestore: db, logger: silentLogger() })
+    expect(report!.mismatched).toBe(0)
   })
 })

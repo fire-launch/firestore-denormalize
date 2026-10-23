@@ -1,9 +1,12 @@
+import { Timestamp } from 'firebase-admin/firestore'
+
 /**
  * Deep equality for Firestore values.
  *
  * Maps and arrays are compared structurally. Firestore value classes
  * (`Timestamp`, `GeoPoint`, `DocumentReference`, `FieldValue`, ...) are compared
  * with their own `isEqual`. Bytes (`Buffer` / `Uint8Array`) are compared byte-wise.
+ * A `Date` equals the `Timestamp` of the same instant, since Firestore stores one as the other.
  */
 export function isEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true
@@ -26,6 +29,8 @@ export function isEqual(a: unknown, b: unknown): boolean {
   }
 
   if (a instanceof Date || b instanceof Date) {
+    // Firestore stores a Date as a Timestamp, so a Date from `build` must equal the Timestamp read back.
+    if (a instanceof Timestamp || b instanceof Timestamp) return Timestamp.fromDate((a instanceof Date ? a : b) as Date).isEqual((a instanceof Timestamp ? a : b) as Timestamp)
     return a instanceof Date && b instanceof Date && a.getTime() === b.getTime()
   }
 

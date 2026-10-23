@@ -70,6 +70,20 @@ export async function walkCollection(
   return { scanned, lastPath, stopped: false }
 }
 
+/**
+ * Whether a resume path belongs to the target walk (pass 2) rather than the base walk (pass 1).
+ * Decided by the path's collection ID, since a collection-group walk can stop on a document
+ * outside both patterns; the pattern match is the fallback when base and target share that ID.
+ */
+export function resumesInTargets(rule: ResolvedRule, path: string): boolean {
+  const base = rule.kind === 'view' ? rule.basePattern : undefined
+  if (base && base.collectionId !== rule.targetPattern.collectionId) {
+    const segments = path.split('/')
+    return segments[segments.length - 2] === rule.targetPattern.collectionId
+  }
+  return matchDocumentPath(rule.targetPattern, path) !== undefined
+}
+
 /** {@link walkCollection} over the rule's target collection(s). */
 export function walkTargets(
   firestore: Firestore,

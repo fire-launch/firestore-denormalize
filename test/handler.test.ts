@@ -517,6 +517,19 @@ describe('request handling (5.1 / 6)', () => {
     expect((await post.get()).get('category')).toEqual({ name: 'B' })
   })
 
+  it('reads a non-ASCII document ID correctly although Node decodes the ce-document header as Latin-1', async () => {
+    const cat = db.doc('category/東京')
+    await cat.set({ name: 'A' })
+    const post = db.doc('post/p1')
+    await post.set({ categoryId: '東京' })
+    const { handler } = handlerFor()
+    const ev = await change(cat, () => cat.update({ name: 'B' }))
+    // Eventarc sends the path's UTF-8 bytes; Node's http parser hands them over as Latin-1 characters.
+    const asNodeSeesIt = Buffer.from('category/東京', 'utf8').toString('latin1')
+    expect(await invoke(handler, { ...ev, document: asNodeSeesIt })).toBe(204)
+    expect((await post.get()).get('category')).toEqual({ name: 'B' })
+  })
+
   it('accepts application/json payloads', async () => {
     await db.doc('category/c1').set({ name: 'A' })
     const post = db.doc('post/p1')

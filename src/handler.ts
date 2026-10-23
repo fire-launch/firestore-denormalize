@@ -369,10 +369,14 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
         if (!match) return respondJson(res, 400, { error: 'flush path does not match this rule' })
         result = await processor.connectionSource(rule, match, undefined, undefined, {})
       } else if (rule.kind === 'view') {
-        let match: DocumentMatch | undefined
-        const foundSource = rule.sources.find((s) => s.refField !== undefined && (match = matchDocumentPath(s.pattern, flush.path)) !== undefined)
-        if (!foundSource || !match) return respondJson(res, 400, { error: 'no refField source matches this flush path' })
-        result = await processor.viewSource(rule, foundSource, match, undefined, undefined, {})
+        // Several refField sources can read the same collection; their units share a task id, so one flush recomputes the targets of all of them.
+        const matched = rule.sources.flatMap((source) => {
+          const match = source.refField !== undefined ? matchDocumentPath(source.pattern, flush.path) : undefined
+          return match ? [{ source, match }] : []
+        })
+        if (!matched.length) return respondJson(res, 400, { error: 'no refField source matches this flush path' })
+        result = newResult(rule, 'source')
+        for (const { source, match } of matched) mergeResult(result, await processor.viewSource(rule, source, match, undefined, undefined, {}))
       } else {
         return respondJson(res, 400, { error: `rule "${name}" has no source unit to flush` })
       }
@@ -510,7 +514,8 @@ export function createDocSyncHandler(config: DocSyncConfig | ResolvedConfig, opt
       return respond(res, 204)
     }
 
-    const document = header(req, 'ce-document') ?? event.after?.path ?? event.before?.path
+    // The payload's resource name first: Eventarc puts the path's UTF-8 bytes in `ce-document`, which Node reads as Latin-1.
+    const document = event.after?.path ?? event.before?.path ?? utf8Header(header(req, 'ce-document'))
     if (!document) {
       logger.error('doc-sync: event without a document path, dropping it', { eventId, eventType })
       return respond(res, 204)
@@ -1468,6 +1473,20 @@ function finish(result: RuleResult, counter: ReadCounter): RuleResult {
   return Object.assign(result, counter.counts())
 }
 
+/** Adds the counts of `part` to `result`; the last outcome that wrote wins, as in {@link count}. */
+function mergeResult(result: RuleResult, part: RuleResult): void {
+  result.source = result.source === undefined ? part.source : `${result.source},${part.source}`
+  result.targets += part.targets
+  result.writes += part.writes
+  result.retries += part.retries
+  result.reads += part.reads
+  result.queries += part.queries
+  result.aggregations += part.aggregations
+  if (part.action !== 'skip') result.action = part.action
+  if (result.writes === 0) result.reason ??= part.reason
+  else delete result.reason
+}
+
 function count(result: RuleResult, outcome: Outcome): void {
   if (outcome === 'skip') return
   result.writes++
@@ -1587,6 +1606,13 @@ function header(req: DocSyncRequest, name: string): string | undefined {
   const v = req.headers[name] ?? req.headers[name.toLowerCase()]
   const s = Array.isArray(v) ? v[0] : v
   return s === undefined || s === '' ? undefined : s
+}
+
+/** Re-reads a header value that Node decoded as Latin-1 as the UTF-8 it was sent as; values that are not such bytes stay as they are. */
+function utf8Header(value: string | undefined): string | undefined {
+  if (value === undefined || !/[\u0080-\u00ff]/.test(value) || /[^\u0000-\u00ff]/.test(value)) return value
+  const decoded = Buffer.from(value, 'latin1').toString('utf8')
+  return decoded.includes('\ufffd') ? value : decoded
 }
 
 async function readBody(req: DocSyncRequest): Promise<Uint8Array | string | object | undefined> {

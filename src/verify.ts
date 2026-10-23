@@ -8,8 +8,7 @@ import { type DocSyncConfig, type ResolvedConfig, type ResolvedRule, resolveConf
 import { ReadCounter, type ReadCounts } from './counter.js'
 import { type CheckResult, Processor, targetPathForBase } from './handler.js'
 import { jsonLogger, type Logger } from './logger.js'
-import { matchDocumentPath } from './paths.js'
-import { selectRules, walkCollection, walkTargets } from './walk.js'
+import { resumesInTargets, selectRules, walkCollection, walkTargets } from './walk.js'
 
 export interface VerifyOptions {
   firestore: Firestore
@@ -90,7 +89,7 @@ export async function verify(config: DocSyncConfig | ResolvedConfig, options: Ve
     let pending: Mismatch[] = []
     const counter = new ReadCounter()
     const baseView = rule.kind === 'view' && rule.basePattern ? rule : undefined
-    const resumeInTargets = startAfter !== undefined && matchDocumentPath(rule.targetPattern, startAfter) !== undefined
+    const resumeInTargets = startAfter !== undefined && resumesInTargets(rule, startAfter)
 
     const record = (document: string, check: CheckResult, didFix: boolean) => {
       if (check.issue === 'missing' || check.issue === 'orphan') {

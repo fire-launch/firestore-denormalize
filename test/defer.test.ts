@@ -168,6 +168,31 @@ describe('defer: view sources (refField and idParam)', () => {
     expect((await db.doc('post/p1').get()).get('commentCount')).toBe(1)
   })
 
+  it('a document referenced by two refField sources recomputes the targets of both', async () => {
+    const credits = defineView({
+      name: 'post-credits',
+      target: 'post',
+      targetFields: ['authorName', 'editorName'],
+      sources: {
+        author: { collection: 'user', refField: 'authorId' },
+        editor: { collection: 'user', refField: 'editorId' },
+      },
+      build: ({ sources }) => ({ authorName: sources.author[0]?.get('name'), editorName: sources.editor[0]?.get('name') }),
+      defer: '10m',
+    })
+    await db.doc('user/u1').set({ name: 'Ann' })
+    await db.doc('user/u2').set({ name: 'Bob' })
+    await db.doc('post/p1').set({ authorId: 'u1', editorId: 'u2' })
+    await db.doc('post/p2').set({ authorId: 'u2', editorId: 'u1' })
+    const { handler, tasks } = handlerFor([credits])
+    const user = db.doc('user/u1')
+    await invoke(handler, { ...(await change(user, () => user.update({ name: 'Annie' }))), headers: { host } })
+    // Cloud Tasks keeps one task per id (a second create answers 409)
+    for (const task of new Map(tasks.map((t) => [t.id, t])).values()) expect((await flush(handler, task)).status).toBe(200)
+    expect((await db.doc('post/p1').get()).get('authorName')).toBe('Annie')
+    expect((await db.doc('post/p2').get()).get('editorName')).toBe('Annie')
+  })
+
   it('a flush source unit whose path matches no refField source answers 400', async () => {
     const { handler } = handlerFor([postInfo])
     expect((await invokeRaw(handler, { url: '/schedule/post-info', headers: { host }, body: { flush: { unit: 'source', path: 'wrong/x1' } } })).status).toBe(400)

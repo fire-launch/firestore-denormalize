@@ -8,8 +8,7 @@ import { type DocSyncConfig, type ResolvedConfig, type ResolvedRule, resolveConf
 import { ReadCounter, type ReadCounts } from './counter.js'
 import { type Outcome, Processor, targetPathForBase } from './handler.js'
 import { jsonLogger, type Logger } from './logger.js'
-import { matchDocumentPath } from './paths.js'
-import { selectRules, walkCollection, walkTargets } from './walk.js'
+import { resumesInTargets, selectRules, walkCollection, walkTargets } from './walk.js'
 
 export interface RebuildOptions {
   firestore: Firestore
@@ -81,7 +80,7 @@ export async function rebuild(config: DocSyncConfig | ResolvedConfig, options: R
       if (options.dryRun) logger.info('doc-sync rebuild: would write', { rule: rule.name, document, action: outcome })
     }
     const baseView = rule.kind === 'view' && rule.basePattern ? rule : undefined
-    const resumeInTargets = startAfter !== undefined && matchDocumentPath(rule.targetPattern, startAfter) !== undefined
+    const resumeInTargets = startAfter !== undefined && resumesInTargets(rule, startAfter)
     let completed = true
 
     // Pass 1 (views with `base`): every base document gets its target created or brought up to date.
