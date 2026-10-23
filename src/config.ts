@@ -406,6 +406,8 @@ export class ConfigError extends Error {
 }
 
 const INSTANCE_NAME = /^[a-z][a-z0-9-]*$/
+/** GCP label values, which carry the instance name, are at most 63 characters. */
+const LABEL_VALUE_MAX = 63
 const TRIGGER_NAME = /^[a-z]([a-z0-9-]*[a-z0-9])?$/
 const SERVICE_NAME = /^[a-z]([a-z0-9-]*[a-z0-9])?$/
 /** Firestore multi-region locations (`nam5`, `eur3`, `nam7`, ...), which are not Cloud Run regions. */
@@ -438,6 +440,8 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
   if (!str(config.name)) problems.push('`name` is required')
   else if (!INSTANCE_NAME.test(config.name)) {
     problems.push(`\`name\` must match ${INSTANCE_NAME} (got "${config.name}")`)
+  } else if (config.name.length > LABEL_VALUE_MAX) {
+    problems.push(`\`name\` must be at most ${LABEL_VALUE_MAX} characters, since it is the \`doc-sync-instance\` label value (got ${config.name.length})`)
   }
   if (!str(config.region)) problems.push('`region` is required')
   if (!str(config.service)) problems.push('`service` is required')
@@ -644,6 +648,14 @@ export function validateConfig(config: DocSyncConfig): ResolvedConfig {
         problems.push(
           `${label}: \`source\` has placeholder(s) {${extra.join('}, {')}} that \`target\` lacks; a collection-group aggregation would also count documents of other \`target\` parents. Use \`idParam\`, or a \`target\` without placeholders`,
         )
+      } else if (hasIdField && !isResolvable(source, target.params)) {
+        // The collection-group aggregation sees only the last collection ID, so a fixed document ID in `source` would be ignored.
+        const fixed = source.segments.find((s): s is { kind: 'literal'; id: string } => s.kind === 'literal')
+        if (fixed) {
+          problems.push(
+            `${label}: \`source\` has the fixed document ID "${fixed.id}", but a collection-group aggregation counts every "${source.collectionId}" collection regardless of its path. Use a \`source\` without fixed IDs, or a \`target\` whose placeholders resolve \`source\``,
+          )
+        }
       }
     }
     if (target && okTarget) writtenFields.push({ rule: label, target, field: a.targetField })

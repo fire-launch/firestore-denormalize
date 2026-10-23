@@ -69,6 +69,11 @@ describe('validateConfig', () => {
     expect(problemsOf({ ...base, name: 'Doc_Sync' })).toContainEqual(expect.stringContaining('`name` must match'))
   })
 
+  it('limits the instance name to 63 characters, the label value limit', () => {
+    expect(problemsOf({ ...base, name: 'd'.repeat(64) })).toContainEqual(expect.stringContaining('`name` must be at most 63 characters'))
+    expect(problemsOf({ ...base, name: 'd'.repeat(63) })).toEqual([])
+  })
+
   it('rejects duplicate connection names', () => {
     const c = base.rules[0] as Connection
     const problems = problemsOf({ ...base, rules: [c, { ...c, target: 'comment' }] })
@@ -261,6 +266,14 @@ describe('validateConfig', () => {
     expect(problemsOf({ ...base, rules: [agg] })).toContainEqual(expect.stringContaining('{uid} that `target` lacks'))
     // without placeholders on the target, the collection group is unambiguous
     expect(() => validateConfig({ ...base, rules: [{ ...agg, source: 'users/{uid}/likes', target: 'post' }] })).not.toThrow()
+  })
+
+  it('rejects an idField aggregate over a collection group whose source fixes a document ID', () => {
+    const agg = defineAggregate({ name: 'post-favs', source: 'users/{uid}/lists/fav/items', target: 'post', idField: 'postId', aggregate: 'count' as const, targetField: 'favCount' })
+    expect(problemsOf({ ...base, rules: [agg] })).toContainEqual(expect.stringContaining('fixed document ID "fav"'))
+    expect(problemsOf({ ...base, rules: [{ ...agg, source: 'orgs/acme/members/{m}/items' }] })).toContainEqual(expect.stringContaining('fixed document ID "acme"'))
+    // a fixed ID is fine when the source resolves to one collection
+    expect(() => validateConfig({ ...base, rules: [{ ...agg, source: 'lists/fav/items' }] })).not.toThrow()
   })
 
   it('no longer collides when two collections slugify the same way, thanks to the hash', () => {
