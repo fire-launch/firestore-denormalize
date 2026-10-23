@@ -192,6 +192,10 @@ export function setup(ctx: Context, opts: { runtimeServiceAccount?: string } = {
   log(`# 2/${total} Trigger service account`)
   if (exists(() => runner.read('gcloud', ['iam', 'service-accounts', 'describe', email, `--project=${project}`]))) {
     log(`  ${email} already exists, skipped`)
+  } else if (!email.endsWith(`@${project}.iam.gserviceaccount.com`)) {
+    throw new Error(
+      `service account ${email} does not exist, and \`setup\` only creates accounts in project "${project}". Create it in its own project first.`,
+    )
   } else {
     runner.mutate('gcloud', [
       'iam',
@@ -311,6 +315,23 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
   printSummary(ctx)
   log()
 
+  // Read the jobs before changing anything, so a missing Scheduler API fails the deploy before any trigger is touched.
+  const jobs = desiredJobs(config)
+  let existingJobs: ExistingJob[] = []
+  let jobsUnreadable: string | undefined
+  try {
+    const rawJobs = runner.read('gcloud', jobListArgs(config, project))
+    existingJobs = ownedJobs(JSON.parse(rawJobs || '[]') as ExistingJob[], config.name)
+  } catch (err) {
+    if (!(err instanceof CommandError)) throw err
+    if (jobs.length) {
+      if (SCHEDULER_DISABLED.test(err.stderr)) throw new Error('Cloud Scheduler API is not enabled; run `doc-sync setup` first')
+      throw err
+    }
+    // No scheduled rule: the list only finds jobs of removed rules to delete, so carry on without it.
+    jobsUnreadable = err.stderr.trim().split('\n')[0] ?? ''
+  }
+
   if (opts.deployFunction) {
     log(`# Deploy function ${opts.deployFunction}`)
     runner.mutate('firebase', ['deploy', '--only', `functions:${opts.deployFunction}`, `--project=${project}`])
@@ -336,25 +357,17 @@ export function deploy(ctx: Context, opts: { deployFunction?: string }): void {
     runner.mutate('gcloud', triggerDeleteArgs(config, project, name))
   }
 
-  const jobs = desiredJobs(config)
-  let existingJobs: ExistingJob[] = []
-  let schedulerDisabled = false
-  try {
-    const rawJobs = runner.read('gcloud', jobListArgs(config, project))
-    existingJobs = ownedJobs(JSON.parse(rawJobs || '[]') as ExistingJob[], config.name)
-  } catch (err) {
-    if (err instanceof CommandError && SCHEDULER_DISABLED.test(err.stderr)) schedulerDisabled = true
-    else throw err
-  }
-
   let jobPlan: JobPlan = { create: [], update: [], keep: [], remove: [] }
   if (jobs.length || existingJobs.length) {
     log()
     log('# Cloud Scheduler jobs (scheduled rules)')
   }
 
-  if (schedulerDisabled) {
-    if (jobs.length) log('  Cloud Scheduler API is not enabled; run `doc-sync setup` first.')
+  if (jobsUnreadable !== undefined) {
+    if (!SCHEDULER_DISABLED.test(jobsUnreadable)) {
+      log()
+      log(`  Could not list Cloud Scheduler jobs, so jobs of removed scheduled rules were not checked: ${jobsUnreadable}`)
+    }
   } else {
     let serviceUrl: string | undefined
     if (jobs.length) {
@@ -459,7 +472,7 @@ export async function run(ctx: Context, opts: { rule: string; fetchImpl?: FetchL
 }
 
 const NOT_FOUND = /NOT_FOUND|not found|cannot find|does not exist/i
-const SCHEDULER_DISABLED = /(has not been used|is not enabled|SERVICE_DISABLED|API .* not enabled|cloudscheduler\.googleapis\.com)/i
+const SCHEDULER_DISABLED = /(has not been used|is not enabled|SERVICE_DISABLED|API .* not enabled)/i
 
 /** Returns true when the read-only command succeeds, false when gcloud reports "not found". Any other failure (auth, permissions, ...) is rethrown. */
 function exists(read: () => string): boolean {

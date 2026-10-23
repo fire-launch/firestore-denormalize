@@ -2,7 +2,7 @@
  * Resolves the GCP project for CLI commands and names where it came from, so commands
  * that change real infrastructure can refuse to run against an implicit `gcloud` default.
  */
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 export type ProjectSource = 'flag' | 'env' | 'firebaserc' | 'gcloud' | 'emulator-default'
@@ -66,13 +66,12 @@ export function requireExplicitProject(resolved: ResolvedProject, command: strin
   )
 }
 
-/** Walks from `cwd` upward to the filesystem root looking for `.firebaserc`, reading `projects.default`. */
+/** Walks from `cwd` upward to the nearest `.firebaserc`, as the Firebase CLI does; an ambiguous or invalid one stops the walk too. */
 function readFirebaserc(cwd: string): string | undefined {
   let dir = cwd
   for (;;) {
     const candidate = join(dir, '.firebaserc')
-    const project = readFirebasercFile(candidate)
-    if (project) return project
+    if (existsSync(candidate)) return readFirebasercFile(candidate)
     const parent = dirname(dir)
     if (parent === dir) return undefined
     dir = parent

@@ -67,6 +67,23 @@ describe('setup', () => {
 })
 
 describe('setup errors', () => {
+  it('does not create a missing service account that belongs to another project', () => {
+    const foreign = { ...config, serviceAccount: 'sync@other-proj.iam.gserviceaccount.com' }
+    const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': notFound })
+    expect(() => setup({ ...ctx(runner), config: foreign })).toThrow(
+      'service account sync@other-proj.iam.gserviceaccount.com does not exist, and `setup` only creates accounts in project "my-proj". Create it in its own project first.',
+    )
+    expect(mutations.some((m) => m.includes('service-accounts create'))).toBe(false)
+  })
+
+  it('uses an existing service account of another project as is', () => {
+    const foreign = { ...config, serviceAccount: 'sync@other-proj.iam.gserviceaccount.com' }
+    const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': 'email: x', 'gcloud run services describe': 'docsync' })
+    setup({ ...ctx(runner), config: foreign })
+    expect(mutations.some((m) => m.includes('service-accounts create'))).toBe(false)
+    expect(mutations).toContain('gcloud projects add-iam-policy-binding my-proj --member=serviceAccount:sync@other-proj.iam.gserviceaccount.com --role=roles/eventarc.eventReceiver --condition=None --format=none')
+  })
+
   it('does not treat auth/permission failures as "not found"', () => {
     const { runner, mutations } = fakeRunner({ 'gcloud iam service-accounts describe': authError })
     expect(() => setup(ctx(runner))).toThrow(/auth tokens/)
@@ -315,14 +332,27 @@ describe('validate', () => {
 })
 
 describe('deploy with scheduled rules', () => {
+  const dailyLikes = defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })
   const scheduled = validateConfig({
     name: 'doc-sync',
     region: 'asia-northeast1',
     service: 'docsync',
     serviceAccount: 'doc-sync-trigger',
-    rules: [defineAggregate({ name: 'daily-likes', source: 'post/{postId}/like', target: 'post', idParam: 'postId', aggregate: 'count', targetField: 'likeCount', schedule: '0 3 * * *' })],
+    rules: [dailyLikes],
   })
   const sctx = (runner: Runner): Context => ({ ...ctx(runner), config: scheduled })
+  // an event-driven rule next to the scheduled one, so a deploy would also create a trigger
+  const mixed = validateConfig({
+    name: 'doc-sync',
+    region: 'asia-northeast1',
+    service: 'docsync',
+    serviceAccount: 'doc-sync-trigger',
+    rules: [
+      defineConnection({ name: 'a', source: 'category', target: 'post', idField: 'categoryId', fields: ['name'], targetField: 'category', onSourceDelete: 'setNull' }),
+      dailyLikes,
+    ],
+  })
+  const mctx = (runner: Runner): Context => ({ ...ctx(runner), config: mixed })
 
   it('creates the job once the service URL is known, and no trigger for a scheduled-only collection', () => {
     const { runner, mutations } = fakeRunner({
@@ -413,15 +443,31 @@ describe('deploy with scheduled rules', () => {
     ])
   })
 
-  it('treats a disabled Cloud Scheduler API as no jobs and hints at `doc-sync setup`', () => {
+  it('fails when a rule is scheduled and the Cloud Scheduler API is disabled', () => {
+    const disabled = new CommandError('gcloud', 1, 'ERROR: (gcloud.scheduler.jobs.list) FAILED_PRECONDITION: Cloud Scheduler API has not been used in project my-proj before or it is disabled')
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': disabled })
+    expect(() => deploy(mctx(runner), {})).toThrow('Cloud Scheduler API is not enabled; run `doc-sync setup` first')
+    expect(mutations).toEqual([]) // fails before any trigger is changed
+    // without scheduled rules there are no jobs to keep, so a disabled API is fine
+    const plain = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': disabled })
+    expect(() => deploy(ctx(plain.runner), {})).not.toThrow()
+  })
+
+  it('does not mistake a permission error naming the Cloud Scheduler API for a disabled API', () => {
+    const denied = new CommandError(
+      'gcloud',
+      1,
+      "ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED: The caller does not have permission. This command is authenticated as me@example.com\n- '@type': type.googleapis.com/google.rpc.ErrorInfo\n  domain: cloudscheduler.googleapis.com\n  reason: IAM_PERMISSION_DENIED",
+    )
+    const { runner, mutations } = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': denied })
+    expect(() => deploy(mctx(runner), {})).toThrow(/PERMISSION_DENIED/)
+    expect(mutations).toEqual([])
+    // without scheduled rules the list only serves cleanup, so the deploy goes on and says what it skipped
     const lines: string[] = []
-    const { runner, mutations } = fakeRunner({
-      'gcloud eventarc triggers list': '[]',
-      'gcloud scheduler jobs list': new CommandError('gcloud', 1, 'ERROR: (gcloud.scheduler.jobs.list) FAILED_PRECONDITION: Cloud Scheduler API has not been used in project my-proj before or it is disabled'),
-    })
-    deploy({ ...sctx(runner), log: (l = '') => lines.push(l) }, {})
-    expect(mutations.filter((m) => m.startsWith('gcloud scheduler'))).toEqual([])
-    expect(lines.join('\n')).toContain('run `doc-sync setup` first')
+    const plain = fakeRunner({ 'gcloud eventarc triggers list': '[]', 'gcloud scheduler jobs list': denied })
+    deploy({ ...ctx(plain.runner), log: (l = '') => lines.push(l) }, {})
+    expect(plain.mutations.some((m) => m.startsWith('gcloud eventarc triggers create'))).toBe(true)
+    expect(lines.join('\n')).toContain('Could not list Cloud Scheduler jobs, so jobs of removed scheduled rules were not checked: ERROR: (gcloud.scheduler.jobs.list) PERMISSION_DENIED')
   })
 
   it('enables the Cloud Scheduler API in setup only when a rule is scheduled', () => {

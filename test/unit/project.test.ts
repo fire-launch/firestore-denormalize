@@ -91,6 +91,22 @@ describe('.firebaserc lookup', () => {
     expect(resolved?.source).not.toBe('firebaserc')
     expect(resolved).toEqual({ project: 'gcloud-proj', source: 'gcloud' })
   })
+
+  it('stops at the nearest .firebaserc even when it does not name one project', () => {
+    dir = mkdtempSync(join(tmpdir(), 'doc-sync-rc-'))
+    writeFileSync(join(dir, '.firebaserc'), JSON.stringify({ projects: { default: 'outer-proj' } }))
+    const ambiguous = join(dir, 'ambiguous')
+    const invalid = join(dir, 'invalid')
+    mkdirSync(ambiguous)
+    mkdirSync(invalid)
+    writeFileSync(join(ambiguous, '.firebaserc'), JSON.stringify({ projects: { default: 'a', staging: 'b' } }))
+    writeFileSync(join(invalid, '.firebaserc'), 'not json')
+
+    for (const cwd of [ambiguous, invalid]) {
+      const resolved = resolveProject(inputs({ cwd, gcloudDefault: () => 'gcloud-proj' }))
+      expect(resolved).toEqual({ project: 'gcloud-proj', source: 'gcloud' })
+    }
+  })
 })
 
 describe('describeProjectSource', () => {
